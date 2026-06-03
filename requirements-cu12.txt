@@ -1,0 +1,9 @@
+# CUDA 12 support for faster-whisper / CTranslate2
+# Install after base requirements: pip install -r requirements-cu12.txt
+# Requires CUDA 12.x toolkit and cuDNN 9.x
+
+ctranslate2>=4.0,<5
+nvidia-cublas-cu12>=12.0
+nvidia-cuda-runtime-cu12>=12.0
+nvidia-cuda-nvrtc-cu12>=12.0
+nvidia-cudnn-cu12>=9.0
