@@ -38,7 +38,7 @@ runs/
 
 # Config (with API keys)
 config.yaml
-clip_dictionary.json
+streamer_dictionary.json
 
 # OS
 .DS_Store

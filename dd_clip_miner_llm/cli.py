@@ -201,7 +201,7 @@ def _generate_config_yaml() -> str:
         "  concat_videos: false  # 合并目录下的多个视频后再处理",
         "  clip_naming:",
         "    enabled: false",
-        "    dictionary_path: clip_dictionary.json",
+        "    dictionary_path: streamer_dictionary.json",
         "    default_streamer: StreamerName",
         "    min_score: 0.65",
         "    apply_to:",

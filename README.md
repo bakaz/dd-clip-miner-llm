@@ -38,10 +38,10 @@
 | `config.example.yaml` | 配置模板（复制为 `config.yaml`） |
 | `config.deepseek.example.yaml` | DeepSeek 示例配置 |
 | `config.daily-summary.example.yaml` | 仅当天总结示例 |
-| `clip_dictionary.example.json` | 主播词典模板（复制为 `clip_dictionary.json`） |
+| `streamer_dictionary.example.json` | 主播词典模板（复制为 `streamer_dictionary.json`） |
 | `rename_drag_drop.bat` | 切片拖拽重命名（后处理） |
 
-以下文件在 `.gitignore` 中，**勿提交**：`config.yaml`、`clip_dictionary.json`、`runs/`。
+以下文件在 `.gitignore` 中，**勿提交**：`config.yaml`、`streamer_dictionary.json`、`runs/`。
 
 ## 安装
 
@@ -189,7 +189,7 @@ python -m dd_clip_miner_llm manual-cut "D:\runs\某次运行" --config config.ya
 ### 主播词典（JSON）
 
 ```powershell
-copy clip_dictionary.example.json clip_dictionary.json
+copy streamer_dictionary.example.json streamer_dictionary.json
 ```
 
 ```json
@@ -353,7 +353,7 @@ output:
   concat_videos: false
   clip_naming:
     enabled: false
-    dictionary_path: clip_dictionary.json
+    dictionary_path: streamer_dictionary.json
     default_streamer: StreamerName
     min_score: 0.65
     apply_to: [song]
@@ -482,7 +482,7 @@ pip install -r requirements-cu12.txt
 
 ### `clip_naming` 未生效
 
-确认 `enabled: true`、词典路径、`clip_dictionary.json` 存在、输入路径含 `2026_06_03` 等形式日期、`apply_to` 含当前类型。
+确认 `enabled: true`、词典路径、`streamer_dictionary.json` 存在、输入路径含 `2026_06_03` 等形式日期、`apply_to` 含当前类型。
 
 ## 与 dd-song-miner-llm 的兼容性
 

@@ -17,7 +17,7 @@ YYYYMMDD_SEP_RE = re.compile(r"(\d{4})[-_](\d{2})[-_](\d{2})")
 
 
 @dataclass(frozen=True, slots=True)
-class ClipDictionaryEntry:
+class StreamerDictionaryEntry:
     streamer: str
     aliases: tuple[str, ...] = ()
 
@@ -52,27 +52,29 @@ def get_clip_naming_settings(config: dict[str, Any]) -> dict[str, Any]:
         apply_to = ["song"]
     return {
         "enabled": bool(settings.get("enabled", False)),
-        "dictionary_path": str(settings.get("dictionary_path") or "").strip(),
+        "dictionary_path": str(
+            settings.get("dictionary_path") or settings.get("streamer_dictionary_path") or ""
+        ).strip(),
         "default_streamer": str(settings.get("default_streamer") or "StreamerName").strip(),
         "min_score": float(settings.get("min_score", 0.65)),
         "apply_to": apply_to,
     }
 
 
-def load_clip_dictionary(path: str | Path) -> tuple[dict[str, Any], list[ClipDictionaryEntry]]:
+def load_streamer_dictionary(path: str | Path) -> tuple[dict[str, Any], list[StreamerDictionaryEntry]]:
     dictionary_path = Path(path)
     if not dictionary_path.exists():
-        raise FileNotFoundError(f"Clip dictionary not found: {dictionary_path}")
+        raise FileNotFoundError(f"Streamer dictionary not found: {dictionary_path}")
 
     data = json.loads(dictionary_path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
-        raise ValueError("Clip dictionary JSON must be an object")
+        raise ValueError("Streamer dictionary JSON must be an object")
 
     raw_entries = data.get("entries") or data.get("streamers") or []
     if not isinstance(raw_entries, list):
-        raise ValueError("Clip dictionary 'entries' must be a list")
+        raise ValueError("Streamer dictionary 'entries' must be a list")
 
-    entries: list[ClipDictionaryEntry] = []
+    entries: list[StreamerDictionaryEntry] = []
     for item in raw_entries:
         if not isinstance(item, dict):
             continue
@@ -82,7 +84,7 @@ def load_clip_dictionary(path: str | Path) -> tuple[dict[str, Any], list[ClipDic
         aliases = _split_aliases(item.get("aliases") or item.get("keywords") or item.get("match") or [])
         if streamer not in aliases:
             aliases = [streamer, *aliases]
-        entries.append(ClipDictionaryEntry(streamer=streamer, aliases=tuple(aliases)))
+        entries.append(StreamerDictionaryEntry(streamer=streamer, aliases=tuple(aliases)))
     return data, entries
 
 
@@ -129,13 +131,13 @@ def resolve_clip_naming_profile(
         )
 
     resolved_path = _resolve_dictionary_path(dictionary_path, config_path)
-    dictionary_meta, entries = load_clip_dictionary(resolved_path)
+    dictionary_meta, entries = load_streamer_dictionary(resolved_path)
     default_streamer = str(
         dictionary_meta.get("default_streamer") or settings["default_streamer"]
     ).strip()
     min_score = float(dictionary_meta.get("min_score", settings["min_score"]))
 
-    best_entry: ClipDictionaryEntry | None = None
+    best_entry: StreamerDictionaryEntry | None = None
     best_alias = ""
     best_score = 0.0
 

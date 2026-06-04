@@ -659,7 +659,7 @@ class TestClipNaming:
 
     def test_resolve_profile_from_dictionary(self):
         with tempfile.TemporaryDirectory() as tmp:
-            dict_path = Path(tmp) / "clip_dictionary.json"
+            dict_path = Path(tmp) / "streamer_dictionary.json"
             dict_path.write_text(
                 json.dumps(
                     {
