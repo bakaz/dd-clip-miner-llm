@@ -15,47 +15,54 @@
 
 - **可插拔识别器架构**：每种内容类型独立实现，易于扩展
 - **多内容类型支持**：歌曲、对话、高能、搞笑、下头、当天总结
-- **智能 LLM 调用**：支持 reasoning followup、工具调用、JSON 修复、歌词搜索
-- **歌曲遗漏复查**：首轮识别后对未覆盖 ASR 区间二次检查
-- **断点续传**：支持复用上次运行的音频、ASR、LLM 结果
-- **批量处理**：目录扫描、多视频拼接后处理
-- **切片导出命名**：可选 JSON 主播词典 + 路径日期，导出 `【主播】歌名-歌手-YYMMDD`
-- **手动重切**：从编辑后的 CSV 重新切割片段
-- **下头片段短标题**：`title` 用于文件名，限制少于 20 个中文字
+- **智能 LLM 调用**：reasoning followup、工具调用、JSON 修复、歌词搜索（DuckDuckGo）
+- **歌曲遗漏复查**：首轮识别后对未覆盖 ASR 区间二次送 LLM 检查
+- **断点续传**：同一输入视频再次运行时复用 `01_audio`、`02_asr`、各类型 LLM 结果（见 `progress.json`）
+- **批量处理**：目录扫描；可选多视频拼接后统一处理
+- **切片导出命名**：JSON 主播词典匹配 + 路径解析 YYMMDD → `【主播】歌名-歌手-YYMMDD`
+- **手动重切**：编辑 CSV 后重新导出片段
+- **下头片段短标题**：`title` 作为文件名，少于 20 个中文字
 
 ## 工作流程
 
-1. 用 FFmpeg 从视频提取 16 kHz 单声道 WAV
-2. 用 faster-whisper 生成带时间戳的 ASR segment
-3. 通过识别器将 transcript 交给 LLM 识别各类型内容
-4. 根据识别结果切割音频/视频片段
-5. 输出 CSV/JSON 报告（可人工校正后 `manual-cut`）
+1. FFmpeg 提取 16 kHz 单声道 WAV
+2. faster-whisper 转写为带时间戳的 segment
+3. 各识别器将 transcript 送 LLM 标注片段
+4. 按时间切割音频/视频到 `03_clips/`
+5. 生成 `04_reports/` 下 CSV/JSON，可人工修改后 `manual-cut`
+
+## 仓库文件
+
+| 文件 | 说明 |
+|------|------|
+| `config.example.yaml` | 配置模板（复制为 `config.yaml`） |
+| `config.deepseek.example.yaml` | DeepSeek 示例配置 |
+| `config.daily-summary.example.yaml` | 仅当天总结示例 |
+| `clip_dictionary.example.json` | 主播词典模板（复制为 `clip_dictionary.json`） |
+| `rename_drag_drop.bat` | 切片拖拽重命名（后处理） |
+
+以下文件在 `.gitignore` 中，**勿提交**：`config.yaml`、`clip_dictionary.json`、`runs/`。
 
 ## 安装
 
-### 1. 准备 Python
+### 1. Python
 
-建议使用 Python 3.10 到 3.12。Windows 下推荐在项目目录创建虚拟环境：
+建议 Python 3.10–3.12：
 
 ```powershell
-cd D:\opencode\dd-clip-miner-llm
+cd path\to\dd-clip-miner-llm
 py -3.12 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -U pip
 pip install -r requirements.txt
-```
-
-可编辑安装：
-
-```powershell
 pip install -e .
 ```
 
-开发依赖（测试、lint）：`pip install -r requirements-dev.txt`
+开发与测试：`pip install -r requirements-dev.txt`
 
-### 2. 准备 FFmpeg
+### 2. FFmpeg
 
-程序会优先使用系统 PATH 里的 `ffmpeg` / `ffprobe`。若无系统 FFmpeg，会回退到 `imageio-ffmpeg` 自带二进制。
+优先使用系统 PATH 中的 `ffmpeg` / `ffprobe`；否则回退 `imageio-ffmpeg` 自带二进制。
 
 ```powershell
 winget install Gyan.FFmpeg
@@ -63,27 +70,36 @@ ffmpeg -version
 ffprobe -version
 ```
 
-### 3. NVIDIA CUDA 可选加速
+无 `ffprobe` 时会尝试用 `ffmpeg -i` 解析时长，但建议安装完整 FFmpeg。
+
+### 3. CUDA 可选（faster-whisper GPU）
 
 ```powershell
 pip install -r requirements-cu12.txt
 ```
 
-若缺少 `cublas64_12.dll`，程序会自动回退 CPU int8（较慢）。
+当前 CTranslate2 / faster-whisper 依赖 CUDA 12 运行时（`cublas64_12.dll`）。本机仅 CUDA 13 时仍需 CUDA 12 DLL；缺失时自动回退 CPU int8。
 
-### 4. 准备 LLM Key
+### 4. LLM API Key
 
 ```powershell
+copy config.example.yaml config.yaml
 python -m dd_clip_miner_llm init-config --out config.yaml
 ```
 
-推荐用环境变量，不要把真实 key 提交到仓库：
+推荐环境变量，勿在仓库中写明文 key：
 
 ```powershell
 $env:LLM_API_KEY="<your-api-key>"
 ```
 
-`config.yaml`、`clip_dictionary.json` 已在 `.gitignore` 中。
+或写入用户环境变量：
+
+```powershell
+[Environment]::SetEnvironmentVariable("LLM_API_KEY", "<your-api-key>", "User")
+```
+
+DeepSeek 等可参考 `config.deepseek.example.yaml`，设置对应 `api_key_env`（如 `DEEPSEEK_API_KEY`）。
 
 ## 快速开始
 
@@ -91,21 +107,33 @@ $env:LLM_API_KEY="<your-api-key>"
 
 ```powershell
 python -m dd_clip_miner_llm run "D:\videos\live.mp4" --config config.yaml
-```
-
-### 指定输出目录
-
-```powershell
 python -m dd_clip_miner_llm run "D:\videos\live.mp4" --config config.yaml --out "D:\runs\live_001"
 ```
 
-### 只识别特定类型
+### 只识别部分类型
 
 ```powershell
 python -m dd_clip_miner_llm run "D:\videos\live.mp4" --config config.yaml --content-types song
-python -m dd_clip_miner_llm run "D:\videos\live.mp4" --config config.yaml --content-types song,dialogue,cringe
+python -m dd_clip_miner_llm run "D:\videos\live.mp4" --config config.yaml --content-types dialogue
+python -m dd_clip_miner_llm run "D:\videos\live.mp4" --config config.yaml --content-types highlight
+python -m dd_clip_miner_llm run "D:\videos\live.mp4" --config config.yaml --content-types funny
+python -m dd_clip_miner_llm run "D:\videos\live.mp4" --config config.yaml --content-types cringe
+python -m dd_clip_miner_llm run "D:\videos\live.mp4" --config config.yaml --content-types song,dialogue
 python -m dd_clip_miner_llm run "D:\videos\live.mp4" --config config.daily-summary.example.yaml
 ```
+
+### 常用 run 参数
+
+| 参数 | 说明 |
+|------|------|
+| `--content-types` | 逗号分隔，覆盖配置中的 `content_types` |
+| `--asr-model` / `--asr-language` | 覆盖 ASR |
+| `--llm-model` / `--llm-api-key` / `--llm-base-url` | 覆盖 LLM |
+| `--padding-before` / `--padding-after` | 歌曲 padding（秒），兼容 dd-song-miner-llm |
+| `--no-video-clips` | 不导出视频 |
+| `--export-audio` / `--export-video` | 覆盖扩展名 |
+| `--video-codec` | `copy` / `auto` / `nv` / `intel` / `amd` / `cpu` |
+| `--audio-bitrate-kbps` | 音频码率 |
 
 ### 批量处理
 
@@ -113,51 +141,56 @@ python -m dd_clip_miner_llm run "D:\videos\live.mp4" --config config.daily-summa
 python -m dd_clip_miner_llm batch-run "D:\input" --config config.yaml --work-root "D:\work" --result-root "D:\results"
 ```
 
-### 批量处理（目录内多视频合并）
+每个视频所在文件夹可含 `.dd_clip_miner_done.json` 标记已完成项，失败项下次会重试。
 
-配置 `output.concat_videos: true` 或使用：
+### 批量合并（同目录多段录像）
+
+`config.yaml` 中 `output.concat_videos: true`，或：
 
 ```powershell
 python -m dd_clip_miner_llm batch-run "D:\input" --config config.yaml --work-root "D:\work" --result-root "D:\results" --concat
 ```
 
-合并策略概要：
+合并策略：
 
 1. 轻量探测可能损坏的 H.264 片段
-2. 健康源优先流 copy；坏包则定点重编码（nv > intel > amd > cpu）
-3. 校验拼接后时长；staging 到 `00_input/input_*.mp4`，完成后清理 `concat/` 中间文件
+2. 源健康时优先流 copy；坏包则定点重编码（nv > intel > amd > cpu）
+3. 校验拼接后总时长
+4. 合并结果 stage 到 `00_input/input_*.mp4`；`manual-cut` 从 `manifest.json` 读输入；处理完成后清理 `concat/` 中间文件
 
 ### 手动重切
 
-编辑 `04_reports/song/songs.csv`（或其它类型对应 CSV）中的 `start` / `end` 后：
+编辑报告 CSV 中的 `start` / `end`（时间码 `HH:MM:SS` 或秒数）：
+
+- 推荐路径：`04_reports/song/songs.csv`
+- 兼容旧路径：`04_reports/songs.csv`
 
 ```powershell
 python -m dd_clip_miner_llm manual-cut "D:\runs\某次运行" --config config.yaml
+python -m dd_clip_miner_llm manual-cut "D:\runs\某次运行" --config config.yaml --csv "D:\runs\某次运行\04_reports\song\songs.csv"
 python -m dd_clip_miner_llm manual-cut "D:\runs\某次运行" --config config.yaml --content-type dialogue
 ```
 
-输出默认在 `05_manual/`。若启用了 `clip_naming`，重切时同样应用命名规则。
+输出默认在 `05_manual/`。启用 `clip_naming` 时重切命名规则与 `run` 一致。
 
 ## 切片导出命名
 
-用于主播内容切片发布：通过 **JSON 外挂词典** 匹配主播名，从 **输入路径** 解析日期，生成导出文件名。CSV/JSON 报告中的 `title`、`artist` **不会被改写**。
+面向主播切片发布：**只改导出文件名**，不改报告里的 `title` / `artist`。
 
-### 文件名格式
+### 文件名
 
-| 模式 | 示例 |
+| 条件 | 示例 |
 |------|------|
-| 启用 `clip_naming`（默认作用于 `song`） | `【主播名】晴天-周杰伦-260603.mp4` |
-| 未启用或路径无合法日期 | `001-晴天-周杰伦.mp4` |
+| 启用 `clip_naming` 且路径含合法日期（默认 `apply_to: [song]`） | `【主播名】晴天-周杰伦-260603.mp4` |
+| 未启用或路径无 YYMMDD | `001-晴天-周杰伦.mp4` |
 
-无歌手时：`【主播名】标题-260603.mp4` 或 `001-标题.mp4`（`-` 两侧无空格）。
+无歌手：`【主播名】标题-260603.mp4` 或 `001-标题.mp4`。分隔符 `-` **两侧无空格**。
 
-### 准备词典
+### 主播词典（JSON）
 
 ```powershell
 copy clip_dictionary.example.json clip_dictionary.json
 ```
-
-`clip_dictionary.json` 仅放本地，不要提交仓库。示例结构：
 
 ```json
 {
@@ -172,54 +205,41 @@ copy clip_dictionary.example.json clip_dictionary.json
 }
 ```
 
-词典 **只包含** `streamer` 与 `aliases`（识别词）。日期 **不在词典中配置**。
+- 词典仅有 `streamer` + `aliases`，**不含日期**
+- `dictionary_path` 相对 `config.yaml` 所在目录
+- 命中：路径片段与 `aliases` 相似度最高且 `score >= min_score`
+- 未命中：使用 `default_streamer`
+- 运行后写入 `clip_naming.json`（`streamer`、`date`、`score`、`matched_alias`）
 
-### 日期解析（YYMMDD）
+### 日期（YYMMDD）
 
-仅从视频路径、父目录名等文本中严格提取，例如：
+**仅**从视频路径/父目录名解析，例如：
 
 - `2026_06_03` → `260603`
-- 路径中的独立六位数字 `250603`（校验月日合法）
+- 独立六位 `250603`（校验月日）
 
-路径中找不到合法 YYMMDD 时，会警告并回退为 `001-歌名-歌手` _legacy 命名。
+找不到合法日期时控制台警告，并回退 legacy 命名 `001-歌名-歌手`。
 
-### 配置
-
-```yaml
-output:
-  clip_naming:
-    enabled: true
-    dictionary_path: clip_dictionary.json   # 相对 config.yaml 所在目录
-    default_streamer: StreamerName          # 词典未命中时的主播名
-    min_score: 0.65                       # 路径与 aliases 的相似度阈值
-    apply_to:
-      - song                              # 也可列出 dialogue 等类型
-```
-
-运行后在输出目录生成 `clip_naming.json`，记录本次解析的 `streamer`、`date`、`score`、`matched_alias`。
-
-### 相似度（score）说明
-
-将词典里每条 `aliases` 与路径各片段做文本相似度（规范化后比较，支持子串与 `SequenceMatcher`），取全局最高分。`score >= min_score` 时采用该条的 `streamer`，否则用 `default_streamer`。
-
-- 误匹配多：提高 `min_score`（如 `0.75`）
-- 经常匹配不上：降低阈值或补充 `aliases`
-
-### 路径建议
-
-便于同时命中主播与日期，推荐目录结构类似：
+推荐目录：
 
 ```text
 D:\archive\房间号_主播名\2026_06_03\part1.mp4
 ```
 
-### 拖拽重命名（后处理）
+### score 调参
 
-若未启用流水线命名，可将切片拖到 `rename_drag_drop.bat`，转为 `【主播】歌名-歌手-YYMMDD.mp4`。脚本默认识别 `001-歌名-歌手` 或带空格的旧格式；主播与日期在 `scripts\rename_drag_drop.py` 或环境变量 `CLIP_RENAMER_STREAMER` / `CLIP_RENAMER_DATE` 中配置。
+相似度为规范化文本比较（完全相等、子串、或 `SequenceMatcher` 比例）。误匹配提高 `min_score`；漏匹配降低阈值或增加 `aliases`。
+
+### 拖拽重命名（可选后处理）
+
+未走流水线命名时，将视频拖到 `rename_drag_drop.bat` → `【主播】歌名-歌手-YYMMDD.mp4`。
+
+- 默认识别 `001-歌名-歌手`；仍兼容带空格的旧名 `001 - 歌名 - 歌手`
+- 主播/日期：`scripts/rename_drag_drop.py` 默认值，或 `CLIP_RENAMER_STREAMER`、`CLIP_RENAMER_DATE`（`mtime` = 文件修改日期的 YYMMDD）
 
 ## 配置文件
 
-完整示例见 `config.example.yaml`、`config.deepseek.example.yaml`。核心结构：
+复制 `config.example.yaml` 为 `config.yaml` 后修改。结构与示例一致，要点如下。
 
 ```yaml
 audio:
@@ -227,22 +247,33 @@ audio:
   channels: 1
 
 asr:
-  model: small
-  device: auto
-  compute_type: default
-  language: null
+  model: small               # tiny | base | small | medium | large-v3
+  device: auto               # auto | cpu | cuda
+  compute_type: default      # default | float16 | int8
+  language: null             # null=自动 | zh | ja | en
   beam_size: 5
   vad_filter: true
+  initial_prompt: null
 
 llm:
   api_key: null
   api_key_env: LLM_API_KEY
   base_url: null
   model: gpt-4o
+  temperature: 0.1
+  max_tokens: 8192
+  max_completion_tokens: null
+  retry_empty_with_reasoning: true
+  reasoning_followup_rounds: 5
+  reasoning_followup_max_tokens: 32768
+  batch_size: null           # null=整段；正整数=按 segment 分批
   use_tools: true
+  verify_with_search: true
   json_fix_rounds: 3
+  fallbacks: []
 
-padding:                        # 兼容旧项目顶层 padding，会同步到 song.padding
+# 顶层 padding 会合并到 song.padding（兼容 dd-song-miner-llm）
+padding:
   before_seconds: 15.0
   after_seconds: 15.0
   after_next_asr_end_guard_seconds: 2.0
@@ -259,7 +290,12 @@ content_types:
 
 song:
   enabled: true
-  padding: { ... }
+  padding:
+    before_seconds: 15.0
+    after_seconds: 15.0
+    after_next_asr_end_guard_seconds: 2.0
+    min_song_seconds: 30.0
+    merge_gap_seconds: 35.0
   missed_recheck:
     enabled: true
     batch_size: 500
@@ -269,21 +305,50 @@ dialogue:
   enabled: true
   min_duration: 10.0
   max_duration: 300.0
+  min_confidence: 0.6
+  merge_gap_seconds: 10.0
   tags: [搞笑, 吐槽, 名场面, 金句, 互动, 高能]
 
-highlight: { enabled: true, min_duration: 5.0, ... }
-funny: { enabled: true, min_duration: 5.0, ... }
-cringe: { enabled: true, min_duration: 5.0, max_duration: 120.0, ... }
+highlight:
+  enabled: true
+  min_duration: 5.0
+  max_duration: 120.0
+  min_confidence: 0.6
+  merge_gap_seconds: 15.0
+
+funny:
+  enabled: true
+  min_duration: 5.0
+  max_duration: 180.0
+  min_confidence: 0.6
+  merge_gap_seconds: 15.0
+
+cringe:
+  enabled: true
+  min_duration: 5.0
+  max_duration: 120.0
+  min_confidence: 0.6
+  merge_gap_seconds: 15.0
 
 daily_summary:
   enabled: false
   summary_only: true
+  language: zh-CN
+  title: 当天直播内容总结
+  max_level1_items: 6
+  max_level2_per_level1: 5
+  max_level3_per_level2: 4
+  include_timeline: true
+  include_quotes: true
+  include_open_questions: true
 
 output:
   video_clips: true
   audio_segments: true
   audio_extension: mp3
-  video_codec: copy
+  audio_bitrate_kbps: 320
+  video_extension: mp4
+  video_codec: copy              # copy | auto | 见下方 FFmpeg 节
   match_context_segments: 10
   concat_videos: false
   clip_naming:
@@ -294,23 +359,28 @@ output:
     apply_to: [song]
 ```
 
+歌曲 padding 说明：`before_seconds` / `after_seconds` 在 ASR 段边界外扩展；`after_next_asr_end_guard_seconds` 限制与相邻段重叠；过短片段由 `min_song_seconds` 过滤；相邻同歌名由 `merge_gap_seconds` 合并。
+
 ## CLI 命令
 
 | 命令 | 说明 |
 |------|------|
-| `run` | 处理单个视频 |
-| `batch-run` | 批量扫描目录 |
+| `run` | 单视频流水线 |
+| `batch-run` | 批量目录 |
 | `manual-cut` | 从 CSV 重切 |
-| `init-config` | 生成默认 `config.yaml` |
-| `ffmpeg-info` | 查看 GPU / 编码器 |
+| `init-config` | 生成默认 YAML |
+| `ffmpeg-info` | GPU / 硬件编码器探测 |
 
 ## 识别器架构
 
 ```
 dd_clip_miner_llm/
-├── clip_naming.py       # 切片导出命名
-├── pipeline.py          # 主流水线
+├── clip_naming.py
+├── pipeline.py
+├── batch.py / manual.py / merger.py / report.py
 └── recognizers/
+    ├── __init__.py    # @register 自动发现
+    ├── base.py
     ├── song.py
     ├── dialogue.py
     ├── highlight.py
@@ -319,39 +389,72 @@ dd_clip_miner_llm/
     └── daily_summary.py
 ```
 
-添加自定义识别器：在 `recognizers/` 新建模块，继承 `BaseRecognizer`，使用 `@register` 装饰器注册。
+### 添加自定义识别器
+
+1. 在 `recognizers/` 新建 `my_type.py`
+2. 继承 `BaseRecognizer`，实现 `name`、`build_prompt`、`parse_response`（可选覆盖）
+3. 使用 `@register` 注册
+
+```python
+from . import register
+from .base import BaseRecognizer
+
+@register
+class MyRecognizer(BaseRecognizer):
+    @property
+    def name(self) -> str:
+        return "my_type"
+
+    def build_prompt(self, segments, batch_start, config) -> str:
+        ...
+```
+
+在 `content_types` 中启用对应类型后即可被流水线调用。
 
 ## 输出结构
 
 ```
-runs/xxx/
-├── 00_input/
+runs/<run_name>/
+├── 00_input/              # staging 后的输入视频
 ├── 01_audio/source.wav
 ├── 02_asr/
 │   ├── transcript.json
-│   └── llm/{content_type}/
+│   └── llm/<content_type>/
 │       ├── matches.json
 │       ├── match_context.csv
+│       ├── match_context.json
 │       └── llm_batch_*.json
 ├── 03_clips/
-│   ├── audio/{content_type}/
-│   └── video/{content_type}/
-├── 04_reports/{content_type}/
-│   ├── songs.csv / songs.json        # song 类型
+│   ├── audio/<content_type>/
+│   └── video/<content_type>/
+├── 04_reports/<content_type>/
+│   ├── songs.csv / songs.json      # song
+│   ├── dialogues.csv               # dialogue
 │   └── ...
-├── clip_naming.json                  # 启用 clip_naming 时
+├── clip_naming.json       # 启用 clip_naming 时
 ├── manifest.json
-└── progress.json
+├── progress.json          # 断点续传
+└── 05_manual/             # manual-cut 输出（可选）
 ```
 
-`daily_summary` 仅写入报告，不生成 `03_clips` 片段。
+`daily_summary` 只写报告，不生成 `03_clips`。
 
-## FFmpeg 编码策略
+## FFmpeg 编码
 
-`output.video_codec: copy` 为默认（不重编码、最快）。`auto` 在 copy 失败后依次尝试 `h264_nvenc` → `h264_qsv` → `h264_amf` → `libx264`。
+默认 `output.video_codec: copy`（不重编码、最快）。
+
+`auto` 或切割失败时依次尝试：
+
+| 值 | 编码器 |
+|----|--------|
+| `nv` | `h264_nvenc` |
+| `intel` | `h264_qsv` |
+| `amd` | `h264_amf` |
+| `cpu` | `libx264` |
+| `copy` | 流复制 |
 
 ```powershell
-python -m dd_clip_miner_llm run video.mp4 --video-codec nv
+python -m dd_clip_miner_llm run video.mp4 --config config.yaml --video-codec nv
 python -m dd_clip_miner_llm ffmpeg-info
 ```
 
@@ -359,7 +462,7 @@ python -m dd_clip_miner_llm ffmpeg-info
 
 ### `Binary not found: ffprobe`
 
-安装完整 FFmpeg 并确认 `ffprobe` 在 PATH 中。
+安装完整 FFmpeg，确认 `ffprobe` 在 PATH。
 
 ### `cublas64_12.dll is not found`
 
@@ -367,29 +470,30 @@ python -m dd_clip_miner_llm ffmpeg-info
 pip install -r requirements-cu12.txt
 ```
 
-### FFmpeg 中文/日文路径乱码
+仍失败则使用 CPU 回退（较慢）。
 
-使用 PowerShell 7 / Windows Terminal；必要时用 `batch-run` 扫描目录，避免命令行参数乱码。
+### 中文/日文路径乱码
 
-### LLM 返回 0 条结果
+使用 PowerShell 7 / Windows Terminal；程序会 staging 非 ASCII 路径。若命令行参数已乱码，改用 `batch-run` 扫描目录。
 
-检查 `02_asr/llm/{type}/llm_batch_*.json`、`matches.json`；确认 API key、`base_url`、网络。歌曲过少时调整 `min_song_seconds`、`merge_gap_seconds`。
+### LLM 返回 0 条
+
+查看 `02_asr/llm/<type>/llm_batch_*.json`、`matches.json`。检查 key、`base_url`、网络。歌曲过少时调 `song.padding.min_song_seconds`、`merge_gap_seconds`。
 
 ### `clip_naming` 未生效
 
-1. `output.clip_naming.enabled: true`
-2. `clip_dictionary.json` 路径正确（相对 `config.yaml`）
-3. 输入路径含合法日期（如 `2026_06_03`）
-4. `apply_to` 包含当前内容类型
+确认 `enabled: true`、词典路径、`clip_dictionary.json` 存在、输入路径含 `2026_06_03` 等形式日期、`apply_to` 含当前类型。
 
 ## 与 dd-song-miner-llm 的兼容性
 
 | 功能 | dd-song-miner-llm | dd-clip-miner-llm |
 |------|-------------------|-------------------|
 | `run` / `batch-run` / `manual-cut` | ✅ | ✅ |
+| `--padding-before` / `--padding-after` | ✅ | ✅ |
 | 顶层 `padding` | ✅ | ✅ |
 | `json_fix_rounds` / reasoning / tools | ✅ | ✅ |
-| 多内容类型 / 可插拔识别器 | ❌ | ✅ |
+| 多内容类型 | ❌ | ✅ |
+| 可插拔识别器 | ❌ | ✅ |
 | 歌曲遗漏复查 | ❌ | ✅ |
 | JSON 主播词典切片命名 | ❌ | ✅ |
 
