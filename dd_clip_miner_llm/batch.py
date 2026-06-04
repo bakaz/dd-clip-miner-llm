@@ -35,6 +35,8 @@ def run_batch(
     concat_enabled = config.get("output", {}).get("concat_videos", False)
     video_codec = config.get("output", {}).get("video_codec", "copy")
     audio_bitrate = int(config.get("output", {}).get("audio_bitrate_kbps", 320))
+    single_file_policy = str(config.get("output", {}).get("single_file_policy", "copy"))
+    force_normalize = bool(config.get("output", {}).get("concat_force_normalize", False))
 
     runs: list[dict[str, Any]] = []
     for folder in sorted(by_folder):
@@ -47,11 +49,13 @@ def run_batch(
         has_work = False
 
         # 如果启用拼接且有多个视频，先拼接
-        if concat_enabled and len(folder_videos) > 1:
+        if concat_enabled and (len(folder_videos) > 1 or single_file_policy != "copy"):
             folder_runs, folder_ok, has_work = _process_folder_concat(
                 folder, folder_videos, completed_videos, marker,
                 root, results_root, work, config,
                 video_codec, audio_bitrate, marker_name,
+                single_file_policy=single_file_policy,
+                force_normalize=force_normalize,
                 config_path=config_path,
             )
             runs.extend(folder_runs)
@@ -128,6 +132,8 @@ def _process_folder_concat(
     audio_bitrate: int,
     marker_name: str,
     *,
+    single_file_policy: str = "copy",
+    force_normalize: bool = False,
     config_path: str | Path | None = None,
 ) -> tuple[list[dict[str, Any]], bool, bool]:
     """处理文件夹内的视频拼接"""
@@ -159,6 +165,8 @@ def _process_folder_concat(
             concat_output,
             video_codec=video_codec,
             audio_bitrate_kbps=audio_bitrate,
+            single_file_policy=single_file_policy,
+            force_normalize=force_normalize,
         )
 
         # 处理拼接后的视频
@@ -205,7 +213,9 @@ def _process_folder_concat(
 
 
 def _cleanup_concat_source(concat_dir: Path) -> None:
-    """清理 concat 中间文件；最终输入保留在 pipeline 的 00_input 目录。"""
+    """清理 concat 中间文件；最终输入保留在 pipeline 的 00_input 目录。
+    （新 ConcatPipeline 下，完整 attempt 日志会留在 concat_attempts/ 供调试。）
+    """
     try:
         for path in concat_dir.iterdir():
             if path.is_file():

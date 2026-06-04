@@ -10,6 +10,23 @@ from uuid import uuid4
 
 
 class FFmpegError(RuntimeError):
+    """FFmpeg command error, optionally carrying raw output for diagnosis."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        command: list[str] | None = None,
+        stderr: str | None = None,
+        returncode: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.command = command
+        self.stderr = stderr
+        self.returncode = returncode
+
+
+class AllConcatAttemptsFailed(FFmpegError):
     pass
 
 
@@ -28,7 +45,10 @@ def require_binary(name: str) -> str:
     raise FFmpegError(f"Binary not found: {name}")
 
 
-def run_command(args: list[str], timeout: int = 3600) -> None:
+def run_command(args: list[str], timeout: int = 3600, *, bitstream_fatal: bool = False) -> None:
+    """Run ffmpeg command. If bitstream_fatal=True, treat bitstream corruption warnings in stderr
+    as fatal even if ffmpeg exited 0 (useful for concat copy steps to force fallback early
+    with the real error message from ffmpeg)."""
     completed = subprocess.run(
         args,
         stdout=subprocess.PIPE,
@@ -40,7 +60,22 @@ def run_command(args: list[str], timeout: int = 3600) -> None:
     )
     if completed.returncode != 0:
         detail = completed.stderr.strip() or completed.stdout.strip()
-        raise FFmpegError(f"Command failed: {' '.join(args)}\n{detail}")
+        raise FFmpegError(
+            f"Command failed: {' '.join(args)}\n{detail}",
+            command=args,
+            stderr=completed.stderr,
+            returncode=completed.returncode,
+        )
+    if bitstream_fatal:
+        stderr_text = completed.stderr or completed.stdout or ""
+        if _text_indicates_bitstream_corruption(stderr_text):
+            detail = stderr_text.strip()
+            raise FFmpegError(
+                f"FFmpeg reported video bitstream corruption during operation (exit 0 but treated as failure for reliable concat):\n{detail}",
+                command=args,
+                stderr=completed.stderr,
+                returncode=completed.returncode,
+            )
 
 
 def run_command_with_fallback(commands: list[list[str]], timeout: int = 3600) -> None:
@@ -118,10 +153,35 @@ def concat_videos(
     output_video: str | Path,
     video_codec: str = "auto",
     audio_bitrate_kbps: int = 320,
+    single_file_policy: str = "copy",
+    force_normalize: bool = False,
 ) -> Path:
-    """拼接多个视频文件
-    
-    策略：
+    from .concat.pipeline import concat_videos_smart
+
+    return concat_videos_smart(
+        input_videos,
+        output_video,
+        video_codec=video_codec,
+        audio_bitrate_kbps=audio_bitrate_kbps,
+        single_file_policy=single_file_policy,
+        force_normalize=force_normalize,
+    )
+
+
+def _concat_videos_legacy(
+    input_videos: list[str | Path],
+    output_video: str | Path,
+    video_codec: str = "auto",
+    audio_bitrate_kbps: int = 320,
+    single_file_policy: str = "copy",
+) -> Path:
+    """拼接多个视频文件（旧实现，保留用于兼容/参考）。
+
+    新实现已迁移到 concat.pipeline 中的 ConcatPipeline + Strategy，
+    支持 upfront health probe + ProblemProfile（依据完整 ffmpeg 输出判断
+    bitstream_corruption 等问题类型）来智能选择 fallback，并保存完整日志。
+
+    旧策略（供参考）：
     1. 优先尝试音视频流 copy（最快）
     2. 如果 copy 失败，使用 auto 模式重编码（nv > intel > amd > cpu）
     3. 回退重编码时统一到最小视频分辨率，音频用 AAC 320kbps
@@ -135,10 +195,17 @@ def concat_videos(
     
     if len(input_videos) == 1:
         # 单个文件直接复制
-        shutil.copy2(str(input_videos[0]), str(output))
-        return output
+        return _handle_single_input(
+            input_videos[0],
+            output,
+            ffmpeg_bin,
+            video_codec,
+            audio_bitrate_kbps,
+            single_file_policy,
+        )
 
     expected_duration = _sum_media_durations(input_videos)
+    target_size = _get_min_video_size(input_videos)
     
     # 创建 concat 列表文件
     concat_file = output.parent / "concat_list.txt"
@@ -149,54 +216,6 @@ def concat_videos(
             f.write(f"file '{escaped_path}'\n")
 
     errors: list[str] = []
-    quick_bad_indexes = _find_bad_h264_segments(
-        input_videos,
-        ffmpeg_bin,
-        tail_seconds=60.0,
-    )
-    if quick_bad_indexes:
-        print(
-            "[concat] Detected possible corrupt H.264 segment(s) "
-            f"{', '.join(str(i + 1) for i in quick_bad_indexes)}; "
-            "repairing only those segment(s)."
-        )
-        try:
-            _concat_reencoded_bad_segments_copy(
-                input_videos,
-                output,
-                ffmpeg_bin,
-                video_codec,
-                audio_bitrate_kbps,
-                expected_duration,
-                bad_indexes=quick_bad_indexes,
-            )
-            _safe_unlink(concat_file)
-            return output
-        except FFmpegError as exc:
-            errors.append(str(exc))
-            print(
-                "[concat] Targeted repair from quick probe failed; "
-                f"{_short_error(exc)}"
-            )
-            print("[concat] Scanning all segments for additional corrupt H.264 packets.")
-            try:
-                _concat_reencoded_bad_segments_copy(
-                    input_videos,
-                    output,
-                    ffmpeg_bin,
-                    video_codec,
-                    audio_bitrate_kbps,
-                    expected_duration,
-                )
-                _safe_unlink(concat_file)
-                return output
-            except FFmpegError as full_scan_exc:
-                errors.append(str(full_scan_exc))
-                print(
-                    "[concat] Full targeted repair failed; "
-                    f"{_short_error(full_scan_exc)}"
-                )
-    
     # 尝试直接复制音视频流；如果源文件参数一致，这是最快且无损的路径。
     copy_cmd = [
         ffmpeg_bin, "-y",
@@ -210,34 +229,32 @@ def concat_videos(
         str(output),
     ]
     
-    if quick_bad_indexes:
-        copy_error = "Skipped direct stream copy because corrupt H.264 segment(s) were detected."
-        errors.append(copy_error)
-    else:
-        try:
-            run_command(copy_cmd)
-            _validate_concat_duration(output, expected_duration)
-            _safe_unlink(concat_file)
-            return output
-        except FFmpegError as exc:
-            copy_error = str(exc)
-            errors.append(copy_error)
-            print("[concat] Direct stream copy failed or produced a short output; trying targeted repair.")
-
     try:
-        _concat_reencoded_bad_segments_copy(
-            input_videos,
+        run_command(copy_cmd, bitstream_fatal=True)
+        _validate_concat_duration(output, expected_duration)
+        _validate_audio_decodable(output, ffmpeg_bin)
+        _safe_unlink(concat_file)
+        return output
+    except FFmpegError as exc:
+        copy_error = str(exc)
+        errors.append(copy_error)
+        print("[concat] Direct stream copy failed or produced invalid output; trying audio-only re-encode.")
+
+    # Keep video streams untouched when only AAC/timestamp continuity is bad.
+    try:
+        _concat_audio_reencoded_copy(
             output,
+            concat_file,
             ffmpeg_bin,
-            video_codec,
             audio_bitrate_kbps,
             expected_duration,
         )
         _safe_unlink(concat_file)
         return output
     except FFmpegError as exc:
-        targeted_reencode_error = str(exc)
-        errors.append(targeted_reencode_error)
+        audio_reencode_error = str(exc)
+        errors.append(audio_reencode_error)
+        print("[concat] Audio-only re-encode failed; trying remux.")
 
     try:
         _concat_remuxed_copy(
@@ -246,6 +263,7 @@ def concat_videos(
             ffmpeg_bin,
             expected_duration,
         )
+        _validate_audio_decodable(output, ffmpeg_bin)
         _safe_unlink(concat_file)
         return output
     except FFmpegError as exc:
@@ -253,7 +271,59 @@ def concat_videos(
         errors.append(remux_error)
 
     # 获取最小分辨率，重编码时统一缩放到这个尺寸，避免不同源视频拼接失败。
-    target_size = _get_min_video_size(input_videos)
+    analysis = analyze_ffmpeg_failure(errors)
+    if analysis.get("bitstream_corruption"):
+        quick_bad_indexes = _find_bad_h264_segments(
+            input_videos,
+            ffmpeg_bin,
+            tail_seconds=60.0,
+        )
+        if quick_bad_indexes:
+            print(
+                "[concat] Detected possible corrupt H.264 segment(s) "
+                f"{', '.join(str(i + 1) for i in quick_bad_indexes)}; "
+                "repairing only those segment(s)."
+            )
+            try:
+                _concat_reencoded_bad_segments_copy(
+                    input_videos,
+                    output,
+                    ffmpeg_bin,
+                    video_codec,
+                    audio_bitrate_kbps,
+                    expected_duration,
+                    bad_indexes=quick_bad_indexes,
+                )
+                _validate_audio_decodable(output, ffmpeg_bin)
+                _safe_unlink(concat_file)
+                return output
+            except FFmpegError as exc:
+                errors.append(str(exc))
+                print(
+                    "[concat] Targeted repair from tail scan failed; "
+                    f"{_short_error(exc)}"
+                )
+
+        print("[concat] Scanning all segments for corrupt H.264 packets.")
+        try:
+            _concat_reencoded_bad_segments_copy(
+                input_videos,
+                output,
+                ffmpeg_bin,
+                video_codec,
+                audio_bitrate_kbps,
+                expected_duration,
+            )
+            _validate_audio_decodable(output, ffmpeg_bin)
+            _safe_unlink(concat_file)
+            return output
+        except FFmpegError as exc:
+            errors.append(str(exc))
+            print(
+                "[concat] Full targeted repair failed; "
+                f"{_short_error(exc)}"
+            )
+
     scale_args = _concat_scale_args(target_size)
     
     encode_candidates = _concat_reencode_arg_candidates(ffmpeg_bin, video_codec)
@@ -270,6 +340,8 @@ def concat_videos(
             "-pix_fmt", "yuv420p",
             "-c:a", "aac",
             "-b:a", f"{audio_bitrate_kbps}k",
+            "-ar", "48000",
+            "-ac", "2",
             "-movflags", "+faststart",
             str(output),
         ]
@@ -277,6 +349,7 @@ def concat_videos(
         try:
             run_command(cmd)
             _validate_concat_duration(output, expected_duration)
+            _validate_audio_decodable(output, ffmpeg_bin)
             _safe_unlink(concat_file)
             return output
         except FFmpegError as e:
@@ -297,6 +370,7 @@ def concat_videos(
         try:
             run_command(cmd, timeout=7200)
             _validate_concat_duration(output, expected_duration)
+            _validate_audio_decodable(output, ffmpeg_bin)
             _safe_unlink(concat_file)
             return output
         except FFmpegError as e:
@@ -330,6 +404,253 @@ def _short_error(exc: Exception, max_length: int = 500) -> str:
     if len(summary) > max_length:
         return summary[: max_length - 3] + "..."
     return summary
+
+
+# --- Concat / bitstream error classification (centralized for fallback decisions) ---
+
+# Patterns observed in real ffmpeg stderr when H.264 (or HEVC) bitstream is corrupt,
+# especially at part boundaries from live captures. Presence of these usually means
+# -c copy through concat demuxer or bsf will fail or produce bad output.
+_BITSTREAM_CORRUPTION_RES: list[re.Pattern[str]] = [
+    re.compile(r"Invalid NAL", re.IGNORECASE),
+    re.compile(r"missing picture", re.IGNORECASE),
+    re.compile(r"decode_slice_header", re.IGNORECASE),
+    re.compile(r"bitstream", re.IGNORECASE),
+    re.compile(r"h264_mp4toannexb.*(fail|error|filter)", re.IGNORECASE),
+    re.compile(r"Error applying bitstream filters", re.IGNORECASE),
+    re.compile(r"Invalid data found when processing input", re.IGNORECASE),
+    re.compile(r"corrupt", re.IGNORECASE),
+]
+
+
+def _text_indicates_bitstream_corruption(text: str | list[str] | None) -> bool:
+    """Return True if the ffmpeg output text contains strong signals of video bitstream corruption.
+    Used both for pre-flight probes (_find_bad_h264_segments) and to decide fallback strategy,
+    and also to promote warnings->errors on concat copy commands (even when ffmpeg rc==0)."""
+    if not text:
+        return False
+    if isinstance(text, list):
+        text = "\n".join(text)
+    return any(pat.search(text) for pat in _BITSTREAM_CORRUPTION_RES)
+
+
+def analyze_ffmpeg_failure(details: str | list[str] | None) -> dict[str, object]:
+    """Legacy dict version kept for compatibility. See classify_ffmpeg_output for the new structured ProblemProfile."""
+    if not details:
+        return {"bitstream_corruption": False, "timestamp_discontinuity": False, "duration_truncated": False, "audio_decode_fail": False, "hw_unavailable": False, "demux_error": False, "summary": "no details"}
+    if isinstance(details, list):
+        text = "\n".join(details)
+    else:
+        text = str(details)
+    t = text.lower()
+
+    bitstream = _text_indicates_bitstream_corruption(text)
+    ts_issue = bool(re.search(r"non.?monotonic|invalid dts|negative ts|timestamp|pts.*(invalid|discontinu)", t))
+    dur_trunc = "concat output duration is too short" in t
+    audio_fail = bool(re.search(r"audio.*(not decodable|fail|error|invalid|corrupt)", t)) or "audio is not decodable" in t
+    hw_fail = bool(re.search(r"(unknown encoder|encoder not found|device.*not found|nvenc|qsv|amf).*(fail|error|unavailable|not)", t))
+    demux = bool(re.search(r"(error during demuxing|error opening input|demux)", t))
+
+    problems = []
+    if bitstream:
+        problems.append("bitstream_corruption")
+    if ts_issue:
+        problems.append("timestamp_discontinuity")
+    if dur_trunc:
+        problems.append("duration_truncated")
+    if audio_fail:
+        problems.append("audio_decode_fail")
+    if hw_fail:
+        problems.append("hw_unavailable")
+    if demux:
+        problems.append("demux_error")
+
+    summary = ", ".join(problems) if problems else "unknown/other"
+    return {
+        "bitstream_corruption": bitstream,
+        "timestamp_discontinuity": ts_issue,
+        "duration_truncated": dur_trunc,
+        "audio_decode_fail": audio_fail,
+        "hw_unavailable": hw_fail,
+        "demux_error": demux,
+        "summary": summary,
+        "raw_snippet": text[:800] if len(text) > 800 else text,
+    }
+
+
+def classify_ffmpeg_output(details: str | list[str] | None) -> "ProblemProfile":
+    """New structured classifier. Returns ProblemProfile (the heart of output-driven decisions).
+    Uses the same patterns as before but produces the dataclass used by the new pipeline.
+    """
+    from .concat.models import ProblemProfile  # avoid circular at import time
+
+    if not details:
+        return ProblemProfile(summary="no details")
+    if isinstance(details, list):
+        text = "\n".join(details)
+    else:
+        text = str(details)
+    t = text.lower()
+
+    bitstream = _text_indicates_bitstream_corruption(text)
+    ts_issue = bool(re.search(r"non.?monotonic|invalid dts|negative ts|timestamp|pts.*(invalid|discontinu)", t))
+    dur_trunc = "concat output duration is too short" in t
+    audio_fail = bool(re.search(r"audio.*(not decodable|fail|error|invalid|corrupt)", t)) or "audio is not decodable" in t
+    hw_fail = bool(re.search(r"(unknown encoder|encoder not found|device.*not found|nvenc|qsv|amf).*(fail|error|unavailable|not)", t))
+    demux = bool(re.search(r"(error during demuxing|error opening input|demux)", t))
+
+    # Try to extract bad segment indexes if present in logs (e.g. from repair messages or health)
+    corrupt_indexes: list[int] = []
+    idx_match = re.findall(r"segment\(s\)\s*([0-9,\s]+)", text, re.IGNORECASE)
+    for m in idx_match:
+        for num in re.findall(r"\d+", m):
+            corrupt_indexes.append(int(num))
+    # Also look for 0-based from previous patterns if any
+
+    problems = []
+    if bitstream:
+        problems.append("bitstream_corruption")
+    if ts_issue:
+        problems.append("timestamp_discontinuity")
+    if dur_trunc:
+        problems.append("duration_truncated")
+    if audio_fail:
+        problems.append("audio_decode_fail")
+    if hw_fail:
+        problems.append("hw_unavailable")
+    if demux:
+        problems.append("demux_error")
+
+    summary = ", ".join(problems) if problems else "unknown/other"
+    return ProblemProfile(
+        bitstream_corrupt_indexes=sorted(set(corrupt_indexes)),
+        demux_errors=demux,
+        timestamp_discontinuity=ts_issue,
+        duration_truncated=dur_trunc,
+        audio_decode_fail=audio_fail,
+        hw_unavailable=hw_fail,
+        summary=summary,
+        raw_snippets=[text[:2000]],
+    )
+
+
+def _looks_like_video_bitstream_error(errors: list[str] | str) -> bool:
+    """Legacy wrapper kept for compatibility with older call sites."""
+    return _text_indicates_bitstream_corruption(errors)
+
+
+def _handle_single_input(
+    input_video: str | Path,
+    output: Path,
+    ffmpeg_bin: str,
+    video_codec: str,
+    audio_bitrate_kbps: int,
+    single_file_policy: str,
+) -> Path:
+    policy = (single_file_policy or "copy").lower()
+    expected_duration = _sum_media_durations([input_video])
+    if policy == "copy":
+        shutil.copy2(str(input_video), str(output))
+        return output
+    if policy == "remux":
+        _remux_single_input(input_video, output, ffmpeg_bin, expected_duration)
+        return output
+    if policy == "normalize":
+        _normalize_single_input(
+            input_video,
+            output,
+            ffmpeg_bin,
+            video_codec,
+            audio_bitrate_kbps,
+            expected_duration,
+        )
+        return output
+    raise ValueError(
+        "single_file_policy must be one of: copy, remux, normalize"
+    )
+
+
+def _remux_single_input(
+    input_video: str | Path,
+    output: Path,
+    ffmpeg_bin: str,
+    expected_duration: float | None,
+) -> None:
+    run_command([
+        ffmpeg_bin,
+        "-y",
+        "-fflags",
+        "+genpts",
+        "-err_detect",
+        "ignore_err",
+        "-i",
+        str(input_video),
+        "-map",
+        "0",
+        "-c",
+        "copy",
+        "-avoid_negative_ts",
+        "make_zero",
+        "-movflags",
+        "+faststart",
+        str(output),
+    ])
+    _validate_concat_duration(output, expected_duration)
+    _validate_audio_decodable(output, ffmpeg_bin)
+
+
+def _normalize_single_input(
+    input_video: str | Path,
+    output: Path,
+    ffmpeg_bin: str,
+    video_codec: str,
+    audio_bitrate_kbps: int,
+    expected_duration: float | None,
+) -> None:
+    target_size = None
+    try:
+        target_size = _get_video_resolution(input_video)
+    except (FFmpegError, ValueError):
+        pass
+    scale_args = _concat_scale_args(target_size)
+    errors: list[str] = []
+    for encode_args in _concat_reencode_arg_candidates(ffmpeg_bin, video_codec):
+        try:
+            run_command([
+                ffmpeg_bin,
+                "-y",
+                "-fflags",
+                "+genpts",
+                "-err_detect",
+                "ignore_err",
+                "-i",
+                str(input_video),
+                "-map",
+                "0:v:0?",
+                "-map",
+                "0:a:0?",
+                *scale_args,
+                *encode_args,
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                "-b:a",
+                f"{audio_bitrate_kbps}k",
+                "-ar",
+                "48000",
+                "-ac",
+                "2",
+                "-movflags",
+                "+faststart",
+                str(output),
+            ])
+            _validate_concat_duration(output, expected_duration)
+            _validate_audio_decodable(output, ffmpeg_bin)
+            return
+        except FFmpegError as exc:
+            errors.append(str(exc))
+    raise FFmpegError("Single-file normalize failed:\n" + "\n".join(errors))
 
 
 def _get_min_video_size(videos: list[str | Path]) -> tuple[int, int] | None:
@@ -372,16 +693,66 @@ def _validate_concat_duration(output: Path, expected_duration: float | None) -> 
         )
 
 
+def _has_audio_stream(input_media: str | Path) -> bool:
+    ffprobe_bin = shutil.which("ffprobe")
+    if not ffprobe_bin:
+        # If ffprobe is unavailable, let the decode check be the source of truth.
+        return True
+    completed = subprocess.run(
+        [
+            ffprobe_bin,
+            "-v",
+            "error",
+            "-select_streams",
+            "a:0",
+            "-show_entries",
+            "stream=index",
+            "-of",
+            "csv=p=0",
+            str(input_media),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    return completed.returncode == 0 and bool(completed.stdout.strip())
+
+
+def _validate_audio_decodable(output: Path, ffmpeg_bin: str) -> None:
+    if not _has_audio_stream(output):
+        return
+    try:
+        run_command([
+            ffmpeg_bin,
+            "-v",
+            "error",
+            "-i",
+            str(output),
+            "-map",
+            "0:a:0",
+            "-vn",
+            "-f",
+            "null",
+            devnull,
+        ])
+    except FFmpegError as exc:
+        raise FFmpegError(
+            f"Concat output audio is not decodable: {output}\n{exc}"
+        ) from exc
+
+
 def _find_bad_h264_segments(
     input_videos: list[str | Path],
     ffmpeg_bin: str,
     tail_seconds: float | None = None,
 ) -> list[int]:
+    """Probe each input (or its tail) by attempting a video-only copy through the h264 bitstream filter.
+    Any corruption will surface as specific errors/warnings in stderr (even if rc may vary).
+    Uses the centralized _text_indicates_bitstream_corruption for consistent detection with fallback logic.
+    """
     bad_indexes: list[int] = []
-    suspicious = re.compile(
-        r"Invalid NAL|missing picture|bitstream filters|Invalid data",
-        re.IGNORECASE,
-    )
     for index, video in enumerate(input_videos):
         input_args: list[str] = []
         if tail_seconds is not None and tail_seconds > 0:
@@ -412,7 +783,7 @@ def _find_bad_h264_segments(
             errors="replace",
         )
         stderr = completed.stderr or ""
-        if completed.returncode != 0 or suspicious.search(stderr):
+        if completed.returncode != 0 or _text_indicates_bitstream_corruption(stderr):
             bad_indexes.append(index)
     return bad_indexes
 
@@ -474,6 +845,10 @@ def _concat_reencoded_bad_segments_copy(
                         "aac",
                         "-b:a",
                         f"{audio_bitrate_kbps}k",
+                        "-ar",
+                        "48000",
+                        "-ac",
+                        "2",
                         "-movflags",
                         "+faststart",
                         str(target),
@@ -485,25 +860,28 @@ def _concat_reencoded_bad_segments_copy(
                         escaped_path = str(video).replace("'", "'\\''")
                         handle.write(f"file '{escaped_path}'\n")
 
-                run_command([
-                    ffmpeg_bin,
-                    "-y",
-                    "-f",
-                    "concat",
-                    "-safe",
-                    "0",
-                    "-i",
-                    str(concat_file),
-                    "-map",
-                    "0:v:0?",
-                    "-map",
-                    "0:a:0?",
-                    "-c",
-                    "copy",
-                    "-movflags",
-                    "+faststart",
-                    str(output),
-                ])
+                run_command(
+                    [
+                        ffmpeg_bin,
+                        "-y",
+                        "-f",
+                        "concat",
+                        "-safe",
+                        "0",
+                        "-i",
+                        str(concat_file),
+                        "-map",
+                        "0:v:0?",
+                        "-map",
+                        "0:a:0?",
+                        "-c",
+                        "copy",
+                        "-movflags",
+                        "+faststart",
+                        str(output),
+                    ],
+                    bitstream_fatal=True,
+                )
                 _validate_concat_duration(output, expected_duration)
                 return
             except FFmpegError as exc:
@@ -526,6 +904,49 @@ def _targeted_repair_encode_candidates(
     if cpu not in candidates:
         candidates.append(cpu)
     return candidates
+
+
+def _concat_audio_reencoded_copy(
+    output: Path,
+    concat_file: Path,
+    ffmpeg_bin: str,
+    audio_bitrate_kbps: int,
+    expected_duration: float | None,
+) -> None:
+    # -c:v copy path: make bitstream_fatal so that corruption warnings from ffmpeg are promoted
+    # to exception (with real error text) -> better diagnosis + immediate fallback in smart pipeline.
+    run_command(
+        [
+            ffmpeg_bin,
+            "-y",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(concat_file),
+            "-map",
+            "0:v:0?",
+            "-map",
+            "0:a:0?",
+            "-c:v",
+            "copy",
+            "-c:a",
+            "aac",
+            "-b:a",
+            f"{audio_bitrate_kbps}k",
+            "-ar",
+            "48000",
+            "-ac",
+            "2",
+            "-movflags",
+            "+faststart",
+            str(output),
+        ],
+        bitstream_fatal=True,
+    )
+    _validate_concat_duration(output, expected_duration)
+    _validate_audio_decodable(output, ffmpeg_bin)
 
 
 def _concat_remuxed_copy(
@@ -559,17 +980,20 @@ def _concat_remuxed_copy(
                 escaped_path = str(video).replace("'", "'\\''")
                 handle.write(f"file '{escaped_path}'\n")
 
-        run_command([
-            ffmpeg_bin, "-y",
-            "-f", "concat",
-            "-safe", "0",
-            "-i", str(concat_file),
-            "-map", "0:v:0?",
-            "-map", "0:a:0?",
-            "-c", "copy",
-            "-movflags", "+faststart",
-            str(output),
-        ])
+        run_command(
+            [
+                ffmpeg_bin, "-y",
+                "-f", "concat",
+                "-safe", "0",
+                "-i", str(concat_file),
+                "-map", "0:v:0?",
+                "-map", "0:a:0?",
+                "-c", "copy",
+                "-movflags", "+faststart",
+                str(output),
+            ],
+            bitstream_fatal=True,
+        )
         _validate_concat_duration(output, expected_duration)
     finally:
         _safe_rmtree(temp_dir)
@@ -600,6 +1024,8 @@ def _concat_filter_commands(
             "-pix_fmt", "yuv420p",
             "-c:a", "aac",
             "-b:a", f"{audio_bitrate_kbps}k",
+            "-ar", "48000",
+            "-ac", "2",
             "-movflags", "+faststart",
             str(output),
         ])

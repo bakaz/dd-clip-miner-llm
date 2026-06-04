@@ -280,11 +280,13 @@ class TestFFmpeg:
         assert candidates[3][1] == "h264_amf"
         assert candidates[4][1] == "libx264"
 
-    def test_concat_quick_probe_then_targeted_bad_segment_reencode(self, tmp_path, monkeypatch):
+    def test_concat_uses_targeted_reencode_after_video_bitstream_failures(self, tmp_path, monkeypatch):
         calls = []
 
-        def fake_run_command(args, timeout=3600):
+        def fake_run_command(args, timeout=3600, **_kwargs):
             calls.append(args)
+            if len(calls) <= 2:
+                raise ffmpeg.FFmpegError("copy/audio failed")
 
         monkeypatch.setattr(ffmpeg, "require_binary", lambda name: name)
         monkeypatch.setattr(ffmpeg, "run_command", fake_run_command)
@@ -298,6 +300,13 @@ class TestFFmpeg:
             "detect_video_encoders",
             lambda _ffmpeg_bin: {"libx264"},
         )
+        monkeypatch.setattr(
+            ffmpeg,
+            "_concat_remuxed_copy",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                ffmpeg.FFmpegError("Invalid NAL in remux")
+            ),
+        )
         monkeypatch.setattr(ffmpeg, "_get_min_video_size", lambda _videos: (641, 361))
 
         output = tmp_path / "concat.mp4"
@@ -308,16 +317,16 @@ class TestFFmpeg:
             audio_bitrate_kbps=320,
         )
 
-        assert calls[0][calls[0].index("-i") + 1] == str(tmp_path / "b.mp4")
-        assert calls[0][calls[0].index("-c:v") + 1] == "libx264"
-        assert calls[0][calls[0].index("-fflags") + 1] == "+discardcorrupt"
-        assert calls[1][calls[1].index("-c") + 1] == "copy"
+        assert calls[2][calls[2].index("-i") + 1] == str(tmp_path / "b.mp4")
+        assert calls[2][calls[2].index("-c:v") + 1] == "libx264"
+        assert calls[2][calls[2].index("-fflags") + 1] == "+discardcorrupt"
+        assert calls[3][calls[3].index("-c") + 1] == "copy"
         assert not (tmp_path / "concat_list.txt").exists()
 
-    def test_concat_targeted_reencode_skips_to_remux_when_no_bad_segments(self, tmp_path, monkeypatch):
+    def test_concat_falls_back_to_audio_reencode_before_remux(self, tmp_path, monkeypatch):
         calls = []
 
-        def fake_run_command(args, timeout=3600):
+        def fake_run_command(args, timeout=3600, **_kwargs):
             calls.append(args)
             if len(calls) == 1:
                 raise ffmpeg.FFmpegError("copy failed")
@@ -339,11 +348,29 @@ class TestFFmpeg:
             audio_bitrate_kbps=320,
         )
 
-        assert calls[1][calls[1].index("-c") + 1] == "copy"
-        assert calls[1][calls[1].index("-avoid_negative_ts") + 1] == "make_zero"
-        assert calls[2][calls[2].index("-c") + 1] == "copy"
-        assert calls[3][calls[3].index("-c") + 1] == "copy"
+        assert calls[1][calls[1].index("-c:v") + 1] == "copy"
+        assert calls[1][calls[1].index("-c:a") + 1] == "aac"
+        assert calls[1][calls[1].index("-ar") + 1] == "48000"
+        assert calls[1][calls[1].index("-ac") + 1] == "2"
         assert not (tmp_path / "concat_list.txt").exists()
+
+    def test_concat_short_output_triggers_video_bitstream_scan(self):
+        """Legacy internal test for _has_video_bitstream_failure (kept for compat during refactor).
+
+        New code uses ProblemProfile + classify_ffmpeg_output in ConcatPipeline.
+        """
+        from dd_clip_miner_llm.concat.models import ConcatAttempt
+        from dd_clip_miner_llm.concat.pipeline import _has_video_bitstream_failure
+
+        attempts = [
+            ConcatAttempt(
+                "direct concat copy",
+                False,
+                "Concat output duration is too short: 7363.447s, expected about 11028.857s",
+            )
+        ]
+
+        assert _has_video_bitstream_failure(attempts) is True
 
     def test_concat_copy_codec_falls_back_to_auto_reencode(self, monkeypatch):
         monkeypatch.setattr(

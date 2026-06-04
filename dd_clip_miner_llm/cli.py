@@ -198,7 +198,7 @@ def _generate_config_yaml() -> str:
         "  video_extension: mp4",
         "  video_codec: copy",
         "  match_context_segments: 10",
-        "  concat_videos: false  # 合并目录下的多个视频后再处理",
+        "  concat_videos: false  # 合并目录下的多个视频后再处理（使用新 ConcatPipeline + ProblemProfile 智能 fallback）",
         "  clip_naming:",
         "    enabled: false",
         "    dictionary_path: streamer_dictionary.json",

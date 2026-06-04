@@ -18,7 +18,7 @@
 - **智能 LLM 调用**：reasoning followup、工具调用、JSON 修复、歌词搜索（DuckDuckGo）
 - **歌曲遗漏复查**：首轮识别后对未覆盖 ASR 区间二次送 LLM 检查
 - **断点续传**：同一输入视频再次运行时复用 `01_audio`、`02_asr`、各类型 LLM 结果（见 `progress.json`）
-- **批量处理**：目录扫描；可选多视频拼接后统一处理
+- **批量处理**：目录扫描；可选多视频拼接后统一处理（重构为 `ConcatPipeline`，upfront health probe + 基于完整 ffmpeg 输出的 `ProblemProfile` 智能 fallback，只修坏段，完整日志可查）
 - **切片导出命名**：JSON 主播词典匹配 + 路径解析 YYMMDD → `【主播】歌名-歌手-YYMMDD`
 - **手动重切**：编辑 CSV 后重新导出片段
 - **下头片段短标题**：`title` 作为文件名，少于 20 个中文字
@@ -151,12 +151,19 @@ python -m dd_clip_miner_llm batch-run "D:\input" --config config.yaml --work-roo
 python -m dd_clip_miner_llm batch-run "D:\input" --config config.yaml --work-root "D:\work" --result-root "D:\results" --concat
 ```
 
-合并策略：
+合并策略（重构为 `ConcatPipeline` + `Strategy` 编排，核心是**依据 ffmpeg 完整输出判断问题类型**来选择 fallback）：
 
-1. 轻量探测可能损坏的 H.264 片段
-2. 源健康时优先流 copy；坏包则定点重编码（nv > intel > amd > cpu）
-3. 校验拼接后总时长
-4. 合并结果 stage 到 `00_input/input_*.mp4`；`manual-cut` 从 `manifest.json` 读输入；处理完成后清理 `concat/` 中间文件
+1. 单文件按 `output.single_file_policy` 处理：默认 `copy`；可设为 `remux` 或 `normalize`
+2. **Upfront health probe**：对每个输入做 ffprobe + tail 60s 的 h264_mp4toannexb bitstream 扫描，得到结构化 `HealthInfo`（哪些 segment 存在 corruption）。
+3. 使用 `classify_ffmpeg_output`（从完整 stdout/stderr）解析出 `ProblemProfile`（`bitstream_corrupt_indexes`、`demux_errors`、`timestamp_discontinuity` 等 + summary）。
+4. 按代价/适用性顺序尝试策略（DirectCopyStrategy、AudioReencodeStrategy、RemuxThenCopyStrategy、TargetedRepairStrategy、SelectiveNormalizeStrategy、FullReencodeStrategy + concat filter 兜底）。
+5. 每个 `Strategy` 通过 `is_applicable(context.profile)` 决定是否执行；执行时强制 `bitstream_fatal`（即使 ffmpeg rc=0 只要 stderr 有 corruption 标志也当作失败），捕获**完整原始 ffmpeg 日志**并保存到 `concat_attempts/<strategy>.log`。
+6. 失败时用输出重新 `classify` 并 `merge` 更新 `ProblemProfile`，驱动后续策略选择（例如检测到 bitstream 后优先 TargetedRepair）。
+7. `TargetedRepairStrategy` 优先使用已诊断的坏段索引，只对坏片段做 reencode（NVENC > QSV > AMF > libx264），好片段直接 copy。
+8. 每次合并后校验时长和音频可解码性。
+9. 合并结果 stage 到 `00_input/input_*.mp4`；`manual-cut` 从 `manifest.json` 读输入；处理完成后清理 `concat/` 中间文件（保留最终 concat.mp4）。
+
+常见例子：源文件参数看起来一致，但某段尾部存在坏 H.264 packet（`Invalid NAL unit size`、`missing picture in access unit`、`h264_mp4toannexb filter failed`、`Error during demuxing`）。direct copy 可能 rc=0 却只输出部分内容，程序通过 upfront probe + classify 直接识别为 bitstream 问题，跳过无谓尝试，直接进入只修坏段的 targeted repair，而不是盲目全量重编码。
 
 ### 手动重切
 
@@ -351,6 +358,8 @@ output:
   video_codec: copy              # copy | auto | 见下方 FFmpeg 节
   match_context_segments: 10
   concat_videos: false
+  single_file_policy: copy       # copy | remux | normalize，仅 concat_videos 启用时影响单文件目录
+  concat_force_normalize: false  # true 时跳过 direct copy，直接走更稳的标准化/fallback 链路（新 pipeline 下仍会先做 health probe）
   clip_naming:
     enabled: false
     dictionary_path: streamer_dictionary.json
@@ -378,6 +387,7 @@ dd_clip_miner_llm/
 ├── clip_naming.py
 ├── pipeline.py
 ├── batch.py / manual.py / merger.py / report.py
+├── concat/             # 合并预检（upfront health probe）、ProblemProfile 分类、Strategy 编排、完整日志保存
 └── recognizers/
     ├── __init__.py    # @register 自动发现
     ├── base.py
@@ -415,7 +425,7 @@ class MyRecognizer(BaseRecognizer):
 
 ```
 runs/<run_name>/
-├── 00_input/              # staging 后的输入视频
+├── 00_input/              # staging 后的输入视频（concat 场景下是合并后的 concat.mp4）
 ├── 01_audio/source.wav
 ├── 02_asr/
 │   ├── transcript.json
@@ -437,6 +447,11 @@ runs/<run_name>/
 └── 05_manual/             # manual-cut 输出（可选）
 ```
 
+**concat 场景额外目录**（在 `runs/<name>_concat/` 下）：
+- `concat/concat.mp4`：最终合并结果（处理完后 `concat/` 里的中间文件会被清理）
+- `concat/concat_attempts/*.log`：**每个 Strategy 的完整原始 ffmpeg 输出**（强烈推荐用于调试 bitstream / demux 问题）
+- `concat/_concat_remux_*` / `_concat_repair_*`：临时重封装或修复目录（正常结束会自动清理）
+
 `daily_summary` 只写报告，不生成 `03_clips`。
 
 ## FFmpeg 编码
@@ -457,6 +472,8 @@ runs/<run_name>/
 python -m dd_clip_miner_llm run video.mp4 --config config.yaml --video-codec nv
 python -m dd_clip_miner_llm ffmpeg-info
 ```
+
+合并目录视频时，`video_codec` 也会影响需要重编码的 fallback：`auto` 会按 NVENC / QSV / AMF / libx264 选择可用编码器；`copy` 会先尝试无损流复制。新的 `ConcatPipeline` 会先做 upfront health probe + 基于完整 ffmpeg 输出的 `ProblemProfile` 分类（`bitstream_corruption` 等），在检测到 corruption、短输出、音频不可解码等问题时，智能选择 TargetedRepair 等策略，而不是简单顺序 fallback。
 
 ## 常见问题
 

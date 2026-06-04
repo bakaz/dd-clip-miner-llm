@@ -123,6 +123,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "video_codec": "copy",
         "match_context_segments": 10,
         "concat_videos": False,
+        "single_file_policy": "copy",
+        "concat_force_normalize": False,  # 新 pipeline 下仍先做 health probe + ProblemProfile 分类
         "clip_naming": {
             "enabled": False,
             "dictionary_path": "streamer_dictionary.json",
