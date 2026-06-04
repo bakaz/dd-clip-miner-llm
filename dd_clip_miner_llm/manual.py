@@ -8,6 +8,7 @@ from typing import Any
 from .ffmpeg import cut_audio, cut_video
 from .models import ContentResult, create_song_result
 from .paths import stage_input_for_ffmpeg
+from .clip_naming import resolve_clip_naming_profile, resolve_export_stem
 from .report import write_reports
 
 
@@ -18,6 +19,8 @@ def manual_cut(
     input_video: str | Path | None = None,
     output_dir: str | Path | None = None,
     content_type: str = "song",
+    *,
+    config_path: str | Path | None = None,
 ) -> list[ContentResult]:
     run = Path(run_dir)
     
@@ -50,8 +53,20 @@ def manual_cut(
     video_codec = str(config["output"].get("video_codec", "copy"))
 
     results = _read_manual_rows(source_csv, content_type)
+    naming_profile = resolve_clip_naming_profile(
+        source_video,
+        config,
+        config_path=Path(config_path).parent if config_path else None,
+        extra_texts=[run.name],
+    )
     for result in results:
-        stem = _safe_manual_stem(result)
+        stem = resolve_export_stem(
+            result,
+            config,
+            content_type,
+            naming_profile,
+            legacy_safe_filename=_safe_manual_filename,
+        )
         if config["output"].get("audio_segments", True):
             target = audio_out / f"{stem}.{audio_ext}"
             copy_audio = audio_ext.lower() in {"aac", "m4a"}
@@ -153,10 +168,7 @@ def _parse_time(value: str | float | int | None) -> float:
     raise ValueError(f"Unsupported time value: {value}")
 
 
-def _safe_manual_stem(result: ContentResult) -> str:
+def _safe_manual_filename(value: str, fallback: str = "manual_clip") -> str:
     from .paths import safe_path_part
 
-    bits = [f"{result.index:03d}", result.title]
-    if result.artist:
-        bits.append(result.artist)
-    return safe_path_part(" - ".join(bits), fallback=f"manual_{result.index:03d}")
+    return safe_path_part(value, fallback=fallback)

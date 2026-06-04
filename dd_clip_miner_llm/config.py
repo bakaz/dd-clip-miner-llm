@@ -123,6 +123,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "video_codec": "copy",
         "match_context_segments": 10,
         "concat_videos": False,
+        "clip_naming": {
+            "enabled": False,
+            "dictionary_path": "clip_dictionary.json",
+            "default_streamer": "StreamerName",
+            "min_score": 0.65,
+            "apply_to": ["song"],
+        },
     },
 }
 

@@ -18,6 +18,7 @@ def run_batch(
     config: dict[str, Any],
     marker_name: str = ".dd_clip_miner_done.json",
     extensions: set[str] | None = None,
+    config_path: str | Path | None = None,
 ) -> list[dict[str, Any]]:
     root = Path(input_root).expanduser()
     results_root = Path(result_root)
@@ -51,6 +52,7 @@ def run_batch(
                 folder, folder_videos, completed_videos, marker,
                 root, results_root, work, config,
                 video_codec, audio_bitrate, marker_name,
+                config_path=config_path,
             )
             runs.extend(folder_runs)
         else:
@@ -72,7 +74,7 @@ def run_batch(
 
                 print(f"[run] {video}")
                 try:
-                    results = run_pipeline(video, run_dir, config)
+                    results = run_pipeline(video, run_dir, config, config_path=config_path)
                     if run_dir.resolve() != result_dir.resolve():
                         shutil.copytree(run_dir, result_dir, dirs_exist_ok=True)
                     total_count = sum(len(v) for v in results.values()) if isinstance(results, dict) else len(results)
@@ -125,6 +127,8 @@ def _process_folder_concat(
     video_codec: str,
     audio_bitrate: int,
     marker_name: str,
+    *,
+    config_path: str | Path | None = None,
 ) -> tuple[list[dict[str, Any]], bool, bool]:
     """处理文件夹内的视频拼接"""
     folder_runs = []
@@ -159,7 +163,7 @@ def _process_folder_concat(
 
         # 处理拼接后的视频
         print(f"[run] Processing concatenated video...")
-        results = run_pipeline(concat_output, run_dir, config)
+        results = run_pipeline(concat_output, run_dir, config, config_path=config_path)
 
         # 清理合并前的临时文件（保留拼接后的视频）
         _cleanup_concat_source(concat_dir)

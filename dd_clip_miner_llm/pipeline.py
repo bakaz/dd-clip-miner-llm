@@ -19,6 +19,7 @@ from .merger import build_content_results
 from .models import ContentMatch, ContentResult, TranscriptSegment
 from .paths import safe_path_part, stage_input_for_ffmpeg
 from .recognizers import get_recognizer, list_recognizers
+from .clip_naming import ClipNamingProfile, resolve_clip_naming_profile, resolve_export_stem
 from .report import write_match_context_reports, write_reports
 
 
@@ -258,6 +259,7 @@ def _export_results(
     clips_dir: Path,
     config: dict[str, Any],
     content_type: str,
+    naming_profile: ClipNamingProfile | None = None,
 ) -> None:
     """导出音视频片段"""
     audio_ext = str(config["output"].get("audio_extension", "mp3")).lstrip(".")
@@ -269,10 +271,13 @@ def _export_results(
     video_dir_out = clips_dir / "video" / content_type
 
     for result in results:
-        name_bits = [f"{result.index:03d}", result.title]
-        if result.artist:
-            name_bits.append(result.artist)
-        stem = _safe_filename(" - ".join(name_bits))
+        stem = resolve_export_stem(
+            result,
+            config,
+            content_type,
+            naming_profile,
+            legacy_safe_filename=_safe_filename,
+        )
 
         if config["output"].get("audio_segments", True):
             try:
@@ -318,6 +323,8 @@ def run_pipeline(
     input_video: str | Path,
     output_dir: str | Path,
     config: dict[str, Any],
+    *,
+    config_path: str | Path | None = None,
 ) -> dict[str, list[ContentResult]]:
     """
     运行完整流水线，返回按类型分组的结果。
@@ -328,6 +335,23 @@ def run_pipeline(
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
     input_path = stage_input_for_ffmpeg(input_video, out / "00_input").resolve()
+
+    naming_profile = resolve_clip_naming_profile(
+        input_video,
+        config,
+        config_path=Path(config_path).parent if config_path else None,
+        extra_texts=[out.name],
+    )
+    if naming_profile is not None:
+        profile_path = out / "clip_naming.json"
+        profile_path.write_text(
+            json.dumps(naming_profile.to_dict(), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        print(
+            f"[naming] 【{naming_profile.streamer}】*-{naming_profile.date} "
+            f"({naming_profile.source}, score={naming_profile.score:.2f})"
+        )
 
     audio_dir = out / "01_audio"
     asr_dir = out / "02_asr"
@@ -463,7 +487,7 @@ def run_pipeline(
         results = build_content_results(segments, matches, total_duration, config, content_type)
 
         # 导出片段
-        _export_results(results, input_path, clips_dir, config, content_type)
+        _export_results(results, input_path, clips_dir, config, content_type, naming_profile)
 
         # 写入报告
         type_reports_dir = reports_dir / content_type

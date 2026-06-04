@@ -199,6 +199,13 @@ def _generate_config_yaml() -> str:
         "  video_codec: copy",
         "  match_context_segments: 10",
         "  concat_videos: false  # 合并目录下的多个视频后再处理",
+        "  clip_naming:",
+        "    enabled: false",
+        "    dictionary_path: clip_dictionary.json",
+        "    default_streamer: StreamerName",
+        "    min_score: 0.65",
+        "    apply_to:",
+        "      - song",
     ]
     return "\n".join(lines) + "\n"
 
@@ -307,7 +314,12 @@ def main(argv: list[str] | None = None) -> int:
             Path(args.out_root) / Path(args.video).stem
         )
 
-        results = run_pipeline(Path(args.video), output_dir, config)
+        results = run_pipeline(
+            Path(args.video),
+            output_dir,
+            config,
+            config_path=args.config,
+        )
         total = sum(len(v) for v in results.values())
         print(f"\nDone! Found {total} clips in: {output_dir}")
         return 0
@@ -335,6 +347,7 @@ def main(argv: list[str] | None = None) -> int:
             config,
             marker_name=args.marker,
             extensions=extensions,
+            config_path=args.config,
         )
         print(f"\nDone! Batch produced {len(runs)} run records.")
         return 0
@@ -351,6 +364,7 @@ def main(argv: list[str] | None = None) -> int:
             input_video=args.video,
             output_dir=args.out,
             content_type=args.content_type,
+            config_path=args.config,
         )
         print(f"\nDone! Manual cut produced {len(results)} clips.")
         return 0

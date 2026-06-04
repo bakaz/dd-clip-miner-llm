@@ -20,6 +20,14 @@ from dd_clip_miner_llm.models import (
 from dd_clip_miner_llm.paths import safe_path_part
 from dd_clip_miner_llm.report import _format_timecode
 from dd_clip_miner_llm.merger import build_content_results
+from dd_clip_miner_llm.clip_naming import (
+    ClipNamingProfile,
+    build_clip_export_stem,
+    extract_yymmdd_from_texts,
+    is_valid_yymmdd,
+    resolve_clip_naming_profile,
+    text_similarity,
+)
 
 
 # ============ models.py 测试 ============
@@ -619,6 +627,80 @@ class TestRecognizers:
         assert len(matches) == 1
         assert matches[0].content_type == "cringe"
         assert len(matches[0].title) < 20
+
+
+# ============ clip_naming.py 测试 ============
+
+class TestClipNaming:
+    def test_is_valid_yymmdd(self):
+        assert is_valid_yymmdd("260603")
+        assert not is_valid_yymmdd("261399")
+
+    def test_extract_yymmdd_from_folder(self):
+        assert extract_yymmdd_from_texts(["2026_06_03", "live.mp4"]) == "260603"
+
+    def test_extract_yymmdd_token(self):
+        assert extract_yymmdd_from_texts(["live_250603_cut"]) == "250603"
+
+    def test_build_clip_export_stem(self):
+        profile = ClipNamingProfile(streamer="示例主播", date="260603")
+        result = create_song_result(
+            index=1,
+            title="示例歌曲",
+            artist="示例歌手",
+            start=0.0,
+            end=10.0,
+            duration=10.0,
+        )
+        stem = build_clip_export_stem(result, profile)
+        assert stem.startswith("【示例主播】")
+        assert "示例歌曲" in stem
+        assert "260603" in stem
+
+    def test_resolve_profile_from_dictionary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dict_path = Path(tmp) / "clip_dictionary.json"
+            dict_path.write_text(
+                json.dumps(
+                    {
+                        "entries": [
+                            {
+                                "streamer": "示例主播",
+                                "aliases": ["folder_keyword"],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            video_path = Path(tmp) / "folder_keyword" / "2026_06_03" / "live.mp4"
+            video_path.parent.mkdir(parents=True)
+            video_path.write_bytes(b"test")
+            config = {
+                "output": {
+                    "clip_naming": {
+                        "enabled": True,
+                        "dictionary_path": str(dict_path),
+                        "min_score": 0.5,
+                    }
+                }
+            }
+            profile = resolve_clip_naming_profile(video_path, config)
+            assert profile is not None
+            assert profile.streamer == "示例主播"
+            assert profile.date == "260603"
+            assert profile.source == "dictionary"
+
+    def test_no_yymmdd_returns_none(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            video_path = Path(tmp) / "no_date_folder" / "live.mp4"
+            video_path.parent.mkdir(parents=True)
+            video_path.write_bytes(b"test")
+            config = {"output": {"clip_naming": {"enabled": True, "dictionary_path": ""}}}
+            assert resolve_clip_naming_profile(video_path, config) is None
+
+    def test_text_similarity_folder_alias(self):
+        assert text_similarity("folder_keyword", "folder_keyword") == 1.0
 
 
 if __name__ == "__main__":

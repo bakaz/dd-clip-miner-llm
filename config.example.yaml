@@ -129,3 +129,11 @@ output:
   video_codec: copy              # copy=不重编码; auto=nv > intel > amd > cpu
   match_context_segments: 10
   concat_videos: false           # 合并目录下的多个视频后再处理
+  clip_naming:
+    enabled: false
+    dictionary_path: clip_dictionary.json
+    default_streamer: StreamerName
+    min_score: 0.65
+    apply_to:
+      - song
+    # 日期 YYMMDD 仅从输入视频/目录路径解析（如 2026_06_03 -> 260603），不走词典
