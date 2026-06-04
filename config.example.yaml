@@ -1,0 +1,139 @@
+# dd-clip-miner-llm 配置文件
+# 用法: python -m dd_clip_miner_llm run 视频.mp4 --config config.yaml
+
+# ─── 音频预处理 ───────────────────────────────
+audio:
+  sample_rate: 16000
+  channels: 1
+
+# ─── ASR 配置 ─────────────────────────────────
+asr:
+  model: small               # tiny | base | small | medium | large-v3
+  device: auto               # auto | cpu | cuda
+  compute_type: default      # default | float16 | int8
+  language: null             # null=自动 | "zh" | "ja" | "en"
+  beam_size: 5
+  vad_filter: true           # 启用 VAD 过滤静音段
+  initial_prompt: null
+
+# ─── LLM 配置 ─────────────────────────────────
+llm:
+  api_key: null              # 不建议写明文 key；优先使用 api_key_env
+  api_key_env: LLM_API_KEY   # 从环境变量读取 API key
+  base_url: null             # OpenAI 官方可保持 null；兼容 API 填对应 base_url
+  model: gpt-4o
+  temperature: 0.1
+  max_tokens: 8192
+  max_completion_tokens: null
+  retry_empty_with_reasoning: true
+  reasoning_followup_rounds: 5
+  reasoning_followup_max_tokens: 32768
+  batch_size: null           # null=整段提交；正整数=按 ASR 段数分批
+  use_tools: true            # 启用歌词搜索工具
+  verify_with_search: true
+  json_fix_rounds: 3
+  fallbacks: []
+
+# ─── 时间 padding ─────────────────────────────
+# before_seconds: 歌曲开始前 padding（基于前一个 ASR start + guard）
+# after_seconds: 歌曲结束后 padding（不超过下一个 ASR end - guard）
+padding:
+  before_seconds: 15.0
+  after_seconds: 15.0
+  after_next_asr_end_guard_seconds: 2.0
+  min_song_seconds: 30.0
+  merge_gap_seconds: 35.0
+
+# ─── 要识别的内容类型（true/false 控制启用/禁用）──
+content_types:
+  song: true
+  dialogue: true
+  highlight: true
+  funny: true
+  cringe: true
+  daily_summary: false
+
+# ─── 歌曲识别配置 ─────────────────────────────
+song:
+  enabled: true
+  padding:
+    before_seconds: 15.0
+    after_seconds: 15.0
+    after_next_asr_end_guard_seconds: 2.0
+    min_song_seconds: 30.0
+    merge_gap_seconds: 35.0
+  missed_recheck:
+    enabled: true
+    batch_size: 500
+    min_gap_segments: 1
+
+# ─── 对话识别配置 ─────────────────────────────
+dialogue:
+  enabled: true
+  min_duration: 10.0
+  max_duration: 300.0
+  min_confidence: 0.6
+  merge_gap_seconds: 10.0
+  tags:
+    - 搞笑
+    - 吐槽
+    - 名场面
+    - 金句
+    - 互动
+    - 高能
+
+# ─── 高能时刻配置 ─────────────────────────────
+highlight:
+  enabled: true
+  min_duration: 5.0
+  max_duration: 120.0
+  min_confidence: 0.6
+  merge_gap_seconds: 15.0
+
+# ─── 搞笑片段配置 ─────────────────────────────
+funny:
+  enabled: true
+  min_duration: 5.0
+  max_duration: 180.0
+  min_confidence: 0.6
+  merge_gap_seconds: 15.0
+
+# ─── 下头对话配置 ─────────────────────────────
+cringe:
+  enabled: true
+  min_duration: 5.0
+  max_duration: 120.0
+  min_confidence: 0.6
+  merge_gap_seconds: 15.0
+
+# ─── 当天直播结构化总结配置 ─────────────────
+daily_summary:
+  enabled: false
+  summary_only: true
+  language: zh-CN
+  title: 当天直播内容总结
+  max_level1_items: 6
+  max_level2_per_level1: 5
+  max_level3_per_level2: 4
+  include_timeline: true
+  include_quotes: true
+  include_open_questions: true
+
+# ─── 输出 ─────────────────────────────────────
+output:
+  video_clips: true
+  audio_segments: true
+  audio_extension: mp3           # 默认 mp3，兼容性最好
+  audio_bitrate_kbps: 320
+  video_extension: mp4
+  video_codec: copy              # copy=不重编码; auto=nv > intel > amd > cpu
+  match_context_segments: 10
+  concat_videos: false           # 合并目录下的多个视频后再处理
+  clip_naming:
+    enabled: false
+    dictionary_path: streamer_dictionary.json
+    default_streamer: StreamerName
+    min_score: 0.65
+    apply_to:
+      - song
+    # 日期 YYMMDD 仅从输入视频/目录路径解析（如 2026_06_03 -> 260603），不走词典

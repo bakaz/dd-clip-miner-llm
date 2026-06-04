@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=70", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dd-clip-miner-llm"
+version = "0.3.0"
+description = "基于 Whisper ASR + LLM 的直播内容挖掘工具，兼容 dd-song-miner-llm"
+readme = "README.md"
+license = {text = "AGPL-3.0"}
+requires-python = ">=3.10,<3.13"
+keywords = ["whisper", "asr", "llm", "song", "live", "clip", "miner"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: GNU Affero General Public License v3",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Sound/Audio :: Analysis",
+    "Topic :: Multimedia :: Video :: Analysis",
+]
+dependencies = [
+    "PyYAML>=6.0.2",
+    "tqdm>=4.66",
+    "imageio-ffmpeg>=0.5.1",
+    "faster-whisper>=1.2.1",
+    "numpy>=1.26",
+    "soundfile>=0.12",
+    "openai>=1.0.0",
+    "httpx>=0.23.0",
+    "ddgs>=9.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/bakaz/dd-clip-miner-llm"
+Repository = "https://github.com/bakaz/dd-clip-miner-llm"
+Issues = "https://github.com/bakaz/dd-clip-miner-llm/issues"
+
+[project.scripts]
+dd-clip-miner-llm = "dd_clip_miner_llm.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["dd_clip_miner_llm*"]

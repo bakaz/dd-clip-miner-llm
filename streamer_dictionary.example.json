@@ -1,0 +1,13 @@
+{
+  "default_streamer": "StreamerName",
+  "min_score": 0.65,
+  "entries": [
+    {
+      "streamer": "示例主播",
+      "aliases": [
+        "example_streamer",
+        "streamer_folder_keyword"
+      ]
+    }
+  ]
+}
