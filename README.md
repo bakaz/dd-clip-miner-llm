@@ -499,4 +499,4 @@ pip install -r requirements-cu12.txt
 
 ## License
 
-MIT
+AGPL-3.0

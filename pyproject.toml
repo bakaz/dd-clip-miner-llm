@@ -7,13 +7,13 @@ name = "dd-clip-miner-llm"
 version = "0.3.0"
 description = "基于 Whisper ASR + LLM 的直播内容挖掘工具，兼容 dd-song-miner-llm"
 readme = "README.md"
-license = {text = "MIT"}
+license = {text = "AGPL-3.0"}
 requires-python = ">=3.10,<3.13"
 keywords = ["whisper", "asr", "llm", "song", "live", "clip", "miner"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: End Users/Desktop",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: GNU Affero General Public License v3",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
