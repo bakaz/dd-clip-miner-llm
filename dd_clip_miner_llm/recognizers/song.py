@@ -26,12 +26,14 @@ class SongRecognizer(BaseRecognizer):
                 "after_seconds": 15.0,
                 "after_next_asr_end_guard_seconds": 2.0,
                 "min_song_seconds": 75.0,
+                "max_song_seconds": 360.0,
                 "merge_gap_seconds": 20.0,
             },
             "missed_recheck": {
                 "enabled": True,
                 "batch_size": 500,
                 "min_gap_segments": 1,
+                "context_segments": 10,
             },
         }
     

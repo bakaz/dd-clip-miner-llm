@@ -9,6 +9,7 @@ from .models import ContentMatch, ContentResult, TranscriptSegment
 def _merge_adjacent_matches(
     matches: list[dict[str, Any]],
     merge_gap: float,
+    max_duration: float | None = None,
 ) -> list[dict[str, Any]]:
     """合并相邻或重叠的内容片段"""
     if not matches:
@@ -25,8 +26,12 @@ def _merge_adjacent_matches(
         curr_indices = set(range(match["segment_start_idx"], match["segment_end_idx"] + 1))
         has_overlap = bool(prev_indices & curr_indices)
 
-        # 如果重叠，或者 title 相同且间隔 ≤ merge_gap，就合并
-        if has_overlap or (match["start"] - prev["end"] <= merge_gap and match["title"] == prev["title"]):
+        same_title_nearby = match["start"] - prev["end"] <= merge_gap and match["title"] == prev["title"]
+        merged_duration = max(prev["end"], match["end"]) - min(prev["start"], match["start"])
+        within_max_duration = max_duration is None or max_duration <= 0 or merged_duration <= max_duration
+
+        # 如果重叠，或者 title 相同且间隔 ≤ merge_gap，就合并；但歌曲超长时保守拆开。
+        if (has_overlap or same_title_nearby) and within_max_duration:
             prev["end"] = max(prev["end"], match["end"])
             prev["segment_end_idx"] = max(prev["segment_end_idx"], match["segment_end_idx"])
             prev["segment_start_idx"] = min(prev["segment_start_idx"], match["segment_start_idx"])
@@ -38,6 +43,25 @@ def _merge_adjacent_matches(
             merged.append(match)
 
     return merged
+
+
+def _split_indices_by_time_gap(
+    segments: list[TranscriptSegment],
+    indices: list[int],
+    merge_gap: float,
+) -> list[list[int]]:
+    if not indices:
+        return []
+
+    groups: list[list[int]] = [[indices[0]]]
+    for index in indices[1:]:
+        previous = groups[-1][-1]
+        gap = float(segments[index].start) - float(segments[previous].end)
+        if gap > merge_gap:
+            groups.append([index])
+        else:
+            groups[-1].append(index)
+    return groups
 
 
 def build_content_results(
@@ -60,6 +84,7 @@ def build_content_results(
         after_pad = float(padding_config.get("after_seconds", 15.0))
         after_guard = float(padding_config.get("after_next_asr_end_guard_seconds", 2.0))
         min_duration = float(padding_config.get("min_song_seconds", 75.0))
+        max_duration = float(padding_config.get("max_song_seconds", 360.0))
         merge_gap = float(padding_config.get("merge_gap_seconds", 20.0))
     else:
         # 其他类型使用简单 padding
@@ -67,6 +92,7 @@ def build_content_results(
         after_pad = float(padding_config.get("after_seconds", 2.0))
         after_guard = 0.0
         min_duration = float(type_config.get("min_duration", padding_config.get("min_duration", 10.0)))
+        max_duration = None
         merge_gap = float(type_config.get("merge_gap_seconds", padding_config.get("merge_gap_seconds", 10.0)))
 
     raw_matches: list[dict[str, Any]] = []
@@ -75,30 +101,31 @@ def build_content_results(
         if not match.segment_indices:
             continue
 
-        valid_indices = [i for i in match.segment_indices if 0 <= i < len(segments)]
+        valid_indices = sorted({i for i in match.segment_indices if 0 <= i < len(segments)})
         if not valid_indices:
             continue
 
-        start = segments[min(valid_indices)].start
-        end = segments[max(valid_indices)].end
-        transcript = " ".join(segments[i].text for i in valid_indices)
+        for group_indices in _split_indices_by_time_gap(segments, valid_indices, merge_gap):
+            start = segments[min(group_indices)].start
+            end = segments[max(group_indices)].end
+            transcript = " ".join(segments[i].text for i in group_indices)
 
-        raw_matches.append({
-            "title": match.title,
-            "content_type": match.content_type,
-            "start": start,
-            "end": end,
-            "segment_start_idx": min(valid_indices),
-            "segment_end_idx": max(valid_indices),
-            "confidence": match.confidence,
-            "transcript": transcript,
-            "tags": match.tags,
-            "description": match.description,
-            "artist": match.artist,
-            "lyrics_snippet": match.lyrics_snippet,
-        })
+            raw_matches.append({
+                "title": match.title,
+                "content_type": match.content_type,
+                "start": start,
+                "end": end,
+                "segment_start_idx": min(group_indices),
+                "segment_end_idx": max(group_indices),
+                "confidence": match.confidence,
+                "transcript": transcript,
+                "tags": match.tags,
+                "description": match.description,
+                "artist": match.artist,
+                "lyrics_snippet": match.lyrics_snippet,
+            })
 
-    merged = _merge_adjacent_matches(raw_matches, merge_gap)
+    merged = _merge_adjacent_matches(raw_matches, merge_gap, max_duration=max_duration)
 
     results: list[ContentResult] = []
     for i, item in enumerate(merged):

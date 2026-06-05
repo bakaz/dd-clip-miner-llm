@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from pathlib import Path
+import re
 from uuid import uuid4
 
 from .. import ffmpeg as ffmpeg_mod
@@ -23,14 +24,33 @@ from .planner import (
 from .probe import probe_many, probe_one
 
 
-def _build_health_profile(inputs: list[Path], ffmpeg_bin: str) -> dict[int, HealthInfo]:
+def _build_health_profile(
+    inputs: list[Path],
+    metas: list[VideoMeta],
+    ffmpeg_bin: str,
+) -> dict[int, HealthInfo]:
     """Upfront health probe for all inputs. This is the key improvement:
     detect bitstream corruption *before* expensive copy attempts.
     """
     health: dict[int, HealthInfo] = {}
-    metas = probe_many(inputs)
-    bad_indexes = ffmpeg_mod._find_bad_h264_segments(inputs, ffmpeg_bin, tail_seconds=60.0)
-    bad_set = set(bad_indexes)
+    h264_indexes = [
+        index
+        for index, meta in enumerate(metas)
+        if meta.probe_ok and meta.video_codec == "h264"
+    ]
+    h264_inputs = [inputs[index] for index in h264_indexes]
+    bad_set: set[int] = set()
+    if h264_inputs:
+        bad_relative_indexes = ffmpeg_mod._find_bad_h264_segments(
+            h264_inputs,
+            ffmpeg_bin,
+            tail_seconds=60.0,
+        )
+        bad_set = {
+            h264_indexes[index]
+            for index in bad_relative_indexes
+            if 0 <= index < len(h264_indexes)
+        }
 
     for i, (inp, meta) in enumerate(zip(inputs, metas)):
         is_corrupt = i in bad_set
@@ -73,12 +93,32 @@ class Strategy(ABC):
         try:
             log_dir = context.output.parent / "concat_attempts"
             log_dir.mkdir(parents=True, exist_ok=True)
-            safe_name = self.name.replace(" ", "_").replace("/", "_")
-            log_path = log_dir / f"{safe_name}.log"
+            safe_name = _safe_attempt_name(self.name)
+            log_path = _unique_path(log_dir / f"{safe_name}.log")
             log_path.write_text(log_text, encoding="utf-8", errors="replace")
             return log_path
         except Exception:
             return None
+
+    def _save_named_log(self, context: ConcatContext, name: str, log_text: str) -> Path | None:
+        try:
+            log_dir = context.output.parent / "concat_attempts"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            log_path = _unique_path(log_dir / f"{_safe_attempt_name(name)}.log")
+            log_path.write_text(log_text, encoding="utf-8", errors="replace")
+            return log_path
+        except Exception:
+            return None
+
+    def _record_failure(self, context: ConcatContext, exc: Exception) -> None:
+        full_log = str(exc)
+        profile = ffmpeg_mod.classify_ffmpeg_output(full_log)
+        log_path = self._save_log(context, full_log)
+        context.attempts.append(AttemptRecord(self.name, False, full_log, profile, log_path))
+        if context.profile is None:
+            context.profile = profile
+        else:
+            context.profile = context.profile.merge(profile)
 
 
 class DirectCopyStrategy(Strategy):
@@ -87,9 +127,9 @@ class DirectCopyStrategy(Strategy):
     def is_applicable(self, context: ConcatContext) -> bool:
         if context.force_normalize:
             return False
-        # Always allow the cheap direct attempt (bitstream_fatal will make it fail fast with rich log if corruption present).
-        # This keeps test expectations on call order (and matches historical behavior for direct attempt).
-        return True
+        if any(not meta.probe_ok for meta in context.metas):
+            return True
+        return can_direct_concat_copy(context.metas)
 
     def execute(self, context: ConcatContext) -> bool:
         concat_file = context.concat_file or (context.output.parent / "concat_list.txt")
@@ -127,7 +167,8 @@ class AudioReencodeStrategy(Strategy):
     name = "audio-only reencode"
 
     def is_applicable(self, context: ConcatContext) -> bool:
-        # Can try even if bitstream suspected (v copy may still work or surface error)
+        if context.profile and context.profile.is_bitstream_problem():
+            return False
         return True
 
     def execute(self, context: ConcatContext) -> bool:
@@ -155,6 +196,97 @@ class AudioReencodeStrategy(Strategy):
                 context.profile = profile
             else:
                 context.profile = context.profile.merge(profile)
+            return False
+
+
+class TimestampIndexRemuxCopyStrategy(Strategy):
+    name = "timestamp/index remux copy"
+
+    def is_applicable(self, context: ConcatContext) -> bool:
+        if context.force_normalize:
+            return False
+        profile = context.profile
+        if profile and profile.is_bitstream_problem():
+            return False
+        if profile and (
+            profile.timestamp_discontinuity
+            or profile.duration_truncated
+            or profile.summary in {"unknown", "unknown/other", "no details"}
+        ):
+            return True
+        return True
+
+    def execute(self, context: ConcatContext) -> bool:
+        try:
+            ffmpeg_mod._concat_timestamp_remuxed_copy(
+                context.inputs,
+                context.output,
+                context.ffmpeg_bin,
+                context.expected_duration,
+            )
+            context.attempts.append(AttemptRecord(self.name, True, "ok"))
+            return True
+        except ffmpeg_mod.FFmpegError as exc:
+            self._record_failure(context, exc)
+            return False
+
+
+class TimestampIndexRemuxAudioResyncStrategy(Strategy):
+    name = "timestamp/index remux + audio resync"
+
+    def is_applicable(self, context: ConcatContext) -> bool:
+        profile = context.profile
+        if profile and profile.is_bitstream_problem():
+            return False
+        if profile and (
+            profile.timestamp_discontinuity
+            or profile.duration_truncated
+            or profile.audio_decode_fail
+        ):
+            return True
+        return True
+
+    def execute(self, context: ConcatContext) -> bool:
+        try:
+            ffmpeg_mod._concat_timestamp_remuxed_audio_resync(
+                context.inputs,
+                context.output,
+                context.ffmpeg_bin,
+                context.audio_bitrate_kbps,
+                context.expected_duration,
+            )
+            context.attempts.append(AttemptRecord(self.name, True, "ok"))
+            return True
+        except ffmpeg_mod.FFmpegError as exc:
+            self._record_failure(context, exc)
+            return False
+
+
+class FastTransmuxStrategy(Strategy):
+    name = "fast transmux (mp4-ts-mp4)"
+
+    def is_applicable(self, context: ConcatContext) -> bool:
+        if context.force_normalize:
+            return False
+        profile = context.profile
+        if profile and profile.is_bitstream_problem():
+            return False
+        if any(meta.video_codec not in {None, "h264"} for meta in context.metas):
+            return False
+        return True
+
+    def execute(self, context: ConcatContext) -> bool:
+        try:
+            ffmpeg_mod._concat_fast_transmux_copy(
+                context.inputs,
+                context.output,
+                context.ffmpeg_bin,
+                context.expected_duration,
+            )
+            context.attempts.append(AttemptRecord(self.name, True, "ok"))
+            return True
+        except ffmpeg_mod.FFmpegError as exc:
+            self._record_failure(context, exc)
             return False
 
 
@@ -215,6 +347,14 @@ class TargetedRepairStrategy(Strategy):
                 )
             except Exception:
                 bad = []
+        if not bad and context.profile and context.profile.is_bitstream_problem():
+            try:
+                print("[concat] Tail scan found no corrupt segment; scanning full inputs for H.264 corruption.")
+                bad = ffmpeg_mod._find_bad_h264_segments(
+                    context.inputs, context.ffmpeg_bin, tail_seconds=None
+                )
+            except Exception:
+                bad = []
 
         if not bad:
             # Record skip
@@ -225,6 +365,33 @@ class TargetedRepairStrategy(Strategy):
             f"[concat] Detected possible corrupt H.264 segment(s) "
             f"{', '.join(str(i + 1) for i in bad)}; repairing only those segment(s)."
         )
+
+        try:
+            print("[concat] Trying fixed tail-window H.264 repair before full bad-segment reencode.")
+            ffmpeg_mod._concat_tail_window_repaired_bad_segments_copy(
+                context.inputs,
+                context.output,
+                context.ffmpeg_bin,
+                context.video_codec,
+                context.audio_bitrate_kbps,
+                context.expected_duration,
+                bad_indexes=bad,
+                repair_window_seconds=90.0,
+                guard_seconds=2.0,
+            )
+            _validate_output(context.output, context.ffmpeg_bin, context.expected_duration)
+            context.attempts.append(AttemptRecord(f"{self.name} (tail window)", True, "ok"))
+            return True
+        except ffmpeg_mod.FFmpegError as exc:
+            context.attempts.append(
+                AttemptRecord(
+                    f"{self.name} (tail window)",
+                    False,
+                    str(exc),
+                    ffmpeg_mod.classify_ffmpeg_output(str(exc)),
+                    self._save_log(context, str(exc)),
+                )
+            )
 
         try:
             ffmpeg_mod._concat_reencoded_bad_segments_copy(
@@ -268,6 +435,11 @@ class SelectiveNormalizeStrategy(Strategy):
         metas = probe_many(context.inputs)
         target = context.target
         target_size = context.target_size
+        force_indexes = {
+            index
+            for index, health in (context.health or {}).items()
+            if health.is_bitstream_corrupt
+        }
 
         try:
             # Call the existing helper (kept for compatibility during refactor)
@@ -275,6 +447,7 @@ class SelectiveNormalizeStrategy(Strategy):
                 context.inputs, metas, target, target_size,
                 context.output, context.ffmpeg_bin, context.video_codec,
                 context.audio_bitrate_kbps, context.expected_duration,
+                force_indexes=force_indexes,
             )
             context.attempts.append(AttemptRecord(self.name, True, "ok"))
             return True
@@ -291,6 +464,43 @@ class SelectiveNormalizeStrategy(Strategy):
             return False
 
 
+class BoundaryNormalizeStrategy(Strategy):
+    name = "structural duration boundary normalize"
+
+    def is_applicable(self, context: ConcatContext) -> bool:
+        if context.profile and context.profile.is_bitstream_problem():
+            return False
+        return bool(_duration_failure_boundary_indexes(context))
+
+    def execute(self, context: ConcatContext) -> bool:
+        indexes = _duration_failure_boundary_indexes(context)
+        if not indexes:
+            context.attempts.append(AttemptRecord(self.name, False, "skipped: no duration boundary detected"))
+            return False
+        print(
+            "[concat] Structural duration failure appears near segment(s) "
+            f"{', '.join(str(i + 1) for i in indexes)}; normalizing only boundary segment(s)."
+        )
+        try:
+            _selective_normalize_concat(
+                context.inputs,
+                context.metas,
+                context.target,
+                context.target_size,
+                context.output,
+                context.ffmpeg_bin,
+                context.video_codec,
+                context.audio_bitrate_kbps,
+                context.expected_duration,
+                force_indexes=set(indexes),
+            )
+            context.attempts.append(AttemptRecord(self.name, True, "ok"))
+            return True
+        except ffmpeg_mod.FFmpegError as exc:
+            self._record_failure(context, exc)
+            return False
+
+
 class FullReencodeStrategy(Strategy):
     name = "full reencode (demuxer + filter fallback)"
 
@@ -303,35 +513,66 @@ class FullReencodeStrategy(Strategy):
         context.concat_file = concat_file
 
         scale_args = ffmpeg_mod._concat_scale_args(context.target_size)
-        for encode_args in ffmpeg_mod._concat_reencode_arg_candidates(context.ffmpeg_bin, context.video_codec):
+        for candidate_index, encode_args in enumerate(
+            ffmpeg_mod._concat_reencode_arg_candidates(context.ffmpeg_bin, context.video_codec)
+        ):
+            candidate = _candidate_output_path(context, f"{self.name}_demuxer", candidate_index)
             try:
                 # Use existing demuxer reencode helper
                 _concat_demuxer_full_reencode(
-                    context.output, concat_file, context.ffmpeg_bin,
+                    candidate, concat_file, context.ffmpeg_bin,
                     scale_args, encode_args, context.audio_bitrate_kbps,
                     context.expected_duration,
                 )
+                _commit_candidate_output(candidate, context.output)
                 context.attempts.append(AttemptRecord(f"{self.name} (demuxer)", True, "ok"))
                 return True
             except ffmpeg_mod.FFmpegError as exc:
-                # try next encoder
-                pass
+                full_log = str(exc)
+                profile = ffmpeg_mod.classify_ffmpeg_output(full_log)
+                log_path = self._save_named_log(
+                    context,
+                    f"{self.name} demuxer candidate {candidate_index:02d}",
+                    full_log,
+                )
+                context.attempts.append(AttemptRecord(f"{self.name} (demuxer)", False, full_log, profile, log_path))
+                ffmpeg_mod._safe_unlink(candidate)
+                _cleanup_empty_dir(candidate.parent)
+                if context.profile is None:
+                    context.profile = profile
+                else:
+                    context.profile = context.profile.merge(profile)
+                if _is_output_duration_failure(full_log):
+                    print(
+                        "[concat] Demuxer full reencode produced invalid stream duration; "
+                        "switching to concat filter fallback."
+                    )
+                    break
 
         # Last resort: concat filter (decodes everything, handles worst cases)
-        for command in ffmpeg_mod._concat_filter_commands(
+        for candidate_index, command in enumerate(ffmpeg_mod._concat_filter_commands(
             context.inputs, context.output, context.ffmpeg_bin,
             context.video_codec, context.target_size, context.audio_bitrate_kbps,
-        ):
+        )):
+            candidate = _candidate_output_path(context, f"{self.name}_filter", candidate_index)
+            command = [str(candidate) if arg == str(context.output) else arg for arg in command]
             try:
                 ffmpeg_mod.run_command(command, timeout=7200)
-                _validate_output(context.output, context.ffmpeg_bin, context.expected_duration)
+                _validate_output(candidate, context.ffmpeg_bin, context.expected_duration)
+                _commit_candidate_output(candidate, context.output)
                 context.attempts.append(AttemptRecord(f"{self.name} (filter)", True, "ok"))
                 return True
             except ffmpeg_mod.FFmpegError as exc:
                 full_log = str(exc)
                 profile = ffmpeg_mod.classify_ffmpeg_output(full_log)
-                log_path = self._save_log(context, full_log)
+                log_path = self._save_named_log(
+                    context,
+                    f"{self.name} filter candidate {candidate_index:02d}",
+                    full_log,
+                )
                 context.attempts.append(AttemptRecord(f"{self.name} (filter)", False, full_log, profile, log_path))
+                ffmpeg_mod._safe_unlink(candidate)
+                _cleanup_empty_dir(candidate.parent)
                 if context.profile is None:
                     context.profile = profile
                 else:
@@ -356,22 +597,27 @@ class ConcatPipeline:
     def __init__(self):
         self.strategies: list[Strategy] = [
             DirectCopyStrategy(),
+            TimestampIndexRemuxCopyStrategy(),
             AudioReencodeStrategy(),
+            TimestampIndexRemuxAudioResyncStrategy(),
+            FastTransmuxStrategy(),
             RemuxThenCopyStrategy(),
             TargetedRepairStrategy(),
             SelectiveNormalizeStrategy(),
+            BoundaryNormalizeStrategy(),
             FullReencodeStrategy(),
         ]
 
     def run(self, context: ConcatContext) -> Path:
         # 1. Upfront health
-        context.health = _build_health_profile(context.inputs, context.ffmpeg_bin)
+        context.health = _build_health_profile(context.inputs, context.metas, context.ffmpeg_bin)
 
         # 2. Initial profile from health
         initial_profile = ProblemProfile()
         corrupt = [i for i, h in context.health.items() if h.is_bitstream_corrupt]
         if corrupt:
             initial_profile.bitstream_corrupt_indexes = corrupt
+            initial_profile.bitstream_corruption = True
             initial_profile.summary = "bitstream_corruption (from upfront probe)"
         context.profile = initial_profile
 
@@ -380,7 +626,39 @@ class ConcatPipeline:
         _write_concat_list(concat_file, context.inputs)
         context.concat_file = concat_file
 
-        for strat in self.strategies:
+        strategies = self.strategies
+        if corrupt:
+            print(
+                "[concat] Upfront H.264 tail probe found corrupt segment(s) "
+                f"{', '.join(str(i + 1) for i in corrupt)}; skipping copy-based concat attempts."
+            )
+            corrupt_ratio = _corrupt_duration_ratio(context, corrupt)
+            count_ratio = len(corrupt) / max(1, len(context.inputs))
+            should_skip_mixed = (
+                corrupt_ratio > 0.5
+                if corrupt_ratio is not None
+                else count_ratio > 0.5
+            )
+            if should_skip_mixed:
+                ratio_text = (
+                    f"{corrupt_ratio:.2%} of input duration"
+                    if corrupt_ratio is not None
+                    else f"{count_ratio:.2%} of input files"
+                )
+                print(
+                    f"[concat] Corrupt H.264 segment(s) cover {ratio_text}; skipping mixed copy repair paths "
+                    "and going straight to full reencode."
+                )
+                strategies = [FullReencodeStrategy()]
+            else:
+                strategies = [
+                    TargetedRepairStrategy(),
+                    SelectiveNormalizeStrategy(),
+                    BoundaryNormalizeStrategy(),
+                    FullReencodeStrategy(),
+                ]
+
+        for strat in strategies:
             if not strat.is_applicable(context):
                 continue
             print(f"[concat] Trying strategy: {strat.name}")
@@ -426,34 +704,9 @@ def concat_videos_smart(
             single_file_policy,
         )
 
-    metas = probe_many(inputs)
-    expected = expected_duration(metas)
-    if expected is None:
-        expected = ffmpeg_mod._sum_media_durations(inputs)
-    target = build_target_profile(metas, audio_bitrate_kbps)
-    target_size = _target_size(target) or ffmpeg_mod._get_min_video_size(inputs)
-
     # Thin wrapper: builds ConcatContext and delegates to the refactored
     # ConcatPipeline (new output-driven architecture with Strategy + ProblemProfile).
     # Public API (concat_videos_smart) remains fully compatible.
-    ffmpeg_bin = ffmpeg_mod.require_binary("ffmpeg")
-    inputs = [Path(video).resolve() for video in input_videos]
-    output = Path(output_video).resolve()
-    output.parent.mkdir(parents=True, exist_ok=True)
-
-    if not inputs:
-        raise ValueError("No input videos provided")
-
-    if len(inputs) == 1:
-        return ffmpeg_mod._handle_single_input(
-            inputs[0],
-            output,
-            ffmpeg_bin,
-            video_codec,
-            audio_bitrate_kbps,
-            single_file_policy,
-        )
-
     metas = probe_many(inputs)
     expected = expected_duration(metas)
     if expected is None:
@@ -463,6 +716,7 @@ def concat_videos_smart(
 
     context = ConcatContext(
         inputs=inputs,
+        metas=metas,
         output=output,
         ffmpeg_bin=ffmpeg_bin,
         video_codec=video_codec,
@@ -684,15 +938,17 @@ def _selective_normalize_concat(
     video_codec: str,
     audio_bitrate_kbps: int,
     expected_duration_value: float | None,
+    force_indexes: set[int] | None = None,
 ) -> None:
     temp_dir = output.parent / f"concat_selective_{uuid4().hex}"
     temp_dir.mkdir(parents=True, exist_ok=True)
     selected: list[Path] = []
     list_file = temp_dir / "concat_list.txt"
+    force_indexes = force_indexes or set()
     try:
         for index, source in enumerate(inputs):
             meta = metas[index] if index < len(metas) else None
-            if meta is not None and file_matches_profile(meta, target):
+            if index not in force_indexes and meta is not None and file_matches_profile(meta, target):
                 selected.append(source)
                 continue
             target_file = temp_dir / f"{index:05d}.mp4"
@@ -906,6 +1162,44 @@ def _write_concat_list(path: Path, videos: list[Path]) -> None:
             handle.write(f"file '{escaped}'\n")
 
 
+def _safe_attempt_name(name: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", name).strip("_") or "attempt"
+
+
+def _unique_path(path: Path) -> Path:
+    if not path.exists():
+        return path
+    stem = path.stem
+    suffix = path.suffix
+    parent = path.parent
+    index = 1
+    while True:
+        candidate = parent / f"{stem}_{index:02d}{suffix}"
+        if not candidate.exists():
+            return candidate
+        index += 1
+
+
+def _candidate_output_path(context: ConcatContext, name: str, index: int) -> Path:
+    candidate_dir = context.output.parent / "_concat_candidates"
+    candidate_dir.mkdir(parents=True, exist_ok=True)
+    return candidate_dir / f"{_safe_attempt_name(name)}_{index:02d}{context.output.suffix or '.mp4'}"
+
+
+def _commit_candidate_output(candidate: Path, output: Path) -> None:
+    output.parent.mkdir(parents=True, exist_ok=True)
+    candidate_parent = candidate.parent
+    candidate.replace(output)
+    _cleanup_empty_dir(candidate_parent)
+
+
+def _cleanup_empty_dir(path: Path) -> None:
+    try:
+        path.rmdir()
+    except OSError:
+        pass
+
+
 def _target_size(target: TargetProfile) -> tuple[int, int] | None:
     if target.width and target.height:
         return target.width, target.height
@@ -923,6 +1217,73 @@ def _has_video_bitstream_failure(attempts: list[ConcatAttempt]) -> bool:
     return False
 
 
+def _duration_failure_boundary_indexes(context: ConcatContext) -> list[int]:
+    actual = _latest_failed_video_duration(context)
+    if actual is None:
+        return []
+    return _boundary_indexes_for_duration(context.metas, actual)
+
+
+def _latest_failed_video_duration(context: ConcatContext) -> float | None:
+    for attempt in reversed(context.attempts):
+        detail = attempt.detail or ""
+        value = _extract_failed_video_duration(detail)
+        if value is not None:
+            return value
+    return None
+
+
+def _extract_failed_video_duration(detail: str) -> float | None:
+    patterns = [
+        r"Concat output video stream duration is too short:\s*([0-9.]+)s",
+        r"Concat output duration is too short:\s*([0-9.]+)s",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, detail, re.IGNORECASE)
+        if not match:
+            continue
+        try:
+            return float(match.group(1))
+        except ValueError:
+            return None
+    return None
+
+
+def _boundary_indexes_for_duration(metas: list[VideoMeta], actual_duration: float) -> list[int]:
+    if actual_duration <= 0:
+        return []
+    cumulative = 0.0
+    total = sum(float(meta.duration or 0.0) for meta in metas)
+    tolerance = max(2.0, total * 0.0005)
+    for index, meta in enumerate(metas):
+        if meta.duration is None:
+            return []
+        cumulative += float(meta.duration)
+        if abs(cumulative - actual_duration) <= tolerance:
+            candidates = {index}
+            if index + 1 < len(metas):
+                candidates.add(index + 1)
+            if index - 1 >= 0:
+                candidates.add(index - 1)
+            return sorted(candidates)
+    return []
+
+
+def _corrupt_duration_ratio(context: ConcatContext, corrupt_indexes: list[int]) -> float | None:
+    if not corrupt_indexes:
+        return 0.0
+    durations: list[float] = []
+    for meta in context.metas:
+        if meta.duration is None:
+            return None
+        durations.append(float(meta.duration))
+    total = sum(durations)
+    if total <= 0:
+        return None
+    bad = sum(durations[index] for index in set(corrupt_indexes) if 0 <= index < len(durations))
+    return bad / total
+
+
 def _format_failures(attempts: list[ConcatAttempt]) -> str:
     lines = ["All concat attempts failed:"]
     for attempt in attempts:
@@ -933,3 +1294,13 @@ def _format_failures(attempts: list[ConcatAttempt]) -> str:
             detail = detail[:700] + "..."
         lines.append(f"- {attempt.name}: {detail}")
     return "\n".join(lines)
+
+
+def _is_output_duration_failure(detail: str) -> bool:
+    text = detail.lower()
+    return (
+        "concat output duration is too short" in text
+        or "concat output duration is too long" in text
+        or "concat output video stream duration is too short" in text
+        or "concat output video stream duration is too long" in text
+    )

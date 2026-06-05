@@ -260,9 +260,153 @@ class TestSongMissedRecheck:
 
         assert recheck["enabled"] is True
         assert recheck["batch_size"] == 500
+        assert recheck["context_segments"] == 10
+        assert DEFAULT_CONFIG["song"]["padding"]["max_song_seconds"] == 360.0
+
+    def test_short_recheck_ranges_are_filtered_by_min_song_seconds(self):
+        from dd_clip_miner_llm.pipeline import _filter_short_segment_ranges
+
+        segments = [
+            TranscriptSegment(start=0.0, end=10.0, text="短空隙"),
+            TranscriptSegment(start=10.0, end=90.0, text="足够长"),
+            TranscriptSegment(start=90.0, end=100.0, text="足够长结束"),
+        ]
+
+        kept, skipped = _filter_short_segment_ranges(
+            segments,
+            [(0, 0), (1, 2)],
+            min_duration_seconds=75.0,
+        )
+
+        assert kept == [(1, 2)]
+        assert skipped == 1
+
+    def test_recheck_ranges_include_context_but_keep_core_matches(self, tmp_path, monkeypatch):
+        from dd_clip_miner_llm.pipeline import _recheck_uncovered_song_segments
+
+        segments = [
+            TranscriptSegment(start=0.0, end=10.0, text="左上下文"),
+            TranscriptSegment(start=10.0, end=30.0, text="漏识别开始"),
+            TranscriptSegment(start=30.0, end=60.0, text="漏识别中间"),
+            TranscriptSegment(start=60.0, end=90.0, text="漏识别结束"),
+            TranscriptSegment(start=90.0, end=100.0, text="右上下文"),
+        ]
+        matches = [
+            ContentMatch(content_type="song", title="已识别左", segment_indices=[0], confidence=0.9),
+            ContentMatch(content_type="song", title="已识别右", segment_indices=[4], confidence=0.9),
+        ]
+        config = deep_merge(DEFAULT_CONFIG, {
+            "song": {
+                "padding": {"min_song_seconds": 0.0},
+                "missed_recheck": {
+                    "enabled": True,
+                    "batch_size": 500,
+                    "min_gap_segments": 1,
+                    "context_segments": 1,
+                },
+            },
+        })
+        seen = {}
+
+        def fake_identify_content(chunk, _config, _recognizer, debug_dir=None):
+            seen["range"] = (chunk[0].text, chunk[-1].text)
+            seen["debug_dir"] = Path(debug_dir).name
+            return [
+                ContentMatch(
+                    content_type="song",
+                    title="二次识别",
+                    segment_indices=[0, 1, 2, 3, 4],
+                    confidence=0.9,
+                )
+            ]
+
+        monkeypatch.setattr("dd_clip_miner_llm.llm.identify_content", fake_identify_content)
+
+        result = _recheck_uncovered_song_segments(
+            segments,
+            config,
+            object(),
+            matches,
+            tmp_path,
+        )
+
+        assert seen["range"] == ("左上下文", "右上下文")
+        assert seen["debug_dir"] == "000001_000003"
+        assert result[-1].segment_indices == [1, 2, 3]
 
 
 # ============ ffmpeg.py 测试 ============
+
+    def test_overlong_song_recheck_replaces_when_second_pass_splits(self, tmp_path, monkeypatch):
+        from dd_clip_miner_llm.pipeline import _recheck_overlong_song_matches
+
+        segments = [
+            TranscriptSegment(start=0.0, end=100.0, text="a"),
+            TranscriptSegment(start=100.0, end=200.0, text="b"),
+            TranscriptSegment(start=200.0, end=300.0, text="c"),
+            TranscriptSegment(start=300.0, end=470.0, text="d"),
+        ]
+        matches = [
+            ContentMatch(content_type="song", title="too long", segment_indices=[0, 1, 2, 3], confidence=0.9)
+        ]
+        config = deep_merge(DEFAULT_CONFIG, {
+            "song": {
+                "padding": {
+                    "max_song_seconds": 360.0,
+                    "merge_gap_seconds": 20.0,
+                },
+                "missed_recheck": {"enabled": True, "context_segments": 1},
+            },
+        })
+
+        def fake_identify_content(_chunk, _config, _recognizer, debug_dir=None):
+            return [
+                ContentMatch(content_type="song", title="part 1", segment_indices=[0, 1], confidence=0.9),
+                ContentMatch(content_type="song", title="part 2", segment_indices=[2, 3], confidence=0.9),
+            ]
+
+        monkeypatch.setattr("dd_clip_miner_llm.llm.identify_content", fake_identify_content)
+
+        result = _recheck_overlong_song_matches(segments, config, object(), matches, tmp_path)
+
+        assert [match.title for match in result] == ["part 1", "part 2"]
+        assert [match.segment_indices for match in result] == [[0, 1], [2, 3]]
+
+    def test_overlong_song_recheck_keeps_first_pass_when_second_pass_still_overlong(self, tmp_path, monkeypatch):
+        from dd_clip_miner_llm.pipeline import _recheck_overlong_song_matches
+
+        segments = [
+            TranscriptSegment(start=0.0, end=100.0, text="a"),
+            TranscriptSegment(start=100.0, end=200.0, text="b"),
+            TranscriptSegment(start=200.0, end=300.0, text="c"),
+            TranscriptSegment(start=300.0, end=470.0, text="d"),
+        ]
+        matches = [
+            ContentMatch(content_type="song", title="large model", segment_indices=[0, 1, 2, 3], confidence=0.9)
+        ]
+        config = deep_merge(DEFAULT_CONFIG, {
+            "song": {
+                "padding": {
+                    "max_song_seconds": 360.0,
+                    "merge_gap_seconds": 20.0,
+                },
+                "missed_recheck": {"enabled": True, "context_segments": 1},
+            },
+        })
+
+        def fake_identify_content(_chunk, _config, _recognizer, debug_dir=None):
+            return [
+                ContentMatch(content_type="song", title="still too long", segment_indices=[0, 1, 2, 3], confidence=0.9),
+            ]
+
+        monkeypatch.setattr("dd_clip_miner_llm.llm.identify_content", fake_identify_content)
+
+        result = _recheck_overlong_song_matches(segments, config, object(), matches, tmp_path)
+
+        assert len(result) == 1
+        assert result[0].title == "large model"
+        assert result[0].segment_indices == [0, 1, 2, 3]
+
 
 class TestFFmpeg:
     def test_auto_video_candidates_copy_first_then_hardware(self, monkeypatch):
@@ -280,13 +424,14 @@ class TestFFmpeg:
         assert candidates[3][1] == "h264_amf"
         assert candidates[4][1] == "libx264"
 
-    def test_concat_uses_targeted_reencode_after_video_bitstream_failures(self, tmp_path, monkeypatch):
+    def test_concat_uses_targeted_reencode_when_health_probe_finds_bad_segment(self, tmp_path, monkeypatch):
+        from dd_clip_miner_llm.concat import pipeline as concat_pipeline
+        from dd_clip_miner_llm.concat.models import VideoMeta
+
         calls = []
 
         def fake_run_command(args, timeout=3600, **_kwargs):
             calls.append(args)
-            if len(calls) <= 2:
-                raise ffmpeg.FFmpegError("copy/audio failed")
 
         monkeypatch.setattr(ffmpeg, "require_binary", lambda name: name)
         monkeypatch.setattr(ffmpeg, "run_command", fake_run_command)
@@ -296,10 +441,20 @@ class TestFFmpeg:
             lambda _videos, _bin, tail_seconds=None: [1],
         )
         monkeypatch.setattr(
+            concat_pipeline,
+            "probe_many",
+            lambda paths: [
+                VideoMeta(Path(path), None, True, True, "h264", 640, 360, 60.0, "yuv420p", "1:1", "aac", 48000, 2, "stereo")
+                for path in paths
+            ],
+        )
+        monkeypatch.setattr(
             ffmpeg,
             "detect_video_encoders",
             lambda _ffmpeg_bin: {"libx264"},
         )
+        monkeypatch.setattr(ffmpeg, "_get_video_fps", lambda _video: 60.0)
+        monkeypatch.setattr(ffmpeg, "_has_audio_stream", lambda _video: True)
         monkeypatch.setattr(
             ffmpeg,
             "_concat_remuxed_copy",
@@ -317,13 +472,81 @@ class TestFFmpeg:
             audio_bitrate_kbps=320,
         )
 
-        assert calls[2][calls[2].index("-i") + 1] == str(tmp_path / "b.mp4")
-        assert calls[2][calls[2].index("-c:v") + 1] == "libx264"
-        assert calls[2][calls[2].index("-fflags") + 1] == "+discardcorrupt"
-        assert calls[3][calls[3].index("-c") + 1] == "copy"
+        assert calls[0][calls[0].index("-i") + 1] == str(tmp_path / "b.mp4")
+        assert calls[0][calls[0].index("-c:v") + 1] == "libx264"
+        assert calls[0][calls[0].index("-fflags") + 1] == "+discardcorrupt"
+        assert calls[0][calls[0].index("-vf") + 1] == "fps=60,setpts=N/(60*TB)"
+        assert calls[0][calls[0].index("-af") + 1] == "asetpts=PTS-STARTPTS"
+        assert calls[1][calls[1].index("-c") + 1] == "copy"
         assert not (tmp_path / "concat_list.txt").exists()
 
-    def test_concat_falls_back_to_audio_reencode_before_remux(self, tmp_path, monkeypatch):
+    def test_concat_skips_mixed_repair_when_most_inputs_are_corrupt(self, tmp_path, monkeypatch):
+        from dd_clip_miner_llm.concat import pipeline as concat_pipeline
+        from dd_clip_miner_llm.concat.models import VideoMeta
+
+        executed = []
+        paths = [tmp_path / f"part_{i}.mp4" for i in range(4)]
+
+        monkeypatch.setattr(ffmpeg, "require_binary", lambda name: name)
+        monkeypatch.setattr(
+            concat_pipeline,
+            "probe_many",
+            lambda probe_paths: [
+                VideoMeta(Path(path), None, True, True, "h264", 640, 360, 60.0, "yuv420p", "1:1", "aac", 48000, 2, "stereo")
+                for path in probe_paths
+            ],
+        )
+        monkeypatch.setattr(
+            ffmpeg,
+            "_find_bad_h264_segments",
+            lambda _videos, _bin, tail_seconds=None: [0, 1, 2],
+        )
+        monkeypatch.setattr(
+            concat_pipeline.TargetedRepairStrategy,
+            "execute",
+            lambda *_args: (_ for _ in ()).throw(AssertionError("targeted should be skipped")),
+        )
+        monkeypatch.setattr(
+            concat_pipeline.SelectiveNormalizeStrategy,
+            "execute",
+            lambda *_args: (_ for _ in ()).throw(AssertionError("selective should be skipped")),
+        )
+
+        def fake_full_execute(self, context):
+            executed.append(self.name)
+            context.attempts.append(concat_pipeline.AttemptRecord(self.name, True, "ok"))
+            return True
+
+        monkeypatch.setattr(concat_pipeline.FullReencodeStrategy, "execute", fake_full_execute)
+
+        output = tmp_path / "concat.mp4"
+        ffmpeg.concat_videos(paths, output, video_codec="auto", audio_bitrate_kbps=320)
+
+        assert executed == ["full reencode (demuxer + filter fallback)"]
+
+    def test_concat_duration_validation_rejects_too_long_output(self, tmp_path, monkeypatch):
+        output = tmp_path / "concat.mp4"
+        monkeypatch.setattr(ffmpeg, "get_duration", lambda _path: 110.0)
+        monkeypatch.setattr(ffmpeg, "_get_stream_duration", lambda *_args: None)
+
+        with pytest.raises(ffmpeg.FFmpegError, match="too long"):
+            ffmpeg._validate_concat_duration(output, 100.0)
+
+    def test_concat_duration_validation_rejects_short_video_stream(self, tmp_path, monkeypatch):
+        output = tmp_path / "concat.mp4"
+        monkeypatch.setattr(ffmpeg, "get_duration", lambda _path: 100.0)
+        monkeypatch.setattr(ffmpeg, "_get_stream_duration", lambda *_args: 70.0)
+
+        with pytest.raises(ffmpeg.FFmpegError, match="video stream duration is too short"):
+            ffmpeg._validate_concat_duration(output, 100.0)
+
+    def test_output_duration_failure_detection(self):
+        from dd_clip_miner_llm.concat.pipeline import _is_output_duration_failure
+
+        assert _is_output_duration_failure("Concat output video stream duration is too short: 1")
+        assert not _is_output_duration_failure("Invalid NAL unit size")
+
+    def test_concat_falls_back_to_timestamp_remux_before_audio_reencode(self, tmp_path, monkeypatch):
         calls = []
 
         def fake_run_command(args, timeout=3600, **_kwargs):
@@ -348,11 +571,167 @@ class TestFFmpeg:
             audio_bitrate_kbps=320,
         )
 
-        assert calls[1][calls[1].index("-c:v") + 1] == "copy"
-        assert calls[1][calls[1].index("-c:a") + 1] == "aac"
-        assert calls[1][calls[1].index("-ar") + 1] == "48000"
-        assert calls[1][calls[1].index("-ac") + 1] == "2"
+        assert calls[1][calls[1].index("-fflags") + 1] == "+genpts+igndts+discardcorrupt"
+        assert calls[1][calls[1].index("-err_detect") + 1] == "ignore_err"
+        assert calls[1][calls[1].index("-c") + 1] == "copy"
+        assert "-async" not in calls[1]
         assert not (tmp_path / "concat_list.txt").exists()
+
+    def test_timestamp_audio_resync_uses_aresample_not_async(self, tmp_path, monkeypatch):
+        calls = []
+
+        def fake_run_command(args, timeout=3600, **_kwargs):
+            calls.append(args)
+
+        monkeypatch.setattr(ffmpeg, "run_command", fake_run_command)
+        output = tmp_path / "out.mp4"
+        monkeypatch.setattr(ffmpeg, "get_duration", lambda path: 20.0 if Path(path) == output else 10.0)
+        monkeypatch.setattr(ffmpeg, "_validate_audio_decodable", lambda *_args: None)
+        monkeypatch.setattr(ffmpeg, "_get_stream_duration", lambda *_args: None)
+
+        ffmpeg._concat_timestamp_remuxed_audio_resync(
+            [tmp_path / "a.mp4", tmp_path / "b.mp4"],
+            output,
+            "ffmpeg",
+            320,
+            20.0,
+        )
+
+        final = calls[-1]
+        assert final[final.index("-af") + 1] == "aresample=async=1000:first_pts=0"
+        assert "-async" not in final
+
+    def test_concat_keeps_mixed_repair_when_corrupt_duration_is_small(self, tmp_path, monkeypatch):
+        from dd_clip_miner_llm.concat import pipeline as concat_pipeline
+        from dd_clip_miner_llm.concat.models import VideoMeta
+
+        executed = []
+        paths = [tmp_path / f"part_{i}.mp4" for i in range(4)]
+        durations = [1000.0, 10.0, 10.0, 10.0]
+
+        monkeypatch.setattr(ffmpeg, "require_binary", lambda name: name)
+        monkeypatch.setattr(
+            concat_pipeline,
+            "probe_many",
+            lambda probe_paths: [
+                VideoMeta(Path(path), durations[index], True, True, "h264", 640, 360, 60.0, "yuv420p", "1:1", "aac", 48000, 2, "stereo")
+                for index, path in enumerate(probe_paths)
+            ],
+        )
+        monkeypatch.setattr(
+            ffmpeg,
+            "_find_bad_h264_segments",
+            lambda _videos, _bin, tail_seconds=None: [1, 2, 3],
+        )
+
+        def fake_targeted_execute(self, context):
+            executed.append(self.name)
+            context.attempts.append(concat_pipeline.AttemptRecord(self.name, True, "ok"))
+            return True
+
+        monkeypatch.setattr(concat_pipeline.TargetedRepairStrategy, "execute", fake_targeted_execute)
+        monkeypatch.setattr(
+            concat_pipeline.FullReencodeStrategy,
+            "execute",
+            lambda *_args: (_ for _ in ()).throw(AssertionError("full reencode should be skipped")),
+        )
+
+        ffmpeg.concat_videos(paths, tmp_path / "concat.mp4", video_codec="auto", audio_bitrate_kbps=320)
+
+        assert executed == ["targeted H.264 repair"]
+
+    def test_duration_failure_boundary_indexes_use_stream_duration(self, tmp_path):
+        from dd_clip_miner_llm.concat import pipeline as concat_pipeline
+        from dd_clip_miner_llm.concat.models import ConcatContext, ProblemProfile, TargetProfile, VideoMeta
+
+        paths = [tmp_path / f"part_{i}.mp4" for i in range(3)]
+        metas = [
+            VideoMeta(paths[0], 100.0, True, True, "h264", 640, 360, 60.0, "yuv420p", "1:1", "aac", 48000, 2, "stereo"),
+            VideoMeta(paths[1], 50.0, True, True, "h264", 640, 360, 60.0, "yuv420p", "1:1", "aac", 48000, 2, "stereo"),
+            VideoMeta(paths[2], 25.0, True, True, "h264", 640, 360, 60.0, "yuv420p", "1:1", "aac", 48000, 2, "stereo"),
+        ]
+        context = ConcatContext(
+            inputs=paths,
+            metas=metas,
+            output=tmp_path / "out.mp4",
+            ffmpeg_bin="ffmpeg",
+            video_codec="auto",
+            audio_bitrate_kbps=320,
+            single_file_policy="copy",
+            force_normalize=False,
+            expected_duration=175.0,
+            target=TargetProfile(width=640, height=360, fps=60.0),
+            target_size=(640, 360),
+            profile=ProblemProfile(duration_truncated=True),
+        )
+        context.attempts.append(
+            concat_pipeline.AttemptRecord(
+                "direct concat copy",
+                False,
+                "Concat output video stream duration is too short: 100.000s, expected about 175.000s",
+            )
+        )
+
+        assert concat_pipeline._duration_failure_boundary_indexes(context) == [0, 1]
+
+    def test_full_reencode_candidates_do_not_overwrite_final_until_validated(self, tmp_path, monkeypatch):
+        from dd_clip_miner_llm.concat import pipeline as concat_pipeline
+        from dd_clip_miner_llm.concat.models import ConcatContext, TargetProfile, VideoMeta
+
+        output = tmp_path / "concat.mp4"
+        output.write_bytes(b"existing-final")
+        concat_file = tmp_path / "concat_list.txt"
+        inputs = [tmp_path / "a.mp4", tmp_path / "b.mp4"]
+        metas = [
+            VideoMeta(inputs[0], 10.0, True, True, "h264", 640, 360, 60.0, "yuv420p", "1:1", "aac", 48000, 2, "stereo"),
+            VideoMeta(inputs[1], 10.0, True, True, "h264", 640, 360, 60.0, "yuv420p", "1:1", "aac", 48000, 2, "stereo"),
+        ]
+        context = ConcatContext(
+            inputs=inputs,
+            metas=metas,
+            output=output,
+            ffmpeg_bin="ffmpeg",
+            video_codec="auto",
+            audio_bitrate_kbps=320,
+            single_file_policy="copy",
+            force_normalize=False,
+            expected_duration=20.0,
+            target=TargetProfile(width=640, height=360, fps=60.0),
+            target_size=(640, 360),
+            concat_file=concat_file,
+        )
+        candidates = [["-c:v", "h264_nvenc"]]
+        seen_outputs = []
+
+        monkeypatch.setattr(ffmpeg, "_concat_reencode_arg_candidates", lambda *_args: candidates)
+
+        def fake_demuxer(output_path, *_args, **_kwargs):
+            seen_outputs.append(Path(output_path))
+            Path(output_path).write_bytes(b"candidate-bytes")
+            if len(seen_outputs) == 1:
+                raise ffmpeg.FFmpegError("Concat output video stream duration is too short: 10.000s")
+
+        monkeypatch.setattr(concat_pipeline, "_concat_demuxer_full_reencode", fake_demuxer)
+
+        def fake_filter_commands(_inputs, output_path, *_args, **_kwargs):
+            return [["ffmpeg", "-y", str(output_path)]]
+
+        def fake_run_command(args, timeout=3600, **_kwargs):
+            Path(args[-1]).write_bytes(b"filter-candidate-bytes")
+
+        monkeypatch.setattr(ffmpeg, "_concat_filter_commands", fake_filter_commands)
+        monkeypatch.setattr(ffmpeg, "run_command", fake_run_command)
+        monkeypatch.setattr(concat_pipeline, "_validate_output", lambda *_args, **_kwargs: None)
+
+        assert concat_pipeline.FullReencodeStrategy().execute(context) is True
+
+        assert seen_outputs[0] != output
+        assert not seen_outputs[0].exists()
+        assert not (tmp_path / "_concat_candidates").exists()
+        assert output.read_bytes() == b"filter-candidate-bytes"
+        logs = sorted((tmp_path / "concat_attempts").glob("*.log"))
+        assert len(logs) == 1
+        assert "candidate_00" in logs[0].stem
 
     def test_concat_short_output_triggers_video_bitstream_scan(self):
         """Legacy internal test for _has_video_bitstream_failure (kept for compat during refactor).
@@ -371,6 +750,89 @@ class TestFFmpeg:
         ]
 
         assert _has_video_bitstream_failure(attempts) is True
+
+    def test_ffmpeg_failure_segment_numbers_parse_as_zero_based(self):
+        profile = ffmpeg.classify_ffmpeg_output(
+            "[concat] Detected possible corrupt H.264 segment(s) 2; "
+            "repairing only those segment(s)."
+        )
+
+        assert profile.bitstream_corrupt_indexes == [1]
+
+    def test_ffmpeg_failure_invalid_nal_is_bitstream_problem(self):
+        profile = ffmpeg.classify_ffmpeg_output(
+            "[h264 @ 000001] Invalid NAL unit size (10445 > 2608)."
+        )
+
+        assert profile.bitstream_corruption is True
+        assert profile.is_bitstream_problem() is True
+
+    def test_ffmpeg_auto_inserted_bitstream_filter_is_not_corruption(self):
+        profile = ffmpeg.classify_ffmpeg_output(
+            "[mov,mp4,m4a,3gp,3g2,mj2 @ 000001] "
+            "Auto-inserting h264_mp4toannexb bitstream filter"
+        )
+
+        assert profile.bitstream_corruption is False
+        assert profile.is_bitstream_problem() is False
+
+    def test_health_probe_scans_only_h264_inputs(self, tmp_path, monkeypatch):
+        from dd_clip_miner_llm.concat.models import VideoMeta
+        from dd_clip_miner_llm.concat.pipeline import _build_health_profile
+
+        inputs = [tmp_path / "a.mp4", tmp_path / "b.mp4", tmp_path / "c.mp4"]
+        metas = [
+            VideoMeta(inputs[0], 1.0, True, True, "hevc", 1920, 1080, 60.0, "yuv420p", "1:1", "aac", 48000, 2, "stereo"),
+            VideoMeta(inputs[1], 1.0, True, True, "h264", 1920, 1080, 60.0, "yuv420p", "1:1", "aac", 48000, 2, "stereo"),
+            VideoMeta(inputs[2], 1.0, True, True, "h264", 1920, 1080, 60.0, "yuv420p", "1:1", "aac", 48000, 2, "stereo"),
+        ]
+        scanned = []
+
+        def fake_find_bad(videos, _ffmpeg_bin, tail_seconds=None):
+            scanned.extend(videos)
+            return [1]
+
+        monkeypatch.setattr(ffmpeg, "_find_bad_h264_segments", fake_find_bad)
+
+        health = _build_health_profile(inputs, metas, "ffmpeg")
+
+        assert scanned == [inputs[1], inputs[2]]
+        assert health[0].is_bitstream_corrupt is False
+        assert health[1].is_bitstream_corrupt is False
+        assert health[2].is_bitstream_corrupt is True
+
+    def test_selective_normalize_forces_known_corrupt_indexes(self, tmp_path, monkeypatch):
+        from dd_clip_miner_llm.concat.models import TargetProfile, VideoMeta
+        from dd_clip_miner_llm.concat.pipeline import _selective_normalize_concat
+
+        inputs = [tmp_path / "a.mp4", tmp_path / "b.mp4"]
+        metas = [
+            VideoMeta(inputs[0], None, True, True, "h264", 640, 360, 60.0, "yuv420p", "1:1", "aac", 48000, 2, "stereo"),
+            VideoMeta(inputs[1], None, True, True, "h264", 640, 360, 60.0, "yuv420p", "1:1", "aac", 48000, 2, "stereo"),
+        ]
+        normalized = []
+
+        def fake_normalize(source, output, *_args, **_kwargs):
+            normalized.append(source)
+            output.write_bytes(b"normalized")
+
+        monkeypatch.setattr("dd_clip_miner_llm.concat.pipeline._normalize_to_profile", fake_normalize)
+        monkeypatch.setattr("dd_clip_miner_llm.concat.pipeline._concat_copy_with_list", lambda *_args, **_kwargs: None)
+
+        _selective_normalize_concat(
+            inputs,
+            metas,
+            TargetProfile(width=640, height=360, fps=60.0),
+            (640, 360),
+            tmp_path / "out.mp4",
+            "ffmpeg",
+            "auto",
+            320,
+            None,
+            force_indexes={1},
+        )
+
+        assert normalized == [inputs[1]]
 
     def test_concat_copy_codec_falls_back_to_auto_reencode(self, monkeypatch):
         monkeypatch.setattr(
@@ -459,6 +921,67 @@ class TestMergerPadding:
         assert len(results) == 1
         assert results[0].start == 92.0
         assert results[0].end == 125.0
+
+    def test_song_merge_respects_max_song_seconds(self):
+        segments = [
+            TranscriptSegment(start=0.0, end=180.0, text="第一首"),
+            TranscriptSegment(start=190.0, end=370.0, text="第二首"),
+        ]
+        config = deep_merge(DEFAULT_CONFIG, {
+            "song": {
+                "padding": {
+                    "before_seconds": 0.0,
+                    "after_seconds": 0.0,
+                    "min_song_seconds": 0.0,
+                    "max_song_seconds": 360.0,
+                    "merge_gap_seconds": 20.0,
+                },
+            },
+        })
+        matches = [
+            ContentMatch(content_type="song", title="同名歌曲", segment_indices=[0], confidence=0.9),
+            ContentMatch(content_type="song", title="同名歌曲", segment_indices=[1], confidence=0.9),
+        ]
+
+        results = build_content_results(segments, matches, 400.0, config, "song")
+
+        assert len(results) == 2
+        assert [result.duration for result in results] == [180.0, 180.0]
+
+    def test_song_match_with_large_internal_gap_is_split_before_merge(self):
+        segments = [
+            TranscriptSegment(start=0.0, end=100.0, text="第一段"),
+            TranscriptSegment(start=100.0, end=180.0, text="第一段结束"),
+            TranscriptSegment(start=500.0, end=620.0, text="第二段"),
+            TranscriptSegment(start=620.0, end=700.0, text="第二段结束"),
+        ]
+        config = deep_merge(DEFAULT_CONFIG, {
+            "song": {
+                "padding": {
+                    "before_seconds": 0.0,
+                    "after_seconds": 0.0,
+                    "min_song_seconds": 0.0,
+                    "max_song_seconds": 360.0,
+                    "merge_gap_seconds": 20.0,
+                },
+            },
+        })
+        matches = [
+            ContentMatch(
+                content_type="song",
+                title="同一条 LLM 返回",
+                segment_indices=[0, 1, 2, 3],
+                confidence=0.9,
+            )
+        ]
+
+        results = build_content_results(segments, matches, 800.0, config, "song")
+
+        assert len(results) == 2
+        assert [(result.start, result.end, result.duration) for result in results] == [
+            (0.0, 180.0, 180.0),
+            (500.0, 700.0, 200.0),
+        ]
 
 
 # ============ paths.py 测试 ============

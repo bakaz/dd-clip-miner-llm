@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import subprocess
@@ -415,8 +416,7 @@ _BITSTREAM_CORRUPTION_RES: list[re.Pattern[str]] = [
     re.compile(r"Invalid NAL", re.IGNORECASE),
     re.compile(r"missing picture", re.IGNORECASE),
     re.compile(r"decode_slice_header", re.IGNORECASE),
-    re.compile(r"bitstream", re.IGNORECASE),
-    re.compile(r"h264_mp4toannexb.*(fail|error|filter)", re.IGNORECASE),
+    re.compile(r"h264_mp4toannexb.*(fail|error)", re.IGNORECASE),
     re.compile(r"Error applying bitstream filters", re.IGNORECASE),
     re.compile(r"Invalid data found when processing input", re.IGNORECASE),
     re.compile(r"corrupt", re.IGNORECASE),
@@ -446,7 +446,12 @@ def analyze_ffmpeg_failure(details: str | list[str] | None) -> dict[str, object]
 
     bitstream = _text_indicates_bitstream_corruption(text)
     ts_issue = bool(re.search(r"non.?monotonic|invalid dts|negative ts|timestamp|pts.*(invalid|discontinu)", t))
-    dur_trunc = "concat output duration is too short" in t
+    dur_trunc = (
+        "concat output duration is too short" in t
+        or "concat output duration is too long" in t
+        or "concat output video stream duration is too short" in t
+        or "concat output video stream duration is too long" in t
+    )
     audio_fail = bool(re.search(r"audio.*(not decodable|fail|error|invalid|corrupt)", t)) or "audio is not decodable" in t
     hw_fail = bool(re.search(r"(unknown encoder|encoder not found|device.*not found|nvenc|qsv|amf).*(fail|error|unavailable|not)", t))
     demux = bool(re.search(r"(error during demuxing|error opening input|demux)", t))
@@ -494,7 +499,12 @@ def classify_ffmpeg_output(details: str | list[str] | None) -> "ProblemProfile":
 
     bitstream = _text_indicates_bitstream_corruption(text)
     ts_issue = bool(re.search(r"non.?monotonic|invalid dts|negative ts|timestamp|pts.*(invalid|discontinu)", t))
-    dur_trunc = "concat output duration is too short" in t
+    dur_trunc = (
+        "concat output duration is too short" in t
+        or "concat output duration is too long" in t
+        or "concat output video stream duration is too short" in t
+        or "concat output video stream duration is too long" in t
+    )
     audio_fail = bool(re.search(r"audio.*(not decodable|fail|error|invalid|corrupt)", t)) or "audio is not decodable" in t
     hw_fail = bool(re.search(r"(unknown encoder|encoder not found|device.*not found|nvenc|qsv|amf).*(fail|error|unavailable|not)", t))
     demux = bool(re.search(r"(error during demuxing|error opening input|demux)", t))
@@ -504,8 +514,8 @@ def classify_ffmpeg_output(details: str | list[str] | None) -> "ProblemProfile":
     idx_match = re.findall(r"segment\(s\)\s*([0-9,\s]+)", text, re.IGNORECASE)
     for m in idx_match:
         for num in re.findall(r"\d+", m):
-            corrupt_indexes.append(int(num))
-    # Also look for 0-based from previous patterns if any
+            # Log messages print human-friendly 1-based segment numbers.
+            corrupt_indexes.append(max(0, int(num) - 1))
 
     problems = []
     if bitstream:
@@ -524,6 +534,7 @@ def classify_ffmpeg_output(details: str | list[str] | None) -> "ProblemProfile":
     summary = ", ".join(problems) if problems else "unknown/other"
     return ProblemProfile(
         bitstream_corrupt_indexes=sorted(set(corrupt_indexes)),
+        bitstream_corruption=bitstream,
         demux_errors=demux,
         timestamp_discontinuity=ts_issue,
         duration_truncated=dur_trunc,
@@ -691,6 +702,22 @@ def _validate_concat_duration(output: Path, expected_duration: float | None) -> 
             "Concat output duration is too short: "
             f"{actual_duration:.3f}s, expected about {expected_duration:.3f}s"
         )
+    if actual_duration > expected_duration + tolerance:
+        raise FFmpegError(
+            "Concat output duration is too long: "
+            f"{actual_duration:.3f}s, expected about {expected_duration:.3f}s"
+        )
+    video_duration = _get_stream_duration(output, "v:0")
+    if video_duration is not None and video_duration + tolerance < expected_duration:
+        raise FFmpegError(
+            "Concat output video stream duration is too short: "
+            f"{video_duration:.3f}s, expected about {expected_duration:.3f}s"
+        )
+    if video_duration is not None and video_duration > expected_duration + tolerance:
+        raise FFmpegError(
+            "Concat output video stream duration is too long: "
+            f"{video_duration:.3f}s, expected about {expected_duration:.3f}s"
+        )
 
 
 def _has_audio_stream(input_media: str | Path) -> bool:
@@ -825,6 +852,9 @@ def _concat_reencoded_bad_segments_copy(
                         continue
 
                     target = candidate_dir / f"part_{index:04d}.mp4"
+                    fps = _get_video_fps(video)
+                    video_filter = _repair_video_filter_args(fps)
+                    audio_filter = ["-af", "asetpts=PTS-STARTPTS"] if _has_audio_stream(video) else []
                     run_command([
                         ffmpeg_bin,
                         "-y",
@@ -838,6 +868,8 @@ def _concat_reencoded_bad_segments_copy(
                         "0:v:0",
                         "-map",
                         "0:a:0?",
+                        *video_filter,
+                        *audio_filter,
                         *encode_args,
                         "-pix_fmt",
                         "yuv420p",
@@ -999,6 +1031,305 @@ def _concat_remuxed_copy(
         _safe_rmtree(temp_dir)
 
 
+def _concat_timestamp_remuxed_copy(
+    input_videos: list[str | Path],
+    output: Path,
+    ffmpeg_bin: str,
+    expected_duration: float | None,
+) -> None:
+    temp_dir = output.parent / f"_concat_ts_remux_{uuid4().hex[:8]}"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    concat_file = temp_dir / "concat_list.ffconcat"
+    remuxed: list[Path] = []
+    durations = _durations_or_none(input_videos)
+
+    try:
+        for index, video in enumerate(input_videos):
+            target = temp_dir / f"part_{index:04d}.mp4"
+            run_command([
+                ffmpeg_bin, "-y",
+                "-fflags", "+genpts+igndts+discardcorrupt",
+                "-err_detect", "ignore_err",
+                "-i", str(video),
+                "-map", "0",
+                "-c", "copy",
+                "-avoid_negative_ts", "make_zero",
+                "-movflags", "+faststart",
+                str(target),
+            ])
+            remuxed.append(target)
+
+        _write_ffconcat_list(concat_file, remuxed, durations)
+        run_command(
+            [
+                ffmpeg_bin, "-y",
+                "-f", "concat",
+                "-safe", "0",
+                "-i", str(concat_file),
+                "-map", "0:v:0?",
+                "-map", "0:a:0?",
+                "-c", "copy",
+                "-movflags", "+faststart",
+                str(output),
+            ],
+            bitstream_fatal=True,
+        )
+        _validate_concat_duration(output, expected_duration)
+        _validate_audio_decodable(output, ffmpeg_bin)
+    finally:
+        _safe_rmtree(temp_dir)
+
+
+def _concat_timestamp_remuxed_audio_resync(
+    input_videos: list[str | Path],
+    output: Path,
+    ffmpeg_bin: str,
+    audio_bitrate_kbps: int,
+    expected_duration: float | None,
+) -> None:
+    temp_dir = output.parent / f"_concat_ts_audio_{uuid4().hex[:8]}"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    concat_file = temp_dir / "concat_list.ffconcat"
+    remuxed: list[Path] = []
+    durations = _durations_or_none(input_videos)
+
+    try:
+        for index, video in enumerate(input_videos):
+            target = temp_dir / f"part_{index:04d}.mp4"
+            run_command([
+                ffmpeg_bin, "-y",
+                "-fflags", "+genpts+igndts+discardcorrupt",
+                "-err_detect", "ignore_err",
+                "-i", str(video),
+                "-map", "0",
+                "-c", "copy",
+                "-avoid_negative_ts", "make_zero",
+                "-movflags", "+faststart",
+                str(target),
+            ])
+            remuxed.append(target)
+
+        _write_ffconcat_list(concat_file, remuxed, durations)
+        run_command(
+            [
+                ffmpeg_bin, "-y",
+                "-f", "concat",
+                "-safe", "0",
+                "-i", str(concat_file),
+                "-map", "0:v:0?",
+                "-map", "0:a:0?",
+                "-c:v", "copy",
+                "-af", "aresample=async=1000:first_pts=0",
+                "-c:a", "aac",
+                "-b:a", f"{audio_bitrate_kbps}k",
+                "-ar", "48000",
+                "-ac", "2",
+                "-movflags", "+faststart",
+                str(output),
+            ],
+            bitstream_fatal=True,
+        )
+        _validate_concat_duration(output, expected_duration)
+        _validate_audio_decodable(output, ffmpeg_bin)
+    finally:
+        _safe_rmtree(temp_dir)
+
+
+def _concat_fast_transmux_copy(
+    input_videos: list[str | Path],
+    output: Path,
+    ffmpeg_bin: str,
+    expected_duration: float | None,
+) -> None:
+    temp_dir = output.parent / f"_concat_fast_transmux_{uuid4().hex[:8]}"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    ts_files: list[Path] = []
+
+    try:
+        for index, video in enumerate(input_videos):
+            target = temp_dir / f"part_{index:04d}.ts"
+            run_command([
+                ffmpeg_bin, "-y",
+                "-fflags", "+genpts+igndts+discardcorrupt",
+                "-err_detect", "ignore_err",
+                "-i", str(video),
+                "-map", "0:v:0?",
+                "-map", "0:a:0?",
+                "-c", "copy",
+                "-bsf:v", "h264_mp4toannexb",
+                "-f", "mpegts",
+                str(target),
+            ], bitstream_fatal=True)
+            ts_files.append(target)
+
+        concat_url = "concat:" + "|".join(
+            path.resolve().as_uri()
+            for path in ts_files
+        )
+        run_command(
+            [
+                ffmpeg_bin, "-y",
+                "-protocol_whitelist", "file,concat",
+                "-i", concat_url,
+                "-map", "0:v:0?",
+                "-map", "0:a:0?",
+                "-c", "copy",
+                "-bsf:a", "aac_adtstoasc",
+                "-movflags", "+faststart",
+                str(output),
+            ],
+            bitstream_fatal=True,
+        )
+        _validate_concat_duration(output, expected_duration)
+        _validate_audio_decodable(output, ffmpeg_bin)
+    finally:
+        _safe_rmtree(temp_dir)
+
+
+def _concat_tail_window_repaired_bad_segments_copy(
+    input_videos: list[str | Path],
+    output: Path,
+    ffmpeg_bin: str,
+    video_codec: str,
+    audio_bitrate_kbps: int,
+    expected_duration: float | None,
+    bad_indexes: list[int],
+    repair_window_seconds: float = 90.0,
+    guard_seconds: float = 2.0,
+) -> None:
+    if not bad_indexes:
+        raise FFmpegError("No H.264 bitstream-corrupt segments detected")
+
+    temp_dir = output.parent / f"_concat_window_repair_{uuid4().hex[:8]}"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    bad_index_set = set(bad_indexes)
+    repaired_inputs: list[str | Path] = []
+
+    try:
+        for index, video in enumerate(input_videos):
+            if index not in bad_index_set:
+                repaired_inputs.append(video)
+                continue
+
+            duration = get_duration(video)
+            if duration <= repair_window_seconds + guard_seconds + 1.0:
+                raise FFmpegError("Tail window repair skipped: segment is too short for window split")
+
+            start_tail = max(0.0, duration - repair_window_seconds - guard_seconds)
+            part_dir = temp_dir / f"part_{index:04d}"
+            part_dir.mkdir(parents=True, exist_ok=True)
+            head = part_dir / "head.mp4"
+            tail = part_dir / "tail.mp4"
+            fixed = part_dir / "fixed.mp4"
+            list_file = part_dir / "concat_list.txt"
+
+            run_command([
+                ffmpeg_bin, "-y",
+                "-i", str(video),
+                "-t", f"{start_tail:.3f}",
+                "-map", "0:v:0?",
+                "-map", "0:a:0?",
+                "-c", "copy",
+                "-avoid_negative_ts", "make_zero",
+                "-movflags", "+faststart",
+                str(head),
+            ], bitstream_fatal=True)
+
+            fps = _get_video_fps(video)
+            video_filter = _repair_video_filter_args(fps)
+            audio_filter = ["-af", "asetpts=PTS-STARTPTS"] if _has_audio_stream(video) else []
+            errors: list[str] = []
+            for encode_args in _targeted_repair_encode_candidates(ffmpeg_bin, video_codec):
+                try:
+                    run_command([
+                        ffmpeg_bin, "-y",
+                        "-ss", f"{start_tail:.3f}",
+                        "-fflags", "+discardcorrupt",
+                        "-err_detect", "ignore_err",
+                        "-i", str(video),
+                        "-map", "0:v:0",
+                        "-map", "0:a:0?",
+                        *video_filter,
+                        *audio_filter,
+                        *encode_args,
+                        "-pix_fmt", "yuv420p",
+                        "-c:a", "aac",
+                        "-b:a", f"{audio_bitrate_kbps}k",
+                        "-ar", "48000",
+                        "-ac", "2",
+                        "-movflags", "+faststart",
+                        str(tail),
+                    ])
+                    break
+                except FFmpegError as exc:
+                    errors.append(str(exc))
+            else:
+                raise FFmpegError("Tail window repair failed:\n" + "\n".join(errors))
+
+            _write_ffconcat_list(list_file, [head, tail], None)
+            run_command(
+                [
+                    ffmpeg_bin, "-y",
+                    "-f", "concat",
+                    "-safe", "0",
+                    "-i", str(list_file),
+                    "-map", "0:v:0?",
+                    "-map", "0:a:0?",
+                    "-c", "copy",
+                    "-movflags", "+faststart",
+                    str(fixed),
+                ],
+                bitstream_fatal=True,
+            )
+            repaired_inputs.append(fixed)
+
+        concat_file = temp_dir / "concat_list.txt"
+        _write_ffconcat_list(concat_file, repaired_inputs, _durations_or_none(input_videos))
+        run_command(
+            [
+                ffmpeg_bin, "-y",
+                "-f", "concat",
+                "-safe", "0",
+                "-i", str(concat_file),
+                "-map", "0:v:0?",
+                "-map", "0:a:0?",
+                "-c", "copy",
+                "-movflags", "+faststart",
+                str(output),
+            ],
+            bitstream_fatal=True,
+        )
+        _validate_concat_duration(output, expected_duration)
+        _validate_audio_decodable(output, ffmpeg_bin)
+    finally:
+        _safe_rmtree(temp_dir)
+
+
+def _durations_or_none(videos: list[str | Path]) -> list[float] | None:
+    durations: list[float] = []
+    try:
+        for video in videos:
+            durations.append(get_duration(video))
+    except (FFmpegError, ValueError):
+        return None
+    return durations
+
+
+def _write_ffconcat_list(
+    path: Path,
+    videos: list[str | Path],
+    durations: list[float] | None,
+) -> None:
+    with path.open("w", encoding="utf-8") as handle:
+        if durations is not None:
+            handle.write("ffconcat version 1.0\n")
+        for index, video in enumerate(videos):
+            escaped_path = str(video).replace("'", "'\\''")
+            handle.write(f"file '{escaped_path}'\n")
+            if durations is not None and index < len(durations):
+                handle.write(f"duration {durations[index]:.6f}\n")
+
+
 def _concat_filter_commands(
     input_videos: list[str | Path],
     output: Path,
@@ -1072,6 +1403,68 @@ def _get_video_resolution(video_path: str | Path) -> tuple[int, int]:
                 return int(parts[0]), int(parts[1])
     
     raise FFmpegError(f"Could not get video resolution: {video_path}")
+
+
+def _parse_fraction(value: str | None) -> float | None:
+    if not value or value == "0/0":
+        return None
+    try:
+        if "/" in value:
+            numerator, denominator = value.split("/", 1)
+            den = float(denominator)
+            if den == 0:
+                return None
+            return float(numerator) / den
+        return float(value)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+
+
+def _get_video_fps(video_path: str | Path) -> float | None:
+    ffprobe_bin = shutil.which("ffprobe")
+    if not ffprobe_bin:
+        return None
+    completed = subprocess.run(
+        [
+            ffprobe_bin,
+            "-v",
+            "quiet",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=avg_frame_rate,r_frame_rate",
+            "-of",
+            "json",
+            str(video_path),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if completed.returncode != 0:
+        return None
+    try:
+        payload = json.loads(completed.stdout or "{}")
+    except json.JSONDecodeError:
+        return None
+    streams = payload.get("streams") or []
+    if not streams:
+        return None
+    stream = streams[0]
+    for key in ("avg_frame_rate", "r_frame_rate"):
+        fps = _parse_fraction(stream.get(key))
+        if fps and fps > 0:
+            return fps
+    return None
+
+
+def _repair_video_filter_args(fps: float | None) -> list[str]:
+    if fps and fps > 0:
+        fps_text = f"{fps:.6f}".rstrip("0").rstrip(".")
+        return ["-vf", f"fps={fps_text},setpts=N/({fps_text}*TB)"]
+    return ["-vf", "setpts=PTS-STARTPTS"]
 
 
 def _concat_scale_args(target_size: tuple[int, int] | None) -> list[str]:
@@ -1288,6 +1681,40 @@ def get_duration(input_media: str | Path) -> float:
         detail = completed.stderr.strip() or completed.stdout.strip()
         raise FFmpegError(f"Could not read media duration: {input_media}\n{detail}")
     return duration
+
+
+def _get_stream_duration(input_media: str | Path, stream_selector: str) -> float | None:
+    ffprobe_bin = shutil.which("ffprobe")
+    if not ffprobe_bin:
+        return None
+    completed = subprocess.run(
+        [
+            ffprobe_bin,
+            "-v",
+            "quiet",
+            "-select_streams",
+            stream_selector,
+            "-show_entries",
+            "stream=duration",
+            "-of",
+            "csv=p=0",
+            str(input_media),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if completed.returncode != 0:
+        return None
+    text = completed.stdout.strip().splitlines()
+    if not text:
+        return None
+    try:
+        return float(text[0])
+    except ValueError:
+        return None
 
 
 def _parse_ffmpeg_duration(text: str) -> float | None:

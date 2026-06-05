@@ -42,6 +42,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "after_seconds": 15.0,
         "after_next_asr_end_guard_seconds": 2.0,
         "min_song_seconds": 75.0,
+        "max_song_seconds": 360.0,
         "merge_gap_seconds": 20.0,
     },
     # 内容识别类型（true/false 控制启用/禁用）
@@ -61,12 +62,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "after_seconds": 15.0,
             "after_next_asr_end_guard_seconds": 2.0,
             "min_song_seconds": 75.0,
+            "max_song_seconds": 360.0,
             "merge_gap_seconds": 20.0,
         },
         "missed_recheck": {
             "enabled": True,
             "batch_size": 500,
             "min_gap_segments": 1,
+            "context_segments": 10,
         },
     },
     # 对话识别配置
@@ -201,5 +204,6 @@ def get_padding_config(config: dict[str, Any], content_type: str = "song") -> di
         "after_seconds": 15.0,
         "after_next_asr_end_guard_seconds": 2.0,
         "min_song_seconds": 75.0,
+        "max_song_seconds": 360.0,
         "merge_gap_seconds": 20.0,
     }

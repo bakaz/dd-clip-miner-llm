@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from .asr import Transcriber
+from .config import get_padding_config
 from .ffmpeg import cut_audio, cut_video, extract_audio, get_duration
 from .merger import build_content_results
 from .models import ContentMatch, ContentResult, TranscriptSegment
@@ -205,6 +206,229 @@ def _split_segment_ranges(
     return result
 
 
+def _segment_range_duration_seconds(
+    segments: list[TranscriptSegment],
+    start: int,
+    end: int,
+) -> float:
+    if not segments or start < 0 or end < start or end >= len(segments):
+        return 0.0
+    return max(0.0, float(segments[end].end) - float(segments[start].start))
+
+
+def _filter_short_segment_ranges(
+    segments: list[TranscriptSegment],
+    ranges: list[tuple[int, int]],
+    min_duration_seconds: float,
+) -> tuple[list[tuple[int, int]], int]:
+    if min_duration_seconds <= 0:
+        return ranges, 0
+
+    kept: list[tuple[int, int]] = []
+    skipped = 0
+    for start, end in ranges:
+        if _segment_range_duration_seconds(segments, start, end) < min_duration_seconds:
+            skipped += 1
+            continue
+        kept.append((start, end))
+    return kept, skipped
+
+
+def _expand_segment_range(
+    start: int,
+    end: int,
+    segment_count: int,
+    context_segments: int,
+) -> tuple[int, int]:
+    context_segments = max(0, context_segments)
+    return (
+        max(0, start - context_segments),
+        min(segment_count - 1, end + context_segments),
+    )
+
+
+def _filter_matches_to_segment_range(
+    matches: list[ContentMatch],
+    start: int,
+    end: int,
+) -> list[ContentMatch]:
+    filtered: list[ContentMatch] = []
+    for match in matches:
+        segment_indices = sorted({i for i in match.segment_indices if start <= i <= end})
+        if not segment_indices:
+            continue
+        filtered.append(
+            ContentMatch(
+                content_type=match.content_type,
+                title=match.title,
+                segment_indices=segment_indices,
+                confidence=match.confidence,
+                tags=match.tags,
+                description=match.description,
+                artist=match.artist,
+                lyrics_snippet=match.lyrics_snippet,
+            )
+        )
+    return filtered
+
+
+def _clone_match_with_indices(
+    match: ContentMatch,
+    segment_indices: list[int],
+) -> ContentMatch:
+    return ContentMatch(
+        content_type=match.content_type,
+        title=match.title,
+        segment_indices=segment_indices,
+        confidence=match.confidence,
+        tags=match.tags,
+        description=match.description,
+        artist=match.artist,
+        lyrics_snippet=match.lyrics_snippet,
+    )
+
+
+def _split_indices_by_time_gap_for_recheck(
+    segments: list[TranscriptSegment],
+    indices: list[int],
+    merge_gap_seconds: float,
+) -> list[list[int]]:
+    if not indices:
+        return []
+
+    groups: list[list[int]] = [[indices[0]]]
+    for index in indices[1:]:
+        previous = groups[-1][-1]
+        gap = float(segments[index].start) - float(segments[previous].end)
+        if gap > merge_gap_seconds:
+            groups.append([index])
+        else:
+            groups[-1].append(index)
+    return groups
+
+
+def _match_groups_over_max_song_seconds(
+    segments: list[TranscriptSegment],
+    matches: list[ContentMatch],
+    max_song_seconds: float,
+    merge_gap_seconds: float,
+) -> bool:
+    if max_song_seconds <= 0:
+        return False
+    for match in matches:
+        valid_indices = sorted({i for i in match.segment_indices if 0 <= i < len(segments)})
+        for group in _split_indices_by_time_gap_for_recheck(
+            segments,
+            valid_indices,
+            merge_gap_seconds,
+        ):
+            if _segment_range_duration_seconds(segments, min(group), max(group)) > max_song_seconds:
+                return True
+    return False
+
+
+def _recheck_overlong_song_matches(
+    segments: list[TranscriptSegment],
+    config: dict[str, Any],
+    recognizer: Any,
+    matches: list[ContentMatch],
+    llm_dir: Path,
+) -> list[ContentMatch]:
+    if not segments or not matches:
+        return matches
+
+    recheck_config = config.get("song", {}).get("missed_recheck", {})
+    if recheck_config.get("enabled", True) is False:
+        return matches
+
+    padding_config = get_padding_config(config, "song")
+    max_song_seconds = float(padding_config.get("max_song_seconds", 360.0))
+    merge_gap_seconds = float(padding_config.get("merge_gap_seconds", 20.0))
+    if max_song_seconds <= 0:
+        return matches
+
+    context_segments = int(recheck_config.get("context_segments", 10) or 0)
+
+    from .llm import identify_content
+
+    recheck_root = llm_dir / "overlong_recheck"
+    replacement_matches: list[ContentMatch] = []
+    rechecked_count = 0
+    replaced_count = 0
+    kept_count = 0
+    all_rechecked_matches: list[ContentMatch] = []
+
+    for match in matches:
+        valid_indices = sorted({i for i in match.segment_indices if 0 <= i < len(segments)})
+        groups = _split_indices_by_time_gap_for_recheck(
+            segments,
+            valid_indices,
+            merge_gap_seconds,
+        )
+        if not groups:
+            continue
+
+        if not any(
+            _segment_range_duration_seconds(segments, min(group), max(group)) > max_song_seconds
+            for group in groups
+        ):
+            replacement_matches.append(match)
+            continue
+
+        recheck_root.mkdir(parents=True, exist_ok=True)
+        for group in groups:
+            group_start = min(group)
+            group_end = max(group)
+            group_match = _clone_match_with_indices(match, group)
+            if _segment_range_duration_seconds(segments, group_start, group_end) <= max_song_seconds:
+                replacement_matches.append(group_match)
+                continue
+
+            rechecked_count += 1
+            context_start, context_end = _expand_segment_range(
+                group_start,
+                group_end,
+                len(segments),
+                context_segments,
+            )
+            chunk = segments[context_start:context_end + 1]
+            debug_dir = recheck_root / f"{group_start:06d}_{group_end:06d}"
+            offset_recognizer = _OffsetRecognizer(recognizer, context_start)
+            rechecked_matches = _filter_matches_to_segment_range(
+                identify_content(chunk, config, offset_recognizer, debug_dir=debug_dir),
+                group_start,
+                group_end,
+            )
+            all_rechecked_matches.extend(rechecked_matches)
+
+            if rechecked_matches and not _match_groups_over_max_song_seconds(
+                segments,
+                rechecked_matches,
+                max_song_seconds,
+                merge_gap_seconds,
+            ):
+                replacement_matches.extend(rechecked_matches)
+                replaced_count += 1
+            else:
+                replacement_matches.append(group_match)
+                kept_count += 1
+
+    if not rechecked_count:
+        return matches
+
+    if all_rechecked_matches:
+        (recheck_root / "matches.json").write_text(
+            json.dumps([m.to_dict() for m in all_rechecked_matches], ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+    print(
+        "  Song overlong recheck: "
+        f"checked {rechecked_count} range(s), replaced {replaced_count}, kept original {kept_count}"
+    )
+    return replacement_matches
+
+
 def _recheck_uncovered_song_segments(
     segments: list[TranscriptSegment],
     config: dict[str, Any],
@@ -217,12 +441,21 @@ def _recheck_uncovered_song_segments(
         return matches
 
     min_gap_segments = int(recheck_config.get("min_gap_segments", 1) or 1)
+    context_segments = int(recheck_config.get("context_segments", 10) or 0)
+    padding_config = get_padding_config(config, "song")
+    min_song_seconds = float(padding_config.get("min_song_seconds", 75.0))
     batch_size_value = recheck_config.get("batch_size", config.get("llm", {}).get("batch_size") or 500)
     batch_size = int(batch_size_value or 500)
     ranges = _split_segment_ranges(
         _uncovered_segment_ranges(len(segments), matches, min_gap_segments=min_gap_segments),
         batch_size,
     )
+    ranges, skipped_short = _filter_short_segment_ranges(segments, ranges, min_song_seconds)
+    if skipped_short:
+        print(
+            f"  Song missed recheck: skipped {skipped_short} short ASR range(s) "
+            f"below min_song_seconds={min_song_seconds:g}"
+        )
     if not ranges:
         return matches
 
@@ -234,11 +467,18 @@ def _recheck_uncovered_song_segments(
     recheck_root.mkdir(parents=True, exist_ok=True)
 
     for start, end in ranges:
-        chunk = segments[start:end + 1]
+        context_start, context_end = _expand_segment_range(
+            start,
+            end,
+            len(segments),
+            context_segments,
+        )
+        chunk = segments[context_start:context_end + 1]
         debug_dir = recheck_root / f"{start:06d}_{end:06d}"
-        offset_recognizer = _OffsetRecognizer(recognizer, start)
+        offset_recognizer = _OffsetRecognizer(recognizer, context_start)
+        rechecked_matches = identify_content(chunk, config, offset_recognizer, debug_dir=debug_dir)
         extra_matches.extend(
-            identify_content(chunk, config, offset_recognizer, debug_dir=debug_dir)
+            _filter_matches_to_segment_range(rechecked_matches, start, end)
         )
 
     if extra_matches:
@@ -467,6 +707,9 @@ def run_pipeline(
             from .llm import identify_content
             matches = identify_content(segments, config, recognizer, debug_dir=llm_dir)
             if content_type == "song":
+                matches = _recheck_overlong_song_matches(
+                    segments, config, recognizer, matches, llm_dir
+                )
                 matches = _recheck_uncovered_song_segments(
                     segments, config, recognizer, matches, llm_dir
                 )

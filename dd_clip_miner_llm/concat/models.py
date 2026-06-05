@@ -63,6 +63,7 @@ class ProblemProfile:
     This is the core of '依据ffmpeg的输出，判断是什么问题'.
     """
     bitstream_corrupt_indexes: list[int] = None  # 0-based indexes of bad parts
+    bitstream_corruption: bool = False
     demux_errors: bool = False
     timestamp_discontinuity: bool = False
     duration_truncated: bool = False
@@ -79,12 +80,13 @@ class ProblemProfile:
             self.raw_snippets = []
 
     def is_bitstream_problem(self) -> bool:
-        return bool(self.bitstream_corrupt_indexes) or self.demux_errors
+        return self.bitstream_corruption or bool(self.bitstream_corrupt_indexes) or self.demux_errors
 
     def merge(self, other: "ProblemProfile") -> "ProblemProfile":
         """Merge another profile (e.g. from a new attempt failure)."""
         merged = ProblemProfile(
             bitstream_corrupt_indexes=sorted(set(self.bitstream_corrupt_indexes) | set(other.bitstream_corrupt_indexes)),
+            bitstream_corruption=self.bitstream_corruption or other.bitstream_corruption,
             demux_errors=self.demux_errors or other.demux_errors,
             timestamp_discontinuity=self.timestamp_discontinuity or other.timestamp_discontinuity,
             duration_truncated=self.duration_truncated or other.duration_truncated,
@@ -111,6 +113,7 @@ class AttemptRecord:
 class ConcatContext:
     """Shared state passed through the pipeline and strategies."""
     inputs: list[Path]
+    metas: list[VideoMeta]
     output: Path
     ffmpeg_bin: str
     video_codec: str
@@ -128,4 +131,3 @@ class ConcatContext:
     def __post_init__(self):
         if self.attempts is None:
             self.attempts = []
-
