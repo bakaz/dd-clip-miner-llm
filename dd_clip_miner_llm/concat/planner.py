@@ -55,7 +55,11 @@ def can_direct_concat_copy(metas: list[VideoMeta]) -> bool:
     )
 
 
-def file_matches_profile(meta: VideoMeta, target: TargetProfile) -> bool:
+def file_matches_profile(
+    meta: VideoMeta,
+    target: TargetProfile,
+    audio_bitrate_kbps: int | None = None,
+) -> bool:
     if not meta.probe_ok or not meta.has_video:
         return False
     video_ok = (
@@ -65,12 +69,19 @@ def file_matches_profile(meta: VideoMeta, target: TargetProfile) -> bool:
         and meta.pix_fmt == "yuv420p"
         and (meta.sar in (None, "1:1"))
     )
+    if target.fps and meta.fps:
+        video_ok = video_ok and abs(meta.fps - target.fps) <= 0.05
+
     audio_ok = (
         meta.has_audio
         and meta.audio_codec == target.audio_codec
         and meta.audio_sample_rate == target.audio_sample_rate
         and meta.audio_channels == target.audio_channels
     )
+    target_audio_bitrate = audio_bitrate_kbps or target.audio_bitrate_kbps
+    if audio_ok and target_audio_bitrate and meta.audio_bit_rate:
+        audio_ok = (int(meta.audio_bit_rate) / 1000.0) >= max(1, target_audio_bitrate - 40)
+
     return video_ok and audio_ok
 
 

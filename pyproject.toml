@@ -43,3 +43,7 @@ dd-clip-miner-llm = "dd_clip_miner_llm.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["dd_clip_miner_llm*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]

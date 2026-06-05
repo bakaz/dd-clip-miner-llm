@@ -418,9 +418,13 @@ _BITSTREAM_CORRUPTION_RES: list[re.Pattern[str]] = [
     re.compile(r"missing picture", re.IGNORECASE),
     re.compile(r"decode_slice_header", re.IGNORECASE),
     re.compile(r"h264_mp4toannexb.*(fail|error)", re.IGNORECASE),
+    re.compile(r"hevc_mp4toannexb.*(fail|error)", re.IGNORECASE),
     re.compile(r"Error applying bitstream filters", re.IGNORECASE),
-    re.compile(r"Invalid data found when processing input", re.IGNORECASE),
-    re.compile(r"corrupt", re.IGNORECASE),
+    re.compile(r"non-existing PPS", re.IGNORECASE),
+    re.compile(r"bytestream overread", re.IGNORECASE),
+    re.compile(r"error while decoding MB", re.IGNORECASE),
+    re.compile(r"\bno frame\b", re.IGNORECASE),
+    re.compile(r"corrupt decoded frame", re.IGNORECASE),
 ]
 
 
@@ -453,9 +457,13 @@ def analyze_ffmpeg_failure(details: str | list[str] | None) -> dict[str, object]
         or "concat output video stream duration is too short" in t
         or "concat output video stream duration is too long" in t
     )
-    audio_fail = bool(re.search(r"audio.*(not decodable|fail|error|invalid|corrupt)", t)) or "audio is not decodable" in t
+    audio_fail = (
+        bool(re.search(r"audio.*(not decodable|fail|error|invalid|corrupt)", t))
+        or bool(re.search(r"aac.*(decode|error|invalid|corrupt)", t))
+        or "audio is not decodable" in t
+    )
     hw_fail = bool(re.search(r"(unknown encoder|encoder not found|device.*not found|nvenc|qsv|amf).*(fail|error|unavailable|not)", t))
-    demux = bool(re.search(r"(error during demuxing|error opening input|demux)", t))
+    demux = bool(re.search(r"(error during demuxing|error opening input|moov atom not found|partial file|invalid data found when processing input|demux)", t))
 
     problems = []
     if bitstream:
@@ -506,9 +514,13 @@ def classify_ffmpeg_output(details: str | list[str] | None) -> "ProblemProfile":
         or "concat output video stream duration is too short" in t
         or "concat output video stream duration is too long" in t
     )
-    audio_fail = bool(re.search(r"audio.*(not decodable|fail|error|invalid|corrupt)", t)) or "audio is not decodable" in t
+    audio_fail = (
+        bool(re.search(r"audio.*(not decodable|fail|error|invalid|corrupt)", t))
+        or bool(re.search(r"aac.*(decode|error|invalid|corrupt)", t))
+        or "audio is not decodable" in t
+    )
     hw_fail = bool(re.search(r"(unknown encoder|encoder not found|device.*not found|nvenc|qsv|amf).*(fail|error|unavailable|not)", t))
-    demux = bool(re.search(r"(error during demuxing|error opening input|demux)", t))
+    demux = bool(re.search(r"(error during demuxing|error opening input|moov atom not found|partial file|invalid data found when processing input|demux)", t))
 
     # Try to extract bad segment indexes if present in logs (e.g. from repair messages or health)
     corrupt_indexes: list[int] = []
@@ -779,12 +791,20 @@ def _find_bad_h264_segments(
     ffmpeg_bin: str,
     tail_seconds: float | None = None,
 ) -> list[int]:
-    """Probe each input (or its tail) by attempting a video-only copy through the h264 bitstream filter.
+    """Probe each input (or its tail) by attempting a video-only copy through the matching bitstream filter.
     Any corruption will surface as specific errors/warnings in stderr (even if rc may vary).
     Uses the centralized _text_indicates_bitstream_corruption for consistent detection with fallback logic.
     """
     bad_indexes: list[int] = []
     for index, video in enumerate(input_videos):
+        codec = _get_video_codec(video)
+        if codec == "h264":
+            bitstream_filter = "h264_mp4toannexb"
+        elif codec in {"hevc", "h265"}:
+            bitstream_filter = "hevc_mp4toannexb"
+        else:
+            continue
+
         input_args: list[str] = []
         if tail_seconds is not None and tail_seconds > 0:
             input_args.extend(["-sseof", f"-{tail_seconds:.3f}"])
@@ -802,7 +822,7 @@ def _find_bad_h264_segments(
                 "-c",
                 "copy",
                 "-bsf:v",
-                "h264_mp4toannexb",
+                bitstream_filter,
                 "-f",
                 "null",
                 devnull,
@@ -817,6 +837,35 @@ def _find_bad_h264_segments(
         if completed.returncode != 0 or _text_indicates_bitstream_corruption(stderr):
             bad_indexes.append(index)
     return bad_indexes
+
+
+def _get_video_codec(video_path: str | Path) -> str | None:
+    ffprobe_bin = shutil.which("ffprobe")
+    if not ffprobe_bin:
+        return None
+    completed = subprocess.run(
+        [
+            ffprobe_bin,
+            "-v",
+            "quiet",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=codec_name",
+            "-of",
+            "csv=p=0",
+            str(video_path),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if completed.returncode != 0:
+        return None
+    codec = completed.stdout.strip().lower()
+    return codec or None
 
 
 def _concat_reencoded_bad_segments_copy(
@@ -1045,7 +1094,6 @@ def _concat_timestamp_remuxed_copy(
     temp_dir.mkdir(parents=True, exist_ok=True)
     concat_file = temp_dir / "concat_list.ffconcat"
     remuxed: list[Path] = []
-    durations = _durations_or_none(input_videos)
 
     try:
         for index, video in enumerate(input_videos):
@@ -1063,7 +1111,7 @@ def _concat_timestamp_remuxed_copy(
             ])
             remuxed.append(target)
 
-        _write_ffconcat_list(concat_file, remuxed, durations)
+        _write_ffconcat_list(concat_file, remuxed)
         run_command(
             [
                 ffmpeg_bin, "-y",
@@ -1095,7 +1143,6 @@ def _concat_timestamp_remuxed_audio_resync(
     temp_dir.mkdir(parents=True, exist_ok=True)
     concat_file = temp_dir / "concat_list.ffconcat"
     remuxed: list[Path] = []
-    durations = _durations_or_none(input_videos)
 
     try:
         for index, video in enumerate(input_videos):
@@ -1113,7 +1160,7 @@ def _concat_timestamp_remuxed_audio_resync(
             ])
             remuxed.append(target)
 
-        _write_ffconcat_list(concat_file, remuxed, durations)
+        _write_ffconcat_list(concat_file, remuxed)
         run_command(
             [
                 ffmpeg_bin, "-y",
@@ -1188,6 +1235,34 @@ def _concat_fast_transmux_copy(
         _validate_audio_decodable(output, ffmpeg_bin)
     finally:
         _safe_rmtree(temp_dir)
+
+
+def _concat_ts_protocol_copy(
+    ts_files: list[str | Path],
+    output: Path,
+    ffmpeg_bin: str,
+    expected_duration: float | None,
+) -> None:
+    concat_url = "concat:" + "|".join(
+        Path(path).resolve().as_uri()
+        for path in ts_files
+    )
+    run_command(
+        [
+            ffmpeg_bin, "-y",
+            "-protocol_whitelist", "file,concat",
+            "-i", concat_url,
+            "-map", "0:v:0?",
+            "-map", "0:a:0?",
+            "-c", "copy",
+            "-bsf:a", "aac_adtstoasc",
+            "-movflags", "+faststart",
+            str(output),
+        ],
+        bitstream_fatal=True,
+    )
+    _validate_concat_duration(output, expected_duration)
+    _validate_audio_decodable(output, ffmpeg_bin)
 
 
 def _concat_tail_window_repaired_bad_segments_copy(
@@ -1270,7 +1345,7 @@ def _concat_tail_window_repaired_bad_segments_copy(
             else:
                 raise FFmpegError("Tail window repair failed:\n" + "\n".join(errors))
 
-            _write_ffconcat_list(list_file, [head, tail], None)
+            _write_ffconcat_list(list_file, [head, tail])
             run_command(
                 [
                     ffmpeg_bin, "-y",
@@ -1288,7 +1363,7 @@ def _concat_tail_window_repaired_bad_segments_copy(
             repaired_inputs.append(fixed)
 
         concat_file = temp_dir / "concat_list.txt"
-        _write_ffconcat_list(concat_file, repaired_inputs, _durations_or_none(input_videos))
+        _write_ffconcat_list(concat_file, repaired_inputs)
         run_command(
             [
                 ffmpeg_bin, "-y",
@@ -1322,15 +1397,16 @@ def _durations_or_none(videos: list[str | Path]) -> list[float] | None:
 def _write_ffconcat_list(
     path: Path,
     videos: list[str | Path],
-    durations: list[float] | None,
+    durations: list[float] | None = None,
+    include_duration: bool = False,
 ) -> None:
     with path.open("w", encoding="utf-8") as handle:
-        if durations is not None:
+        if include_duration and durations is not None:
             handle.write("ffconcat version 1.0\n")
         for index, video in enumerate(videos):
             escaped_path = str(video).replace("'", "'\\''")
             handle.write(f"file '{escaped_path}'\n")
-            if durations is not None and index < len(durations):
+            if include_duration and durations is not None and index < len(durations):
                 handle.write(f"duration {durations[index]:.6f}\n")
 
 

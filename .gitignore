@@ -35,6 +35,8 @@ ENV/
 
 # Output
 runs/
+results/
+dd_clip_miner_llm/concat.zip
 
 # Config (with API keys)
 config.yaml

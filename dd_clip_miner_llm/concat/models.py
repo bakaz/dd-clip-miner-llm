@@ -20,6 +20,7 @@ class VideoMeta:
     audio_sample_rate: int | None
     audio_channels: int | None
     audio_layout: str | None
+    audio_bit_rate: int | None = None
     probe_ok: bool = True
     error: str | None = None
 
@@ -80,7 +81,7 @@ class ProblemProfile:
             self.raw_snippets = []
 
     def is_bitstream_problem(self) -> bool:
-        return self.bitstream_corruption or bool(self.bitstream_corrupt_indexes) or self.demux_errors
+        return self.bitstream_corruption or bool(self.bitstream_corrupt_indexes)
 
     def merge(self, other: "ProblemProfile") -> "ProblemProfile":
         """Merge another profile (e.g. from a new attempt failure)."""
@@ -128,6 +129,7 @@ class ConcatContext:
     attempts: list[AttemptRecord] = None
     concat_file: Path | None = None
     sanitized_inputs: dict[int, Path] | None = None  # pre-sanitized versions of corrupt segments (using safe remux)
+    ts_inputs: dict[int, Path] | None = None  # reusable TS working copies created by successful transmux steps
     original_inputs: list[Path] | None = None  # kept for reference if needed
 
     def __post_init__(self):
@@ -135,5 +137,7 @@ class ConcatContext:
             self.attempts = []
         if self.sanitized_inputs is None:
             self.sanitized_inputs = {}
+        if self.ts_inputs is None:
+            self.ts_inputs = {}
         if self.original_inputs is None:
             self.original_inputs = list(self.inputs) if self.inputs else []

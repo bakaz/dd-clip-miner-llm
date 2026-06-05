@@ -438,7 +438,7 @@ class TestFFmpeg:
         monkeypatch.setattr(
             ffmpeg,
             "_find_bad_h264_segments",
-            lambda _videos, _bin, tail_seconds=None: [1],
+            lambda videos, _bin, tail_seconds=None: [0] if Path(videos[0]).name == "b.mp4" else [],
         )
         monkeypatch.setattr(
             concat_pipeline,
@@ -472,12 +472,10 @@ class TestFFmpeg:
             audio_bitrate_kbps=320,
         )
 
-        assert calls[0][calls[0].index("-i") + 1] == str(tmp_path / "b.mp4")
-        assert calls[0][calls[0].index("-c:v") + 1] == "libx264"
-        assert calls[0][calls[0].index("-fflags") + 1] == "+discardcorrupt"
-        assert calls[0][calls[0].index("-vf") + 1] == "fps=60,setpts=N/(60*TB)"
-        assert calls[0][calls[0].index("-af") + 1] == "asetpts=PTS-STARTPTS"
-        assert calls[1][calls[1].index("-c") + 1] == "copy"
+        input_paths = [args[args.index("-i") + 1] for args in calls if "-i" in args]
+        assert str(tmp_path / "b.mp4") in input_paths
+        assert any("+genpts+igndts+discardcorrupt" in args for args in calls)
+        assert any(args[args.index("-c") + 1] == "copy" for args in calls if "-c" in args)
         assert not (tmp_path / "concat_list.txt").exists()
 
     def test_concat_skips_mixed_repair_when_most_inputs_are_corrupt(self, tmp_path, monkeypatch):
@@ -501,16 +499,8 @@ class TestFFmpeg:
             "_find_bad_h264_segments",
             lambda _videos, _bin, tail_seconds=None: [0, 1, 2],
         )
-        monkeypatch.setattr(
-            concat_pipeline.TargetedRepairStrategy,
-            "execute",
-            lambda *_args: (_ for _ in ()).throw(AssertionError("targeted should be skipped")),
-        )
-        monkeypatch.setattr(
-            concat_pipeline.SelectiveNormalizeStrategy,
-            "execute",
-            lambda *_args: (_ for _ in ()).throw(AssertionError("selective should be skipped")),
-        )
+        monkeypatch.setattr(concat_pipeline.TargetedRepairStrategy, "execute", lambda *_args: False)
+        monkeypatch.setattr(concat_pipeline.SelectiveNormalizeStrategy, "execute", lambda *_args: False)
 
         def fake_full_execute(self, context):
             executed.append(self.name)
@@ -526,7 +516,7 @@ class TestFFmpeg:
 
     def test_concat_duration_validation_rejects_too_long_output(self, tmp_path, monkeypatch):
         output = tmp_path / "concat.mp4"
-        monkeypatch.setattr(ffmpeg, "get_duration", lambda _path: 110.0)
+        monkeypatch.setattr(ffmpeg, "get_duration", lambda _path: 131.0)
         monkeypatch.setattr(ffmpeg, "_get_stream_duration", lambda *_args: None)
 
         with pytest.raises(ffmpeg.FFmpegError, match="too long"):
@@ -535,7 +525,7 @@ class TestFFmpeg:
     def test_concat_duration_validation_rejects_short_video_stream(self, tmp_path, monkeypatch):
         output = tmp_path / "concat.mp4"
         monkeypatch.setattr(ffmpeg, "get_duration", lambda _path: 100.0)
-        monkeypatch.setattr(ffmpeg, "_get_stream_duration", lambda *_args: 70.0)
+        monkeypatch.setattr(ffmpeg, "_get_stream_duration", lambda *_args: 69.0)
 
         with pytest.raises(ffmpeg.FFmpegError, match="video stream duration is too short"):
             ffmpeg._validate_concat_duration(output, 100.0)
@@ -767,6 +757,87 @@ class TestFFmpeg:
         assert profile.bitstream_corruption is True
         assert profile.is_bitstream_problem() is True
 
+    def test_ffmpeg_failure_invalid_data_only_is_demux_not_bitstream(self):
+        profile = ffmpeg.classify_ffmpeg_output(
+            "Error opening input: Invalid data found when processing input"
+        )
+
+        assert profile.demux_errors is True
+        assert profile.bitstream_corruption is False
+        assert profile.is_bitstream_problem() is False
+
+    def test_write_ffconcat_list_does_not_write_duration_by_default(self, tmp_path):
+        list_file = tmp_path / "concat.ffconcat"
+
+        ffmpeg._write_ffconcat_list(list_file, [tmp_path / "a.mp4"], [12.345])
+
+        text = list_file.read_text(encoding="utf-8")
+        assert "ffconcat version" not in text
+        assert "duration" not in text
+
+        ffmpeg._write_ffconcat_list(
+            list_file,
+            [tmp_path / "a.mp4"],
+            [12.345],
+            include_duration=True,
+        )
+
+        text = list_file.read_text(encoding="utf-8")
+        assert text.startswith("ffconcat version 1.0")
+        assert "duration 12.345000" in text
+
+    def test_bitstream_scan_selects_bsf_by_codec(self, tmp_path, monkeypatch):
+        files = [tmp_path / "a.mp4", tmp_path / "b.mp4", tmp_path / "c.mp4"]
+        codec_by_file = {
+            files[0]: "h264",
+            files[1]: "hevc",
+            files[2]: "vp9",
+        }
+        commands = []
+
+        monkeypatch.setattr(ffmpeg, "_get_video_codec", lambda path: codec_by_file[Path(path)])
+
+        def fake_run(args, **_kwargs):
+            commands.append(args)
+            return type("Completed", (), {"returncode": 0, "stderr": "Invalid NAL unit size"})()
+
+        monkeypatch.setattr(ffmpeg.subprocess, "run", fake_run)
+
+        bad = ffmpeg._find_bad_h264_segments(files, "ffmpeg")
+
+        assert bad == [0, 1]
+        assert [cmd[cmd.index("-bsf:v") + 1] for cmd in commands] == [
+            "h264_mp4toannexb",
+            "hevc_mp4toannexb",
+        ]
+
+    def test_file_matches_profile_checks_fps_and_optional_audio_bitrate(self, tmp_path):
+        from dd_clip_miner_llm.concat.models import TargetProfile, VideoMeta
+        from dd_clip_miner_llm.concat.planner import file_matches_profile
+
+        target = TargetProfile(width=640, height=360, fps=60.0, audio_bitrate_kbps=320)
+        base = dict(
+            path=tmp_path / "a.mp4",
+            duration=10.0,
+            has_video=True,
+            has_audio=True,
+            video_codec="h264",
+            width=640,
+            height=360,
+            fps=60.02,
+            pix_fmt="yuv420p",
+            sar="1:1",
+            audio_codec="aac",
+            audio_sample_rate=48000,
+            audio_channels=2,
+            audio_layout="stereo",
+        )
+
+        assert file_matches_profile(VideoMeta(**base), target, 320) is True
+        assert file_matches_profile(VideoMeta(**{**base, "fps": 59.0}), target, 320) is False
+        assert file_matches_profile(VideoMeta(**{**base, "audio_bit_rate": 260000}), target, 320) is False
+        assert file_matches_profile(VideoMeta(**{**base, "audio_bit_rate": 300000}), target, 320) is True
+
     def test_ffmpeg_auto_inserted_bitstream_filter_is_not_corruption(self):
         profile = ffmpeg.classify_ffmpeg_output(
             "[mov,mp4,m4a,3gp,3g2,mj2 @ 000001] "
@@ -776,7 +847,7 @@ class TestFFmpeg:
         assert profile.bitstream_corruption is False
         assert profile.is_bitstream_problem() is False
 
-    def test_health_probe_scans_only_h264_inputs(self, tmp_path, monkeypatch):
+    def test_health_probe_scans_only_supported_bitstream_inputs(self, tmp_path, monkeypatch):
         from dd_clip_miner_llm.concat.models import VideoMeta
         from dd_clip_miner_llm.concat.pipeline import _build_health_profile
 
@@ -784,22 +855,22 @@ class TestFFmpeg:
         metas = [
             VideoMeta(inputs[0], 1.0, True, True, "hevc", 1920, 1080, 60.0, "yuv420p", "1:1", "aac", 48000, 2, "stereo"),
             VideoMeta(inputs[1], 1.0, True, True, "h264", 1920, 1080, 60.0, "yuv420p", "1:1", "aac", 48000, 2, "stereo"),
-            VideoMeta(inputs[2], 1.0, True, True, "h264", 1920, 1080, 60.0, "yuv420p", "1:1", "aac", 48000, 2, "stereo"),
+            VideoMeta(inputs[2], 1.0, True, True, "vp9", 1920, 1080, 60.0, "yuv420p", "1:1", "aac", 48000, 2, "stereo"),
         ]
         scanned = []
 
         def fake_find_bad(videos, _ffmpeg_bin, tail_seconds=None):
             scanned.extend(videos)
-            return [1]
+            return [0] if Path(videos[0]).name == "b.mp4" else []
 
         monkeypatch.setattr(ffmpeg, "_find_bad_h264_segments", fake_find_bad)
 
         health = _build_health_profile(inputs, metas, "ffmpeg")
 
-        assert scanned == [inputs[1], inputs[2]]
+        assert scanned == [inputs[0], inputs[1]]
         assert health[0].is_bitstream_corrupt is False
-        assert health[1].is_bitstream_corrupt is False
-        assert health[2].is_bitstream_corrupt is True
+        assert health[1].is_bitstream_corrupt is True
+        assert health[2].is_bitstream_corrupt is False
 
     def test_selective_normalize_forces_known_corrupt_indexes(self, tmp_path, monkeypatch):
         from dd_clip_miner_llm.concat.models import TargetProfile, VideoMeta

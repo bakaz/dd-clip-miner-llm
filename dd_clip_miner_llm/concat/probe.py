@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from fractions import Fraction
 from pathlib import Path
 from typing import Any
@@ -11,7 +12,11 @@ from .models import VideoMeta
 
 
 def probe_many(paths: list[str | Path]) -> list[VideoMeta]:
-    return [probe_one(path) for path in paths]
+    if len(paths) <= 1:
+        return [probe_one(path) for path in paths]
+    max_workers = min(4, len(paths))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        return list(executor.map(probe_one, paths))
 
 
 def probe_one(path: str | Path) -> VideoMeta:
@@ -83,6 +88,7 @@ def probe_one(path: str | Path) -> VideoMeta:
         audio_sample_rate=_int_or_none(_stream_value(audio, "sample_rate")),
         audio_channels=_int_or_none(_stream_value(audio, "channels")),
         audio_layout=_stream_value(audio, "channel_layout"),
+        audio_bit_rate=_int_or_none(_stream_value(audio, "bit_rate")),
     )
 
 
@@ -102,6 +108,7 @@ def _failed_meta(path: Path, error: str) -> VideoMeta:
         audio_sample_rate=None,
         audio_channels=None,
         audio_layout=None,
+        audio_bit_rate=None,
         probe_ok=False,
         error=error,
     )
@@ -148,4 +155,3 @@ def _int_or_none(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
-

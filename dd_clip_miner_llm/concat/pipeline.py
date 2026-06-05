@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 import re
 from uuid import uuid4
@@ -43,36 +44,54 @@ def _build_health_profile(
     h264_indexes = [
         index
         for index, meta in enumerate(metas)
-        if meta.probe_ok and meta.video_codec == "h264"
+        if meta.probe_ok and meta.video_codec in {"h264", "hevc", "h265"}
     ]
     h264_inputs = [inputs[index] for index in h264_indexes]
     bad_set: set[int] = set()
     if h264_inputs:
-        # Per-file tail or full based on size (small files = likely the corrupt "fix" points)
-        tail_for_h264 = []
+        # Per-file tail or full based on size (small files = likely the corrupt "fix" points).
+        # Full scans stay serial because they can read whole videos; tail scans are cheap enough
+        # to run with small bounded concurrency on network storage.
+        full_scan_indexes: list[int] = []
+        tail_scan_indexes: list[int] = []
         for idx in h264_indexes:
             meta = metas[idx]
             dur = meta.duration or 0
-            tail_for_h264.append( None if dur > 0 and dur < 120 else 60.0 )
+            if dur > 0 and dur < 120:
+                full_scan_indexes.append(idx)
+            else:
+                tail_scan_indexes.append(idx)
 
-        # Group by tail value for efficiency? Simple: call per or with list
-        # For simplicity, scan all h264 with appropriate per-file, but current _find takes list + one tail.
-        # Use per-file for accuracy on mixed sizes.
-        for rel_idx, inp_idx in enumerate(h264_indexes):
+        for inp_idx in full_scan_indexes:
             inp = inputs[inp_idx]
-            tail = tail_for_h264[rel_idx]
             single_bad = ffmpeg_mod._find_bad_h264_segments(
-                [inp], ffmpeg_bin, tail_seconds=tail
+                [inp], ffmpeg_bin, tail_seconds=None
             )
             if single_bad:
                 bad_set.add(inp_idx)
+
+        def _tail_scan_one(inp_idx: int) -> tuple[int, bool]:
+            inp = inputs[inp_idx]
+            single_bad = ffmpeg_mod._find_bad_h264_segments(
+                [inp], ffmpeg_bin, tail_seconds=60.0
+            )
+            return inp_idx, bool(single_bad)
+
+        if tail_scan_indexes:
+            max_workers = min(2, len(tail_scan_indexes))
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = [executor.submit(_tail_scan_one, idx) for idx in tail_scan_indexes]
+                for future in as_completed(futures):
+                    inp_idx, is_bad = future.result()
+                    if is_bad:
+                        bad_set.add(inp_idx)
 
     for i, (inp, meta) in enumerate(zip(inputs, metas)):
         is_corrupt = i in bad_set
         is_small = (meta.duration or 0) < 120
         corrupt_detail = ""
         if is_corrupt:
-            corrupt_detail = ("corrupt (full scan - small file)" if is_small else "corrupt tail detected by h264_mp4toannexb scan")
+            corrupt_detail = ("corrupt (full scan - small file)" if is_small else "corrupt tail detected by bitstream filter scan")
 
         health[i] = HealthInfo(
             path=inp,
@@ -85,6 +104,12 @@ def _build_health_profile(
             error=meta.error if not meta.probe_ok else None,
         )
     return health
+
+
+def _has_video_bitstream_corruption(context: ConcatContext) -> bool:
+    if context.health and any(info.is_bitstream_corrupt for info in context.health.values()):
+        return True
+    return bool(context.profile and context.profile.is_bitstream_problem())
 
 
 class Strategy(ABC):
@@ -182,7 +207,7 @@ class AudioReencodeStrategy(Strategy):
     name = "audio-only reencode"
 
     def is_applicable(self, context: ConcatContext) -> bool:
-        if context.profile and context.profile.is_bitstream_problem():
+        if _has_video_bitstream_corruption(context):
             return False
         return True
 
@@ -253,8 +278,7 @@ class TimestampIndexRemuxAudioResyncStrategy(Strategy):
 
     def is_applicable(self, context: ConcatContext) -> bool:
         profile = context.profile
-        # Relax bitstream skip: per-part remux + audio resync with error ignore flags can help bitstream cases too (especially small corrupt segments).
-        if profile and profile.is_bitstream_problem() and not (context.health and any(h.is_bitstream_corrupt for h in context.health.values())):
+        if _has_video_bitstream_corruption(context):
             return False
         if profile and (
             profile.timestamp_discontinuity
@@ -298,6 +322,28 @@ class FastTransmuxStrategy(Strategy):
         try:
             ffmpeg_mod._concat_fast_transmux_copy(
                 context.inputs,
+                context.output,
+                context.ffmpeg_bin,
+                context.expected_duration,
+            )
+            context.attempts.append(AttemptRecord(self.name, True, "ok"))
+            return True
+        except ffmpeg_mod.FFmpegError as exc:
+            self._record_failure(context, exc)
+            return False
+
+
+class ReuseTsWorkspaceStrategy(Strategy):
+    name = "reuse TS workspace concat"
+
+    def is_applicable(self, context: ConcatContext) -> bool:
+        return bool(context.ts_inputs) and len(context.ts_inputs) == len(context.inputs)
+
+    def execute(self, context: ConcatContext) -> bool:
+        try:
+            ts_inputs = [context.ts_inputs[index] for index in range(len(context.inputs))]
+            ffmpeg_mod._concat_ts_protocol_copy(
+                ts_inputs,
                 context.output,
                 context.ffmpeg_bin,
                 context.expected_duration,
@@ -385,30 +431,56 @@ class TargetedRepairStrategy(Strategy):
             f"{', '.join(str(i + 1) for i in bad)}; repairing only those segment(s)."
         )
 
-        try:
-            print("[concat] Trying fixed tail-window H.264 repair before full bad-segment reencode.")
-            ffmpeg_mod._concat_tail_window_repaired_bad_segments_copy(
-                context.inputs,
-                context.output,
-                context.ffmpeg_bin,
-                context.video_codec,
-                context.audio_bitrate_kbps,
-                context.expected_duration,
-                bad_indexes=bad,
-                repair_window_seconds=90.0,
-                guard_seconds=2.0,
-            )
-            _validate_output(context.output, context.ffmpeg_bin, context.expected_duration)
-            context.attempts.append(AttemptRecord(f"{self.name} (tail window)", True, "ok"))
-            return True
-        except ffmpeg_mod.FFmpegError as exc:
+        window_bad: list[int] = []
+        skipped_window: list[int] = []
+        for index in bad:
+            try:
+                duration = ffmpeg_mod.get_duration(context.inputs[index])
+            except Exception:
+                duration = 0.0
+            if duration > 93.0:
+                window_bad.append(index)
+            else:
+                skipped_window.append(index)
+
+        if window_bad:
+            try:
+                if skipped_window:
+                    print(
+                        "[concat] Tail-window repair will skip short corrupt segment(s) "
+                        f"{', '.join(str(i + 1) for i in skipped_window)}; those remain for full bad-segment repair if needed."
+                    )
+                print("[concat] Trying fixed tail-window H.264 repair before full bad-segment reencode.")
+                ffmpeg_mod._concat_tail_window_repaired_bad_segments_copy(
+                    context.inputs,
+                    context.output,
+                    context.ffmpeg_bin,
+                    context.video_codec,
+                    context.audio_bitrate_kbps,
+                    context.expected_duration,
+                    bad_indexes=window_bad,
+                    repair_window_seconds=90.0,
+                    guard_seconds=2.0,
+                )
+                _validate_output(context.output, context.ffmpeg_bin, context.expected_duration)
+                context.attempts.append(AttemptRecord(f"{self.name} (tail window)", True, "ok"))
+                return True
+            except ffmpeg_mod.FFmpegError as exc:
+                context.attempts.append(
+                    AttemptRecord(
+                        f"{self.name} (tail window)",
+                        False,
+                        str(exc),
+                        ffmpeg_mod.classify_ffmpeg_output(str(exc)),
+                        self._save_log(context, str(exc)),
+                    )
+                )
+        else:
             context.attempts.append(
                 AttemptRecord(
                     f"{self.name} (tail window)",
                     False,
-                    str(exc),
-                    ffmpeg_mod.classify_ffmpeg_output(str(exc)),
-                    self._save_log(context, str(exc)),
+                    "skipped: corrupt segments are too short for tail-window split",
                 )
             )
 
@@ -619,6 +691,7 @@ class ConcatPipeline:
             TimestampIndexRemuxCopyStrategy(),
             AudioReencodeStrategy(),
             TimestampIndexRemuxAudioResyncStrategy(),
+            ReuseTsWorkspaceStrategy(),
             FastTransmuxStrategy(),
             RemuxThenCopyStrategy(),
             TargetedRepairStrategy(),
@@ -682,8 +755,8 @@ class ConcatPipeline:
                         "-movflags", "+faststart",
                         str(dst),
                     ], bitstream_fatal=True)
-                    ffmpeg_mod._safe_unlink(ts_temp)
                     context.sanitized_inputs[i] = dst
+                    context.ts_inputs[i] = ts_temp
                     print(f"[concat] Pre-sanitized corrupt segment {i+1} via TS intermediate (h264_mp4toannexb bsf + discardcorrupt etc.)")
                     sanitized = True
                 except Exception as exc:
@@ -715,6 +788,31 @@ class ConcatPipeline:
         ]
         context.inputs = effective_inputs
 
+        if context.ts_inputs:
+            ts_dir = next(iter(context.ts_inputs.values())).parent
+            for i, src in enumerate(context.inputs):
+                if i in context.ts_inputs:
+                    continue
+                ts_target = ts_dir / f"working_{i:04d}.ts"
+                try:
+                    ffmpeg_mod.run_command([
+                        context.ffmpeg_bin, "-y",
+                        "-fflags", "+genpts+igndts+discardcorrupt",
+                        "-err_detect", "ignore_err",
+                        "-i", str(src),
+                        "-map", "0:v:0?",
+                        "-map", "0:a:0?",
+                        "-c", "copy",
+                        "-bsf:v", "h264_mp4toannexb",
+                        "-f", "mpegts",
+                        str(ts_target),
+                    ], bitstream_fatal=True)
+                    context.ts_inputs[i] = ts_target
+                except Exception as ts_work_err:
+                    ffmpeg_mod._safe_unlink(ts_target)
+                    print(f"[concat] TS working copy for segment {i+1} failed; TS workspace fallback disabled unless all segments are available: {ts_work_err}")
+                    break
+
         # Post-sanitize re-probe: corrupt segments often have inaccurate/bogus duration from ffprobe
         # (truncated streams, garbage timestamps). Re-probing the cleaned copies gives a realistic
         # "expected" for validation and for high-ratio % calculations. This prevents spurious
@@ -733,6 +831,24 @@ class ConcatPipeline:
             except Exception as reerr:
                 print(f"[concat]   Re-probe after pre-sanitize failed, keeping previous expected: {reerr}")
 
+            try:
+                print("[concat] Re-running health probe on sanitized inputs for routing.")
+                context.health = _build_health_profile(context.inputs, context.metas, context.ffmpeg_bin)
+                corrupt = [i for i, h in context.health.items() if h.is_bitstream_corrupt]
+                refreshed_profile = ProblemProfile()
+                if corrupt:
+                    refreshed_profile.bitstream_corrupt_indexes = corrupt
+                    refreshed_profile.bitstream_corruption = True
+                    refreshed_profile.summary = "bitstream_corruption (after pre-sanitize)"
+                else:
+                    refreshed_profile.summary = "pre_sanitize_clean"
+                    refreshed_profile.bitstream_corrupt_indexes = []
+                    refreshed_profile.bitstream_corruption = False
+                    print("[concat]   Sanitized inputs passed health probe; copy/remux strategies remain available.")
+                context.profile = refreshed_profile
+            except Exception as health_err:
+                print(f"[concat]   Health probe after pre-sanitize failed, keeping previous routing profile: {health_err}")
+
         # 3. Run strategies
         concat_file = context.output.parent / "concat_list.txt"
         _write_concat_list(concat_file, context.inputs, context.metas)
@@ -745,6 +861,7 @@ class ConcatPipeline:
                 f"{', '.join(str(i + 1) for i in corrupt)}; skipping copy-based concat attempts."
             )
             corrupt_ratio = _corrupt_duration_ratio(context, corrupt)
+            corrupt_seconds = _corrupt_duration_seconds(context, corrupt)
             count_ratio = len(corrupt) / max(1, len(context.inputs))
             should_skip_mixed = (
                 corrupt_ratio > 0.5
@@ -765,13 +882,18 @@ class ConcatPipeline:
                 # which are cheap and often sanitize bitstream corruption enough for concat copy to succeed,
                 # before falling back to expensive full reencode.
                 strategies = [
+                    ReuseTsWorkspaceStrategy(),
+                    FastTransmuxStrategy(),
                     TimestampIndexRemuxCopyStrategy(),
                     TimestampIndexRemuxAudioResyncStrategy(),
-                    TargetedRepairStrategy(),
+                ]
+                if corrupt_seconds is None or corrupt_seconds <= 1800.0:
+                    strategies.append(TargetedRepairStrategy())
+                strategies.extend([
                     SelectiveNormalizeStrategy(),
                     BoundaryNormalizeStrategy(),
                     FullReencodeStrategy(),
-                ]
+                ])
             else:
                 strategies = [
                     TargetedRepairStrategy(),
@@ -1070,7 +1192,11 @@ def _selective_normalize_concat(
     try:
         for index, source in enumerate(inputs):
             meta = metas[index] if index < len(metas) else None
-            if index not in force_indexes and meta is not None and file_matches_profile(meta, target):
+            if (
+                index not in force_indexes
+                and meta is not None
+                and file_matches_profile(meta, target, audio_bitrate_kbps)
+            ):
                 selected.append(source)
                 continue
             target_file = temp_dir / f"{index:05d}.mp4"
@@ -1281,9 +1407,10 @@ def _write_concat_list(
     path: Path,
     videos: list[Path],
     metas: list[VideoMeta] | None = None,
+    include_duration: bool = False,
 ) -> None:
     durations: list[float] | None = None
-    if metas is not None and len(metas) == len(videos):
+    if include_duration and metas is not None and len(metas) == len(videos):
         durations = []
         for meta in metas:
             if meta.duration is None:
@@ -1421,6 +1548,17 @@ def _corrupt_duration_ratio(context: ConcatContext, corrupt_indexes: list[int]) 
         return None
     bad = sum(durations[index] for index in set(corrupt_indexes) if 0 <= index < len(durations))
     return bad / total
+
+
+def _corrupt_duration_seconds(context: ConcatContext, corrupt_indexes: list[int]) -> float | None:
+    if not corrupt_indexes:
+        return 0.0
+    durations: list[float] = []
+    for meta in context.metas:
+        if meta.duration is None:
+            return None
+        durations.append(float(meta.duration))
+    return sum(durations[index] for index in set(corrupt_indexes) if 0 <= index < len(durations))
 
 
 def _format_failures(attempts: list[ConcatAttempt]) -> str:
