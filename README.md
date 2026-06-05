@@ -156,7 +156,7 @@ python -m dd_clip_miner_llm batch-run "D:\input" --config config.yaml --work-roo
 1. 单文件按 `output.single_file_policy` 处理：默认 `copy`；可设为 `remux` 或 `normalize`
 2. **Upfront health probe**：对每个输入做 ffprobe + tail 60s 的 h264_mp4toannexb bitstream 扫描（小文件<120s 全扫，常见于错误爆发“fix”片段），得到结构化 `HealthInfo`（哪些 segment 存在 corruption）。
 3. 使用 `classify_ffmpeg_output`（从完整 stdout/stderr）解析出 `ProblemProfile`（`bitstream_corrupt_indexes`、`demux_errors`、`timestamp_discontinuity` 等 + summary）。
-4. **Pre-sanitize**（新增架构优化，符合 ffmpeg 社区直播分段损坏最佳实践）：对检测到的 corrupt segments，仅对坏的做 individual safe per-part remux（带 +discardcorrupt + ignore_err + genpts + igndts 等），生成 cleaned 版本（好片段不动，廉价）。后续 concat lists/strategies 使用 sanitized inputs for 坏的。
+4. **Pre-sanitize**（新增架构优化，符合 ffmpeg 社区直播分段损坏最佳实践）：对检测到的 corrupt segments，仅对坏的做 individual safe per-part remux，**优先使用 TS 中间格式（mp4 → ts with h264_mp4toannexb bsf + flags → mp4）**，生成 cleaned 版本（好片段不动，廉价）。若 bsf 因太严重损坏失败，则回退到 plain mp4 remux（仍带 discardcorrupt 等 flags）。后续 concat lists/strategies 使用 sanitized inputs for 坏的。
 5. 按代价/适用性顺序尝试策略（DirectCopyStrategy、AudioReencodeStrategy、Timestamp remux 等 safe per-part、RemuxThenCopyStrategy、TargetedRepairStrategy、SelectiveNormalizeStrategy、FullReencodeStrategy + concat filter 兜底）。高 corruption ratio 时优先廉价 per-part safe remux（timestamp/index remux 等，带 discardcorrupt）再 repair/full。
 6. 每个 `Strategy` 通过 `is_applicable(context.profile)` 决定是否执行（bitstream 场景下放宽某些 remux/transmux 策略，因为 per-part/TS 路径可 sanitize）；执行时强制 `bitstream_fatal`（即使 ffmpeg rc=0 只要 stderr 有 corruption 标志也当作失败），捕获**完整原始 ffmpeg 日志**并保存到 `concat_attempts/<strategy>.log`。
 7. 失败时用输出重新 `classify` 并 `merge` 更新 `ProblemProfile`，驱动后续策略选择（例如检测到 bitstream 后优先 TargetedRepair）。
@@ -164,7 +164,7 @@ python -m dd_clip_miner_llm batch-run "D:\input" --config config.yaml --work-roo
 9. 每次合并后校验时长和音频可解码性。
 10. 合并结果 stage 到 `00_input/input_*.mp4`；`manual-cut` 从 `manifest.json` 读输入；处理完成后清理 `concat/` 中间文件（保留最终 concat.mp4）。
 
-常见例子：源文件参数看起来一致，但某段尾部（或小“fix”片段）存在坏 H.264 packet（`Invalid NAL unit size`、`missing picture in access unit`、`h264_mp4toannexb filter failed`、`Error during demuxing`）。程序通过 upfront health probe（小文件全扫）+ classify 识别，**先对坏段做 pre-sanitize（per-file safe remux with discardcorrupt）生成 cleaned 版本**，然后优先尝试廉价 per-part safe remux（timestamp remux 等）/ targeted repair，而不是盲目 copy 或直接全量重编码。完整日志在 `concat_attempts/`。
+常见例子：源文件参数看起来一致，但某段尾部（或小“fix”片段）存在坏 H.264 packet（`Invalid NAL unit size`、`missing picture in access unit`、`h264_mp4toannexb filter failed`、`Error during demuxing`）。程序通过 upfront health probe（小文件全扫）+ classify 识别，**先对坏段做 pre-sanitize（优先 mp4 → ts with h264_mp4toannexb bsf + flags → mp4，或回退 plain mp4 remux with discardcorrupt）生成 cleaned 版本**，然后优先尝试廉价 per-part safe remux（timestamp remux 等）/ targeted repair，而不是盲目 copy 或直接全量重编码。完整日志在 `concat_attempts/`。
 
 ### 手动重切
 
