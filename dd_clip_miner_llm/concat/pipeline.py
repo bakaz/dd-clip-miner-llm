@@ -655,22 +655,58 @@ class ConcatPipeline:
             for i in corrupt:
                 src = context.original_inputs[i]
                 dst = sanitize_dir / f"sanitized_{i:04d}.mp4"
+                ts_temp = sanitize_dir / f"sanitized_{i:04d}.ts"
+                sanitized = False
                 try:
+                    # Preferred: Per-file sanitize via TS intermediate (mp4 -> ts with h264_mp4toannexb bsf + flags -> mp4)
+                    # This matches the common effective scheme from searches for H.264 live split corruption.
                     ffmpeg_mod.run_command([
                         context.ffmpeg_bin, "-y",
-                        "-fflags", "+genpts+discardcorrupt+igndts",
+                        "-fflags", "+genpts+igndts+discardcorrupt",
                         "-err_detect", "ignore_err",
                         "-i", str(src),
-                        "-map", "0",
+                        "-map", "0:v:0?",
+                        "-map", "0:a:0?",
                         "-c", "copy",
-                        "-avoid_negative_ts", "make_zero",
+                        "-bsf:v", "h264_mp4toannexb",
+                        "-f", "mpegts",
+                        str(ts_temp),
+                    ], bitstream_fatal=True)
+                    ffmpeg_mod.run_command([
+                        context.ffmpeg_bin, "-y",
+                        "-i", str(ts_temp),
+                        "-map", "0:v:0?",
+                        "-map", "0:a:0?",
+                        "-c", "copy",
+                        "-bsf:a", "aac_adtstoasc",
                         "-movflags", "+faststart",
                         str(dst),
-                    ])
+                    ], bitstream_fatal=True)
+                    ffmpeg_mod._safe_unlink(ts_temp)
                     context.sanitized_inputs[i] = dst
-                    print(f"[concat] Pre-sanitized corrupt segment {i+1} (safe per-file remux with discardcorrupt etc.)")
+                    print(f"[concat] Pre-sanitized corrupt segment {i+1} via TS intermediate (h264_mp4toannexb bsf + discardcorrupt etc.)")
+                    sanitized = True
                 except Exception as exc:
-                    print(f"[concat] Pre-sanitize for segment {i+1} failed (will use original): {exc}")
+                    ffmpeg_mod._safe_unlink(ts_temp)
+                    print(f"[concat] TS sanitize for segment {i+1} failed (bitstream too severe for bsf), falling back to plain flagged mp4 remux: {exc}")
+                if not sanitized:
+                    try:
+                        # Fallback: plain per-file remux with flags (no bsf), still applies discardcorrupt etc.
+                        ffmpeg_mod.run_command([
+                            context.ffmpeg_bin, "-y",
+                            "-fflags", "+genpts+discardcorrupt+igndts",
+                            "-err_detect", "ignore_err",
+                            "-i", str(src),
+                            "-map", "0",
+                            "-c", "copy",
+                            "-avoid_negative_ts", "make_zero",
+                            "-movflags", "+faststart",
+                            str(dst),
+                        ])
+                        context.sanitized_inputs[i] = dst
+                        print(f"[concat] Pre-sanitized corrupt segment {i+1} (plain mp4 remux with discardcorrupt etc.)")
+                    except Exception as exc2:
+                        print(f"[concat] Pre-sanitize for segment {i+1} failed (will use original): {exc2}")
 
         # Use sanitized where available for the concat processing (transparent to most strategies)
         effective_inputs = [
