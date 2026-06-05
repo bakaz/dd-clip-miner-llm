@@ -127,7 +127,13 @@ class ConcatContext:
     profile: ProblemProfile | None = None
     attempts: list[AttemptRecord] = None
     concat_file: Path | None = None
+    sanitized_inputs: dict[int, Path] | None = None  # pre-sanitized versions of corrupt segments (using safe remux)
+    original_inputs: list[Path] | None = None  # kept for reference if needed
 
     def __post_init__(self):
         if self.attempts is None:
             self.attempts = []
+        if self.sanitized_inputs is None:
+            self.sanitized_inputs = {}
+        if self.original_inputs is None:
+            self.original_inputs = list(self.inputs) if self.inputs else []

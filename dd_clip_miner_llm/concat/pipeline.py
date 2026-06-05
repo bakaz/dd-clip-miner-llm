@@ -31,6 +31,13 @@ def _build_health_profile(
 ) -> dict[int, HealthInfo]:
     """Upfront health probe for all inputs. This is the key improvement:
     detect bitstream corruption *before* expensive copy attempts.
+
+    Optimization from community best practices (ffmpeg TS remux, per-file sanitize,
+    discardcorrupt for live recordings):
+    - Only scan h264.
+    - For small files (<120s, common for error-burst "fix" segments in splits),
+      do FULL scan (not just tail) to catch corruption accurately.
+    - Tail 60s for large files (typical end-of-recording corruption in live splits).
     """
     health: dict[int, HealthInfo] = {}
     h264_indexes = [
@@ -41,23 +48,31 @@ def _build_health_profile(
     h264_inputs = [inputs[index] for index in h264_indexes]
     bad_set: set[int] = set()
     if h264_inputs:
-        bad_relative_indexes = ffmpeg_mod._find_bad_h264_segments(
-            h264_inputs,
-            ffmpeg_bin,
-            tail_seconds=60.0,
-        )
-        bad_set = {
-            h264_indexes[index]
-            for index in bad_relative_indexes
-            if 0 <= index < len(h264_indexes)
-        }
+        # Per-file tail or full based on size (small files = likely the corrupt "fix" points)
+        tail_for_h264 = []
+        for idx in h264_indexes:
+            meta = metas[idx]
+            dur = meta.duration or 0
+            tail_for_h264.append( None if dur > 0 and dur < 120 else 60.0 )
+
+        # Group by tail value for efficiency? Simple: call per or with list
+        # For simplicity, scan all h264 with appropriate per-file, but current _find takes list + one tail.
+        # Use per-file for accuracy on mixed sizes.
+        for rel_idx, inp_idx in enumerate(h264_indexes):
+            inp = inputs[inp_idx]
+            tail = tail_for_h264[rel_idx]
+            single_bad = ffmpeg_mod._find_bad_h264_segments(
+                [inp], ffmpeg_bin, tail_seconds=tail
+            )
+            if single_bad:
+                bad_set.add(inp_idx)
 
     for i, (inp, meta) in enumerate(zip(inputs, metas)):
         is_corrupt = i in bad_set
+        is_small = (meta.duration or 0) < 120
         corrupt_detail = ""
         if is_corrupt:
-            # Re-run probe on tail for detail (or use previous)
-            corrupt_detail = "corrupt tail detected by h264_mp4toannexb scan"
+            corrupt_detail = ("corrupt (full scan - small file)" if is_small else "corrupt tail detected by h264_mp4toannexb scan")
 
         health[i] = HealthInfo(
             path=inp,
@@ -206,7 +221,9 @@ class TimestampIndexRemuxCopyStrategy(Strategy):
         if context.force_normalize:
             return False
         profile = context.profile
-        if profile and profile.is_bitstream_problem():
+        # Relax bitstream skip: the per-part remux uses +discardcorrupt + ignore_err which helps sanitize bitstream corruption too.
+        # Only skip if we have strong indication it's purely bitstream without timestamp help.
+        if profile and profile.is_bitstream_problem() and not (context.health and any(h.is_bitstream_corrupt for h in context.health.values())):
             return False
         if profile and (
             profile.timestamp_discontinuity
@@ -236,7 +253,8 @@ class TimestampIndexRemuxAudioResyncStrategy(Strategy):
 
     def is_applicable(self, context: ConcatContext) -> bool:
         profile = context.profile
-        if profile and profile.is_bitstream_problem():
+        # Relax bitstream skip: per-part remux + audio resync with error ignore flags can help bitstream cases too (especially small corrupt segments).
+        if profile and profile.is_bitstream_problem() and not (context.health and any(h.is_bitstream_corrupt for h in context.health.values())):
             return False
         if profile and (
             profile.timestamp_discontinuity
@@ -269,7 +287,8 @@ class FastTransmuxStrategy(Strategy):
         if context.force_normalize:
             return False
         profile = context.profile
-        if profile and profile.is_bitstream_problem():
+        # Relax for bitstream: TS transmux is a common community-recommended way to sanitize H.264 MP4 corruption from live splits.
+        if profile and profile.is_bitstream_problem() and not (context.health and any(h.is_bitstream_corrupt for h in context.health.values())):
             return False
         if any(meta.video_codec not in {None, "h264"} for meta in context.metas):
             return False
@@ -621,6 +640,45 @@ class ConcatPipeline:
             initial_profile.summary = "bitstream_corruption (from upfront probe)"
         context.profile = initial_profile
 
+        # Pre-sanitize corrupt segments (architectural opt + best practice from ffmpeg community for live split corruption):
+        # Only the known-bad segments get individual safe per-part remux with aggressive error recovery (discardcorrupt, ignore_err, genpts, igndts).
+        # This "sanitizes" bitstream issues cheaply (no full decode), producing cleaner inputs for subsequent concat attempts.
+        # Good segments untouched. Small corrupt files (common error-burst points) benefit especially.
+        # Then we use the sanitized versions in the concat_list and strategies.
+        if not context.original_inputs:
+            context.original_inputs = list(context.inputs)
+        if not context.sanitized_inputs:
+            context.sanitized_inputs = {}
+        if corrupt:
+            sanitize_dir = context.output.parent / f"_pre_sanitize_{uuid4().hex[:8]}"
+            sanitize_dir.mkdir(parents=True, exist_ok=True)
+            for i in corrupt:
+                src = context.original_inputs[i]
+                dst = sanitize_dir / f"sanitized_{i:04d}.mp4"
+                try:
+                    ffmpeg_mod.run_command([
+                        context.ffmpeg_bin, "-y",
+                        "-fflags", "+genpts+discardcorrupt+igndts",
+                        "-err_detect", "ignore_err",
+                        "-i", str(src),
+                        "-map", "0",
+                        "-c", "copy",
+                        "-avoid_negative_ts", "make_zero",
+                        "-movflags", "+faststart",
+                        str(dst),
+                    ])
+                    context.sanitized_inputs[i] = dst
+                    print(f"[concat] Pre-sanitized corrupt segment {i+1} (safe per-file remux with discardcorrupt etc.)")
+                except Exception as exc:
+                    print(f"[concat] Pre-sanitize for segment {i+1} failed (will use original): {exc}")
+
+        # Use sanitized where available for the concat processing (transparent to most strategies)
+        effective_inputs = [
+            context.sanitized_inputs.get(i, context.original_inputs[i])
+            for i in range(len(context.original_inputs))
+        ]
+        context.inputs = effective_inputs
+
         # 3. Run strategies
         concat_file = context.output.parent / "concat_list.txt"
         _write_concat_list(concat_file, context.inputs)
@@ -646,10 +704,20 @@ class ConcatPipeline:
                     else f"{count_ratio:.2%} of input files"
                 )
                 print(
-                    f"[concat] Corrupt H.264 segment(s) cover {ratio_text}; skipping mixed copy repair paths "
-                    "and going straight to full reencode."
+                    f"[concat] Corrupt H.264 segment(s) cover {ratio_text}; skipping most mixed copy paths. "
+                    "Trying cheap per-part safe remux (with discardcorrupt) first before full reencode."
                 )
-                strategies = [FullReencodeStrategy()]
+                # Optimization: try the timestamp/index safe remux strategies (per-part with discardcorrupt + genpts)
+                # which are cheap and often sanitize bitstream corruption enough for concat copy to succeed,
+                # before falling back to expensive full reencode.
+                strategies = [
+                    TimestampIndexRemuxCopyStrategy(),
+                    TimestampIndexRemuxAudioResyncStrategy(),
+                    TargetedRepairStrategy(),
+                    SelectiveNormalizeStrategy(),
+                    BoundaryNormalizeStrategy(),
+                    FullReencodeStrategy(),
+                ]
             else:
                 strategies = [
                     TargetedRepairStrategy(),
