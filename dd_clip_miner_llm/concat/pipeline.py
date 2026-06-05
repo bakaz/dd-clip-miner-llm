@@ -148,7 +148,7 @@ class DirectCopyStrategy(Strategy):
 
     def execute(self, context: ConcatContext) -> bool:
         concat_file = context.concat_file or (context.output.parent / "concat_list.txt")
-        _write_concat_list(concat_file, context.inputs)
+        _write_concat_list(concat_file, context.inputs, context.metas)
         context.concat_file = concat_file
 
         try:
@@ -188,7 +188,7 @@ class AudioReencodeStrategy(Strategy):
 
     def execute(self, context: ConcatContext) -> bool:
         concat_file = context.concat_file or (context.output.parent / "concat_list.txt")
-        _write_concat_list(concat_file, context.inputs)
+        _write_concat_list(concat_file, context.inputs, context.metas)
         context.concat_file = concat_file
 
         try:
@@ -528,7 +528,7 @@ class FullReencodeStrategy(Strategy):
 
     def execute(self, context: ConcatContext) -> bool:
         concat_file = context.concat_file or (context.output.parent / "concat_list.txt")
-        _write_concat_list(concat_file, context.inputs)
+        _write_concat_list(concat_file, context.inputs, context.metas)
         context.concat_file = concat_file
 
         scale_args = ffmpeg_mod._concat_scale_args(context.target_size)
@@ -715,9 +715,27 @@ class ConcatPipeline:
         ]
         context.inputs = effective_inputs
 
+        # Post-sanitize re-probe: corrupt segments often have inaccurate/bogus duration from ffprobe
+        # (truncated streams, garbage timestamps). Re-probing the cleaned copies gives a realistic
+        # "expected" for validation and for high-ratio % calculations. This prevents spurious
+        # "output duration too short" failures when the only recoverable content is shorter than
+        # the original damaged file's reported duration.
+        if context.sanitized_inputs:
+            print("[concat] Re-probing sanitized inputs for accurate durations (damaged _fix segments frequently report wrong duration).")
+            try:
+                new_metas = probe_many(context.inputs)
+                context.metas = new_metas
+                new_exp = expected_duration(new_metas)
+                if new_exp is not None and new_exp > 0:
+                    old_exp = context.expected_duration
+                    context.expected_duration = new_exp
+                    print(f"[concat]   expected_duration updated: {old_exp} -> {new_exp} (based on sanitized files)")
+            except Exception as reerr:
+                print(f"[concat]   Re-probe after pre-sanitize failed, keeping previous expected: {reerr}")
+
         # 3. Run strategies
         concat_file = context.output.parent / "concat_list.txt"
-        _write_concat_list(concat_file, context.inputs)
+        _write_concat_list(concat_file, context.inputs, context.metas)
         context.concat_file = concat_file
 
         strategies = self.strategies
@@ -1259,11 +1277,28 @@ def _validate_output(
     ffmpeg_mod._validate_audio_decodable(output, ffmpeg_bin)
 
 
-def _write_concat_list(path: Path, videos: list[Path]) -> None:
+def _write_concat_list(
+    path: Path,
+    videos: list[Path],
+    metas: list[VideoMeta] | None = None,
+) -> None:
+    durations: list[float] | None = None
+    if metas is not None and len(metas) == len(videos):
+        durations = []
+        for meta in metas:
+            if meta.duration is None:
+                durations = None
+                break
+            durations.append(max(0.001, float(meta.duration)))
+
     with path.open("w", encoding="utf-8") as handle:
-        for video in videos:
+        if durations is not None:
+            handle.write("ffconcat version 1.0\n")
+        for index, video in enumerate(videos):
             escaped = str(video).replace("'", "'\\''")
             handle.write(f"file '{escaped}'\n")
+            if durations is not None:
+                handle.write(f"duration {durations[index]:.6f}\n")
 
 
 def _safe_attempt_name(name: str) -> str:

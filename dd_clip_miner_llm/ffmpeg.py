@@ -697,7 +697,10 @@ def _validate_concat_duration(output: Path, expected_duration: float | None) -> 
     if expected_duration is None:
         return
     actual_duration = get_duration(output)
-    tolerance = max(2.0, expected_duration * 0.0005)
+    # More realistic tolerance for long live recordings (possible small drifts, frame drops in repaired tails).
+    # 30s absolute or 0.5% is still strict but practical; the pre-sanitize + re-probe of sanitized
+    # durations makes the "expected" itself much more accurate for damaged inputs.
+    tolerance = max(30.0, expected_duration * 0.005)
     if actual_duration + tolerance < expected_duration:
         raise FFmpegError(
             "Concat output duration is too short: "

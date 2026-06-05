@@ -449,10 +449,10 @@ runs/<run_name>/
 ```
 
 **concat 场景额外目录**（在 `runs/<name>_concat/` 下）：
-- `concat/concat.mp4`：最终合并结果（处理完后 `concat/` 里的中间文件会被清理）
+- `concat/concat.mp4`：最终合并结果
 - `concat/concat_attempts/*.log`：**每个 Strategy 的完整原始 ffmpeg 输出**（强烈推荐用于调试 bitstream / demux 问题）
-- `concat/_pre_sanitize_*`：**pre-sanitize 目录**（仅对 corrupt segments 的廉价 safe per-file remux 产物，用于后续 concat）
-- `concat/_concat_remux_*` / `_concat_repair_*` / `_concat_sanitize_*` 等：临时重封装或修复目录（正常结束会自动清理）
+- `concat/_pre_sanitize_*`：**pre-sanitize 目录**（仅对 corrupt segments 的廉价 safe per-file remux 产物；为便于复盘，当前会保留）
+- `concat/_concat_remux_*` / `_concat_repair_*` / `_concat_sanitize_*` 等：临时重封装或修复目录（多数策略正常结束会自动清理，失败日志保留在 `concat_attempts/`）
 
 `daily_summary` 只写报告，不生成 `03_clips`。
 
@@ -475,7 +475,24 @@ python -m dd_clip_miner_llm run video.mp4 --config config.yaml --video-codec nv
 python -m dd_clip_miner_llm ffmpeg-info
 ```
 
-合并目录视频时，`video_codec` 也会影响需要重编码的 fallback：`auto` 会按 NVENC / QSV / AMF / libx264 选择可用编码器；`copy` 会先尝试无损流复制。新的 `ConcatPipeline` 会先做 upfront health probe + 基于完整 ffmpeg 输出的 `ProblemProfile` 分类（`bitstream_corruption` 等），在检测到 corruption、短输出、音频不可解码等问题时，智能选择 TargetedRepair 等策略，而不是简单顺序 fallback。
+合并目录视频时，`video_codec` 也会影响需要重编码的 fallback：`auto` 会按 NVENC / QSV / AMF / libx264 选择可用编码器；`copy` 会先尝试无损流复制。新的 `ConcatPipeline` 会先做 upfront health probe + 基于完整 ffmpeg 输出的 `ProblemProfile` 分类（`bitstream_corruption`、timestamp/duration、audio decode 等），在检测到 corruption、短输出、音频不可解码等问题时按诊断结果选择策略，而不是简单顺序 fallback。
+
+### Concat fallback 逻辑
+
+目录合并的核心原则是：先用 `ffprobe` / health probe / ffmpeg stderr / 输出校验判断问题类型，再选择最低成本的恢复路径。每一步失败都会把完整 ffmpeg 输出写入 `concat/concat_attempts/*.log`，并继续合并到 `ProblemProfile`。
+
+1. **单文件策略**：目录内只有一个视频时，默认 `copy2`；`output.single_file_policy: remux` 会重封装，`normalize` 会标准化转码。
+2. **轻量预检**：读取 duration、codec、分辨率、fps、pix_fmt、SAR、音频参数，计算 `expected_duration` 和目标 profile。
+3. **H.264 health probe**：只扫描 H.264 输入；小于 120s 的文件做 full scan，较大文件默认扫尾部，以便提前发现 `Invalid NAL unit size`、`missing picture`、`h264_mp4toannexb` 失败等问题。
+4. **pre-sanitize**：对已确认 corrupt 的文件先做低成本 per-file sanitize，优先 `MP4 -> TS -> MP4`（`h264_mp4toannexb` + `discardcorrupt`），严重损坏时回退 plain MP4 remux；sanitize 后会重新 `ffprobe`，用清理后的实际时长更新 `expected_duration`。
+5. **direct concat copy**：参数兼容且未强制 normalize 时，尝试 concat demuxer + `-c copy`；输出必须通过 format/video stream duration 校验，且音轨必须可完整解码。
+6. **timestamp/index remux copy**：遇到 timestamp、duration、non-monotonic DTS，或高比例 corrupt 但仍值得低成本尝试时，先走 per-part remux + `+genpts+igndts+discardcorrupt`。
+7. **timestamp/index remux + audio resync**：音频边界、AAC 解码、音频时间戳问题优先使用 `aresample=async=1000:first_pts=0`，视频仍尽量 copy。
+8. **targeted H.264 repair**：强 bitstream corruption 优先修坏段；先做固定 tail-window repair（默认最后 90s），失败后再整段重编码坏文件，其余片段 copy。
+9. **selective / boundary normalize**：参数不一致或结构性时长错误时，只标准化不符合 target profile 的片段，或定位边界文件后只修边界文件；视频统一到最低源分辨率，音频统一 AAC 320k / 48000Hz / stereo，缺音轨会补静音。
+10. **full reencode / concat filter**：所有快速、局部路径失败后，才进入 concat demuxer 全量重编码；最终兜底是 concat filter，最慢但最稳。
+
+校验容忍度针对长直播流做了现实化处理：默认允许 `max(30s, expected_duration * 0.005)` 的小幅误差；但明显短输出、明显长输出、视频流时长不足、音轨不可解码，仍会被判失败并继续 fallback。
 
 ## 常见问题
 
