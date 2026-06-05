@@ -214,7 +214,7 @@ def _process_folder_concat(
 
 def _cleanup_concat_source(concat_dir: Path) -> None:
     """清理 concat 中间文件；最终输入保留在 pipeline 的 00_input 目录。
-    （新 ConcatPipeline 下，完整 attempt 日志会留在 concat_attempts/ 供调试。）
+    （新 ConcatPipeline 下，pre-sanitize 临时目录和完整 attempt 日志会留在对应位置供调试。）
     """
     try:
         for path in concat_dir.iterdir():

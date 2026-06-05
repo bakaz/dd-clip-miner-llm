@@ -179,8 +179,9 @@ def _concat_videos_legacy(
     """拼接多个视频文件（旧实现，保留用于兼容/参考）。
 
     新实现已迁移到 concat.pipeline 中的 ConcatPipeline + Strategy，
-    支持 upfront health probe + ProblemProfile（依据完整 ffmpeg 输出判断
-    bitstream_corruption 等问题类型）来智能选择 fallback，并保存完整日志。
+    支持 upfront health probe（小文件全扫）+ pre-sanitize corrupt segments（per-file safe remux）
+    + ProblemProfile（依据完整 ffmpeg 输出判断 bitstream_corruption 等）来智能选择 fallback，
+    并保存完整日志。
 
     旧策略（供参考）：
     1. 优先尝试音视频流 copy（最快）

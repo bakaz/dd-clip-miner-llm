@@ -18,7 +18,7 @@
 - **智能 LLM 调用**：reasoning followup、工具调用、JSON 修复、歌词搜索（DuckDuckGo）
 - **歌曲遗漏复查**：首轮识别后对未覆盖 ASR 区间二次送 LLM 检查
 - **断点续传**：同一输入视频再次运行时复用 `01_audio`、`02_asr`、各类型 LLM 结果（见 `progress.json`）
-- **批量处理**：目录扫描；可选多视频拼接后统一处理（重构为 `ConcatPipeline`，upfront health probe + 基于完整 ffmpeg 输出的 `ProblemProfile` 智能 fallback，只修坏段，完整日志可查）
+- **批量处理**：目录扫描；可选多视频拼接后统一处理（`ConcatPipeline` + Strategy：upfront health probe（小文件全扫）+ pre-sanitize corrupt segments（per-file safe remux with discardcorrupt）+ ProblemProfile 分类驱动智能 fallback + 完整日志。符合直播分段 H.264 损坏最佳实践）
 - **切片导出命名**：JSON 主播词典匹配 + 路径解析 YYMMDD → `【主播】歌名-歌手-YYMMDD`
 - **手动重切**：编辑 CSV 后重新导出片段
 - **下头片段短标题**：`title` 作为文件名，少于 20 个中文字
@@ -154,16 +154,17 @@ python -m dd_clip_miner_llm batch-run "D:\input" --config config.yaml --work-roo
 合并策略（重构为 `ConcatPipeline` + `Strategy` 编排，核心是**依据 ffmpeg 完整输出判断问题类型**来选择 fallback）：
 
 1. 单文件按 `output.single_file_policy` 处理：默认 `copy`；可设为 `remux` 或 `normalize`
-2. **Upfront health probe**：对每个输入做 ffprobe + tail 60s 的 h264_mp4toannexb bitstream 扫描，得到结构化 `HealthInfo`（哪些 segment 存在 corruption）。
+2. **Upfront health probe**：对每个输入做 ffprobe + tail 60s 的 h264_mp4toannexb bitstream 扫描（小文件<120s 全扫，常见于错误爆发“fix”片段），得到结构化 `HealthInfo`（哪些 segment 存在 corruption）。
 3. 使用 `classify_ffmpeg_output`（从完整 stdout/stderr）解析出 `ProblemProfile`（`bitstream_corrupt_indexes`、`demux_errors`、`timestamp_discontinuity` 等 + summary）。
-4. 按代价/适用性顺序尝试策略（DirectCopyStrategy、AudioReencodeStrategy、RemuxThenCopyStrategy、TargetedRepairStrategy、SelectiveNormalizeStrategy、FullReencodeStrategy + concat filter 兜底）。
-5. 每个 `Strategy` 通过 `is_applicable(context.profile)` 决定是否执行；执行时强制 `bitstream_fatal`（即使 ffmpeg rc=0 只要 stderr 有 corruption 标志也当作失败），捕获**完整原始 ffmpeg 日志**并保存到 `concat_attempts/<strategy>.log`。
-6. 失败时用输出重新 `classify` 并 `merge` 更新 `ProblemProfile`，驱动后续策略选择（例如检测到 bitstream 后优先 TargetedRepair）。
-7. `TargetedRepairStrategy` 优先使用已诊断的坏段索引，只对坏片段做 reencode（NVENC > QSV > AMF > libx264），好片段直接 copy。
-8. 每次合并后校验时长和音频可解码性。
-9. 合并结果 stage 到 `00_input/input_*.mp4`；`manual-cut` 从 `manifest.json` 读输入；处理完成后清理 `concat/` 中间文件（保留最终 concat.mp4）。
+4. **Pre-sanitize**（新增架构优化，符合 ffmpeg 社区直播分段损坏最佳实践）：对检测到的 corrupt segments，仅对坏的做 individual safe per-part remux（带 +discardcorrupt + ignore_err + genpts + igndts 等），生成 cleaned 版本（好片段不动，廉价）。后续 concat lists/strategies 使用 sanitized inputs for 坏的。
+5. 按代价/适用性顺序尝试策略（DirectCopyStrategy、AudioReencodeStrategy、Timestamp remux 等 safe per-part、RemuxThenCopyStrategy、TargetedRepairStrategy、SelectiveNormalizeStrategy、FullReencodeStrategy + concat filter 兜底）。高 corruption ratio 时优先廉价 per-part safe remux（timestamp/index remux 等，带 discardcorrupt）再 repair/full。
+6. 每个 `Strategy` 通过 `is_applicable(context.profile)` 决定是否执行（bitstream 场景下放宽某些 remux/transmux 策略，因为 per-part/TS 路径可 sanitize）；执行时强制 `bitstream_fatal`（即使 ffmpeg rc=0 只要 stderr 有 corruption 标志也当作失败），捕获**完整原始 ffmpeg 日志**并保存到 `concat_attempts/<strategy>.log`。
+7. 失败时用输出重新 `classify` 并 `merge` 更新 `ProblemProfile`，驱动后续策略选择（例如检测到 bitstream 后优先 TargetedRepair）。
+8. `TargetedRepairStrategy` 优先使用已诊断的坏段索引，只对坏片段做 reencode（NVENC > QSV > AMF > libx264），好片段直接 copy（并有 tail-window repair）。
+9. 每次合并后校验时长和音频可解码性。
+10. 合并结果 stage 到 `00_input/input_*.mp4`；`manual-cut` 从 `manifest.json` 读输入；处理完成后清理 `concat/` 中间文件（保留最终 concat.mp4）。
 
-常见例子：源文件参数看起来一致，但某段尾部存在坏 H.264 packet（`Invalid NAL unit size`、`missing picture in access unit`、`h264_mp4toannexb filter failed`、`Error during demuxing`）。direct copy 可能 rc=0 却只输出部分内容，程序通过 upfront probe + classify 直接识别为 bitstream 问题，跳过无谓尝试，直接进入只修坏段的 targeted repair，而不是盲目全量重编码。
+常见例子：源文件参数看起来一致，但某段尾部（或小“fix”片段）存在坏 H.264 packet（`Invalid NAL unit size`、`missing picture in access unit`、`h264_mp4toannexb filter failed`、`Error during demuxing`）。程序通过 upfront health probe（小文件全扫）+ classify 识别，**先对坏段做 pre-sanitize（per-file safe remux with discardcorrupt）生成 cleaned 版本**，然后优先尝试廉价 per-part safe remux（timestamp remux 等）/ targeted repair，而不是盲目 copy 或直接全量重编码。完整日志在 `concat_attempts/`。
 
 ### 手动重切
 
@@ -387,7 +388,7 @@ dd_clip_miner_llm/
 ├── clip_naming.py
 ├── pipeline.py
 ├── batch.py / manual.py / merger.py / report.py
-├── concat/             # 合并预检（upfront health probe）、ProblemProfile 分类、Strategy 编排、完整日志保存
+├── concat/             # 合并预检（upfront health probe，小文件全扫）、pre-sanitize corrupt（per-file safe remux）、ProblemProfile 分类、Strategy 编排、完整日志保存
 └── recognizers/
     ├── __init__.py    # @register 自动发现
     ├── base.py
@@ -450,7 +451,8 @@ runs/<run_name>/
 **concat 场景额外目录**（在 `runs/<name>_concat/` 下）：
 - `concat/concat.mp4`：最终合并结果（处理完后 `concat/` 里的中间文件会被清理）
 - `concat/concat_attempts/*.log`：**每个 Strategy 的完整原始 ffmpeg 输出**（强烈推荐用于调试 bitstream / demux 问题）
-- `concat/_concat_remux_*` / `_concat_repair_*`：临时重封装或修复目录（正常结束会自动清理）
+- `concat/_pre_sanitize_*`：**pre-sanitize 目录**（仅对 corrupt segments 的廉价 safe per-file remux 产物，用于后续 concat）
+- `concat/_concat_remux_*` / `_concat_repair_*` / `_concat_sanitize_*` 等：临时重封装或修复目录（正常结束会自动清理）
 
 `daily_summary` 只写报告，不生成 `03_clips`。
 
