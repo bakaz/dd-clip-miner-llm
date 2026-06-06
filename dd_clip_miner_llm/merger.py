@@ -11,7 +11,6 @@ def _merge_adjacent_matches(
     merge_gap: float,
     max_duration: float | None = None,
 ) -> list[dict[str, Any]]:
-    """合并相邻或重叠的内容片段"""
     if not matches:
         return []
 
@@ -21,7 +20,6 @@ def _merge_adjacent_matches(
     for match in sorted_matches[1:]:
         prev = merged[-1]
 
-        # 检查 segment_indices 是否重叠
         prev_indices = set(range(prev["segment_start_idx"], prev["segment_end_idx"] + 1))
         curr_indices = set(range(match["segment_start_idx"], match["segment_end_idx"] + 1))
         has_overlap = bool(prev_indices & curr_indices)
@@ -30,7 +28,6 @@ def _merge_adjacent_matches(
         merged_duration = max(prev["end"], match["end"]) - min(prev["start"], match["start"])
         within_max_duration = max_duration is None or max_duration <= 0 or merged_duration <= max_duration
 
-        # 如果重叠，或者 title 相同且间隔 ≤ merge_gap，就合并；但歌曲超长时保守拆开。
         if (has_overlap or same_title_nearby) and within_max_duration:
             prev["end"] = max(prev["end"], match["end"])
             prev["segment_end_idx"] = max(prev["segment_end_idx"], match["segment_end_idx"])
@@ -64,6 +61,29 @@ def _split_indices_by_time_gap(
     return groups
 
 
+def _adaptive_silence_padding_seconds(
+    base_padding: float,
+    gap_seconds: float,
+    padding_config: dict[str, Any],
+    side: str,
+) -> float:
+    if base_padding <= 0:
+        return base_padding
+    if not padding_config.get("adaptive_silence_padding", False):
+        return base_padding
+
+    gap = max(0.0, float(gap_seconds))
+    threshold = float(padding_config.get("adaptive_silence_gap_threshold_seconds", 25.0))
+    if gap <= threshold:
+        return base_padding
+
+    ratio = float(padding_config.get("adaptive_silence_gap_ratio", 0.95))
+    ratio = min(1.0, max(0.0, ratio))
+    max_padding = float(padding_config.get(f"adaptive_max_{side}_seconds", base_padding))
+    max_padding = max(base_padding, max_padding)
+    return max(base_padding, min(max_padding, gap * ratio))
+
+
 def build_content_results(
     segments: list[TranscriptSegment],
     matches: list[ContentMatch],
@@ -71,14 +91,9 @@ def build_content_results(
     config: dict[str, Any],
     content_type: str,
 ) -> list[ContentResult]:
-    """构建内容片段结果"""
-    # 获取类型配置
     type_config = config.get(content_type, {})
-    
-    # 获取 padding 配置（兼容新旧配置结构）
     padding_config = get_padding_config(config, content_type)
-    
-    # 歌曲使用特殊的 padding 配置
+
     if content_type == "song":
         before_pad = float(padding_config.get("before_seconds", 15.0))
         after_pad = float(padding_config.get("after_seconds", 15.0))
@@ -87,7 +102,6 @@ def build_content_results(
         max_duration = float(padding_config.get("max_song_seconds", 360.0))
         merge_gap = float(padding_config.get("merge_gap_seconds", 20.0))
     else:
-        # 其他类型使用简单 padding
         before_pad = float(padding_config.get("before_seconds", 1.0))
         after_pad = float(padding_config.get("after_seconds", 2.0))
         after_guard = 0.0
@@ -132,31 +146,42 @@ def build_content_results(
         item_start = item["start"]
         item_end = item["end"]
 
-        # 应用 padding
         if content_type == "song":
-            # 歌曲使用复杂的 padding 逻辑
-            # before_limit: 前一个 ASR 的 start + guard_seconds
             if item["segment_start_idx"] > 0:
                 prev_segment = segments[item["segment_start_idx"] - 1]
-                before_limit = prev_segment.start + after_guard  # 使用 start + guard
+                before_limit = prev_segment.start + after_guard
+                before_gap = item_start - prev_segment.end
             else:
                 before_limit = 0.0
-            
-            # after_limit: 下一个 ASR 的 end - guard_seconds
+                before_gap = item_start
+
             if item["segment_end_idx"] + 1 < len(segments):
                 next_segment = segments[item["segment_end_idx"] + 1]
                 after_limit = max(item_end, next_segment.end - after_guard)
+                after_gap = next_segment.start - item_end
             else:
                 after_limit = total_duration
-            
-            start = min(item_start, max(before_limit, item_start - before_pad))
-            end = max(item_end, min(after_limit, item_end + after_pad))
+                after_gap = total_duration - item_end
+
+            adaptive_before_pad = _adaptive_silence_padding_seconds(
+                before_pad,
+                before_gap,
+                padding_config,
+                "before",
+            )
+            adaptive_after_pad = _adaptive_silence_padding_seconds(
+                after_pad,
+                after_gap,
+                padding_config,
+                "after",
+            )
+
+            start = min(item_start, max(before_limit, item_start - adaptive_before_pad))
+            end = max(item_end, min(after_limit, item_end + adaptive_after_pad))
         else:
-            # 其他类型简单 padding
             start = max(0.0, item_start - before_pad)
             end = min(total_duration, item_end + after_pad)
 
-        # 确保不超出总时长
         start = max(0.0, start)
         end = min(total_duration, end)
 
@@ -185,12 +210,10 @@ def build_content_results(
     return results
 
 
-# 兼容旧项目的函数别名
 def build_song_results(
     segments: list[TranscriptSegment],
     matches: list[ContentMatch],
     total_duration: float,
     config: dict[str, Any],
 ) -> list[ContentResult]:
-    """构建歌曲结果（兼容旧项目）"""
     return build_content_results(segments, matches, total_duration, config, "song")

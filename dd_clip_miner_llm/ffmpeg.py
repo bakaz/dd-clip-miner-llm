@@ -985,7 +985,7 @@ def _targeted_repair_encode_candidates(
     video_codec: str,
 ) -> list[list[str]]:
     candidates = _video_reencode_arg_candidates(ffmpeg_bin, video_codec)
-    cpu = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18"]
+    cpu = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23"]
     if cpu not in candidates:
         candidates.append(cpu)
     return candidates
@@ -1593,24 +1593,24 @@ def _video_encode_arg_candidates(ffmpeg_bin: str, video_codec: str = "copy") -> 
     if codec == "copy":
         return [["-c:v", "copy"]]
     if codec in {"cpu", "libx264"}:
-        return [["-c:v", "libx264", "-preset", "veryfast", "-crf", "18"]]
+        return [["-c:v", "libx264", "-preset", "veryfast", "-crf", "23"]]
     if codec == "nv":
-        return [["-c:v", "h264_nvenc", "-preset", "p5", "-cq", "19"]]
+        return [["-c:v", "h264_nvenc", "-preset", "p5", "-cq", "24"]]
     if codec == "intel":
-        return [["-c:v", "h264_qsv", "-global_quality", "20"]]
+        return [["-c:v", "h264_qsv", "-global_quality", "24"]]
     if codec == "amd":
-        return [["-c:v", "h264_amf", "-quality", "quality", "-qp_i", "20", "-qp_p", "20", "-qp_b", "20"]]
+        return [["-c:v", "h264_amf", "-quality", "quality", "-qp_i", "24", "-qp_p", "24", "-qp_b", "24"]]
 
     # auto: 先尝试 copy，再按 nv > intel > amd > cpu 尝试重编码
     encoders = detect_video_encoders(ffmpeg_bin)
     candidates: list[list[str]] = [["-c:v", "copy"]]
     if "h264_nvenc" in encoders:
-        candidates.append(["-c:v", "h264_nvenc", "-preset", "p5", "-cq", "19"])
+        candidates.append(["-c:v", "h264_nvenc", "-preset", "p5", "-cq", "24"])
     if "h264_qsv" in encoders:
-        candidates.append(["-c:v", "h264_qsv", "-global_quality", "20"])
+        candidates.append(["-c:v", "h264_qsv", "-global_quality", "24"])
     if "h264_amf" in encoders:
-        candidates.append(["-c:v", "h264_amf", "-quality", "quality", "-qp_i", "20", "-qp_p", "20", "-qp_b", "20"])
-    candidates.append(["-c:v", "libx264", "-preset", "veryfast", "-crf", "18"])
+        candidates.append(["-c:v", "h264_amf", "-quality", "quality", "-qp_i", "24", "-qp_p", "24", "-qp_b", "24"])
+    candidates.append(["-c:v", "libx264", "-preset", "veryfast", "-crf", "23"])
     return candidates
 
 

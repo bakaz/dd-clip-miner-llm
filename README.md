@@ -26,7 +26,7 @@
 ## 工作流程
 
 1. FFmpeg 提取 16 kHz 单声道 WAV
-2. faster-whisper 转写为带时间戳的 segment
+2. ASR backend（默认 FunASR/Qwen3-ASR，可切 faster-whisper）转写为带时间戳的 segment
 3. 各识别器将 transcript 送 LLM 标注片段
 4. 按时间切割音频/视频到 `03_clips/`
 5. 生成 `04_reports/` 下 CSV/JSON，可人工修改后 `manual-cut`
@@ -80,7 +80,15 @@ pip install -r requirements-cu12.txt
 
 当前 CTranslate2 / faster-whisper 依赖 CUDA 12 运行时（`cublas64_12.dll`）。本机仅 CUDA 13 时仍需 CUDA 12 DLL；缺失时自动回退 CPU int8。
 
-### 4. LLM API Key
+### 4. FunASR / Qwen3-ASR 可选
+
+```powershell
+pip install "dd-clip-miner-llm[funasr]"
+```
+
+默认 `asr.backend: funasr`，会通过 FunASR `AutoModel` 加载 `asr.funasr.model`，默认是 `Qwen/Qwen3-ASR-0.6B`。如需回到原 faster-whisper，设置 `asr.backend: faster_whisper`。
+
+### 5. LLM API Key
 
 ```powershell
 copy config.example.yaml config.yaml
@@ -255,6 +263,7 @@ audio:
   channels: 1
 
 asr:
+  backend: funasr             # faster_whisper | funasr
   model: small               # tiny | base | small | medium | large-v3
   device: auto               # auto | cpu | cuda
   compute_type: default      # default | float16 | int8
@@ -262,6 +271,17 @@ asr:
   beam_size: 5
   vad_filter: true
   initial_prompt: null
+  funasr:
+    model: Qwen/Qwen3-ASR-0.6B
+    hub: hf
+    trust_remote_code: true
+    device: auto
+    batch_size: 1
+    language: null
+    vad_model: null
+    punc_model: null
+    spk_model: null
+    generate_kwargs: {}
 
 llm:
   api_key: null
@@ -285,6 +305,11 @@ padding:
   before_seconds: 15.0
   after_seconds: 15.0
   after_next_asr_end_guard_seconds: 2.0
+  adaptive_silence_padding: true
+  adaptive_silence_gap_threshold_seconds: 25.0
+  adaptive_silence_gap_ratio: 0.95
+  adaptive_max_before_seconds: 45.0
+  adaptive_max_after_seconds: 45.0
   min_song_seconds: 30.0
   merge_gap_seconds: 35.0
 
@@ -302,6 +327,11 @@ song:
     before_seconds: 15.0
     after_seconds: 15.0
     after_next_asr_end_guard_seconds: 2.0
+    adaptive_silence_padding: true
+    adaptive_silence_gap_threshold_seconds: 25.0
+    adaptive_silence_gap_ratio: 0.95
+    adaptive_max_before_seconds: 45.0
+    adaptive_max_after_seconds: 45.0
     min_song_seconds: 30.0
     merge_gap_seconds: 35.0
   missed_recheck:
@@ -370,6 +400,7 @@ output:
 ```
 
 歌曲 padding 说明：`before_seconds` / `after_seconds` 在 ASR 段边界外扩展；`after_next_asr_end_guard_seconds` 限制与相邻段重叠；过短片段由 `min_song_seconds` 过滤；相邻同歌名由 `merge_gap_seconds` 合并。
+自适应 padding：启用 `adaptive_silence_padding` 后，只有当命中段与相邻 ASR 段之间的空白超过 `adaptive_silence_gap_threshold_seconds` 时，才按 `adaptive_silence_gap_ratio` 扩展 before/after，并受 `adaptive_max_before_seconds` / `adaptive_max_after_seconds` 上限约束。
 
 ## CLI 命令
 

@@ -8,6 +8,7 @@ audio:
 
 # ─── ASR 配置 ─────────────────────────────────
 asr:
+  backend: funasr
   model: small
   device: auto
   compute_type: default
@@ -15,6 +16,17 @@ asr:
   beam_size: 5
   vad_filter: true
   initial_prompt: null
+  funasr:
+    model: Qwen/Qwen3-ASR-0.6B
+    hub: hf
+    trust_remote_code: true
+    device: auto
+    batch_size: 1
+    language: null
+    vad_model: null
+    punc_model: null
+    spk_model: null
+    generate_kwargs: {}
 
 # ─── LLM 配置 ─────────────────────────────────
 llm:
@@ -39,6 +51,11 @@ padding:
   before_seconds: 15.0
   after_seconds: 15.0
   after_next_asr_end_guard_seconds: 2.0
+  adaptive_silence_padding: true
+  adaptive_silence_gap_threshold_seconds: 25.0
+  adaptive_silence_gap_ratio: 0.95
+  adaptive_max_before_seconds: 45.0
+  adaptive_max_after_seconds: 45.0
   min_song_seconds: 30.0
   merge_gap_seconds: 35.0
 
@@ -58,6 +75,11 @@ song:
     before_seconds: 15.0
     after_seconds: 15.0
     after_next_asr_end_guard_seconds: 2.0
+    adaptive_silence_padding: true
+    adaptive_silence_gap_threshold_seconds: 25.0
+    adaptive_silence_gap_ratio: 0.95
+    adaptive_max_before_seconds: 45.0
+    adaptive_max_after_seconds: 45.0
     min_song_seconds: 30.0
     merge_gap_seconds: 35.0
   missed_recheck:

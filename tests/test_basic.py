@@ -28,6 +28,9 @@ from dd_clip_miner_llm.clip_naming import (
     resolve_clip_naming_profile,
     text_similarity,
 )
+from dd_clip_miner_llm.asr_backends import build_asr_backend
+from dd_clip_miner_llm.asr_backends.faster_whisper import FasterWhisperBackend
+from dd_clip_miner_llm.asr_backends.funasr_backend import FunASRBackend, funasr_result_to_segments
 
 
 # ============ models.py 测试 ============
@@ -149,6 +152,8 @@ class TestConfig:
     def test_default_config_structure(self):
         assert "audio" in DEFAULT_CONFIG
         assert "asr" in DEFAULT_CONFIG
+        assert DEFAULT_CONFIG["asr"]["backend"] == "funasr"
+        assert DEFAULT_CONFIG["asr"]["funasr"]["model"] == "Qwen/Qwen3-ASR-0.6B"
         assert "llm" in DEFAULT_CONFIG
         assert "padding" in DEFAULT_CONFIG
         assert "song" in DEFAULT_CONFIG
@@ -232,6 +237,38 @@ padding:
         result = _migrate_padding_config(config)
         assert result["song"]["padding"]["before_seconds"] == 5.0
         assert result["song"]["padding"]["after_seconds"] == 20.0
+
+
+class TestASRBackends:
+    def test_build_default_backend(self):
+        backend = build_asr_backend(DEFAULT_CONFIG["asr"])
+        assert isinstance(backend, FunASRBackend)
+
+    def test_build_faster_whisper_backend(self):
+        backend = build_asr_backend({"backend": "faster_whisper"})
+        assert isinstance(backend, FasterWhisperBackend)
+
+    def test_build_funasr_backend_for_qwen3_alias(self):
+        backend = build_asr_backend({"backend": "qwen3_asr", "funasr": {}})
+        assert isinstance(backend, FunASRBackend)
+
+    def test_funasr_timestamp_result_to_segments(self):
+        result = [
+            {
+                "text": "hello world",
+                "sentence_info": [
+                    {"start": 0, "end": 1200, "text": "hello"},
+                    {"start": 1200, "end": 2500, "text": "world"},
+                ],
+            }
+        ]
+
+        segments = funasr_result_to_segments(result, "missing.wav")
+
+        assert segments == [
+            TranscriptSegment(start=0.0, end=1.2, text="hello"),
+            TranscriptSegment(start=1.2, end=2.5, text="world"),
+        ]
 
 
 class TestSongMissedRecheck:
@@ -939,7 +976,7 @@ class TestFFmpeg:
         candidates = ffmpeg._targeted_repair_encode_candidates("ffmpeg", "auto")
 
         assert candidates[0][1] == "h264_nvenc"
-        assert candidates[-1] == ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18"]
+        assert candidates[-1] == ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23"]
 
 
 class TestBatch:
@@ -992,6 +1029,73 @@ class TestMergerPadding:
         assert len(results) == 1
         assert results[0].start == 92.0
         assert results[0].end == 125.0
+
+    def test_song_padding_expands_into_long_asr_silence_gap(self):
+        segments = [
+            TranscriptSegment(start=0.0, end=2.0, text="before"),
+            TranscriptSegment(start=54.0, end=60.0, text="song"),
+            TranscriptSegment(start=120.0, end=122.0, text="after"),
+        ]
+        config = deep_merge(DEFAULT_CONFIG, {
+            "song": {
+                "padding": {
+                    "before_seconds": 15.0,
+                    "after_seconds": 15.0,
+                    "after_next_asr_end_guard_seconds": 2.0,
+                    "adaptive_silence_padding": True,
+                    "adaptive_silence_gap_threshold_seconds": 25.0,
+                    "adaptive_silence_gap_ratio": 0.5,
+                    "adaptive_max_before_seconds": 45.0,
+                    "adaptive_max_after_seconds": 45.0,
+                    "min_song_seconds": 0.0,
+                },
+            },
+        })
+        matches = [
+            ContentMatch(
+                content_type="song",
+                title="adaptive",
+                segment_indices=[1],
+                confidence=0.9,
+            )
+        ]
+
+        results = build_content_results(segments, matches, 140.0, config, "song")
+
+        assert len(results) == 1
+        assert results[0].start == 28.0
+        assert results[0].end == 90.0
+
+    def test_song_adaptive_padding_is_capped(self):
+        segments = [
+            TranscriptSegment(start=0.0, end=2.0, text="before"),
+            TranscriptSegment(start=120.0, end=130.0, text="song"),
+        ]
+        config = deep_merge(DEFAULT_CONFIG, {
+            "song": {
+                "padding": {
+                    "before_seconds": 15.0,
+                    "adaptive_silence_padding": True,
+                    "adaptive_silence_gap_threshold_seconds": 25.0,
+                    "adaptive_silence_gap_ratio": 0.8,
+                    "adaptive_max_before_seconds": 45.0,
+                    "min_song_seconds": 0.0,
+                },
+            },
+        })
+        matches = [
+            ContentMatch(
+                content_type="song",
+                title="capped",
+                segment_indices=[1],
+                confidence=0.9,
+            )
+        ]
+
+        results = build_content_results(segments, matches, 150.0, config, "song")
+
+        assert len(results) == 1
+        assert results[0].start == 75.0
 
     def test_song_merge_respects_max_song_seconds(self):
         segments = [

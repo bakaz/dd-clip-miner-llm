@@ -390,11 +390,7 @@ class TargetedRepairStrategy(Strategy):
     name = "targeted H.264 repair"
 
     def is_applicable(self, context: ConcatContext) -> bool:
-        if context.profile and context.profile.is_bitstream_problem():
-            return True
-        if context.health:
-            return any(h.is_bitstream_corrupt for h in context.health.values())
-        return False
+        return _has_video_bitstream_corruption(context)
 
     def execute(self, context: ConcatContext) -> bool:
         # Determine bad indexes from profile or health

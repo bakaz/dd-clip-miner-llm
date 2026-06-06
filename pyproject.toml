@@ -33,6 +33,14 @@ dependencies = [
     "ddgs>=9.0.0",
 ]
 
+[project.optional-dependencies]
+funasr = [
+    "funasr>=1.3.7",
+    "qwen-asr>=0.0.6",
+    "torch>=2.7",
+    "torchaudio>=2.7",
+]
+
 [project.urls]
 Homepage = "https://github.com/bakaz/dd-clip-miner-llm"
 Repository = "https://github.com/bakaz/dd-clip-miner-llm"

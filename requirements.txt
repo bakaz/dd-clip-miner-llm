@@ -16,3 +16,6 @@ ddgs>=9.0.0
 
 # GPU support for faster-whisper / CTranslate2 (CUDA 12 + cuDNN 9)
 # pip install -r requirements-cu12.txt
+
+# Optional FunASR backend for Qwen3-ASR:
+# pip install funasr qwen-asr torch torchaudio
