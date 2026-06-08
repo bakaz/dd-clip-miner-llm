@@ -1,0 +1,28 @@
+# 安装配置文件
+# 用法: python install.py --config install.yaml
+
+# ASR 后端选择
+# faster_whisper: 轻量级，支持 GPU (CUDA 12)
+# funasr: 支持 SenseVoiceSmall / Paraformer，需要 PyTorch
+asr_backend: faster_whisper
+
+# GPU 类型
+# auto: 自动检测
+# cuda12: 强制使用 CUDA 12
+# cpu: 强制使用 CPU
+gpu_type: auto
+
+# 是否安装 FunASR 支持（即使 asr_backend 不是 funasr）
+install_funasr: false
+
+# 是否安装歌词搜索工具 (ddgs)
+install_search_tools: true
+
+# 是否安装开发工具 (pytest, pytest-cov)
+install_dev_tools: false
+
+# 是否安装 MKVToolNix（需要系统包管理器）
+install_mkvmerge: true
+
+# 跳过已安装的包
+skip_installed: true

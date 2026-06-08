@@ -40,7 +40,12 @@ dd_clip_miner_llm/concat.zip
 
 # Config (with API keys)
 config.yaml
+config.yaml.bak.*
 streamer_dictionary.json
+
+# Logs
+*.log
+batch_run_*.log
 
 # OS
 .DS_Store

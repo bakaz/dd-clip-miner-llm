@@ -9,6 +9,10 @@ from os import devnull
 from pathlib import Path
 from uuid import uuid4
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 1: Core Utilities (errors, binary detection, command execution)
+# ═══════════════════════════════════════════════════════════════════════════════
+
 
 class FFmpegError(RuntimeError):
     """FFmpeg command error, optionally carrying raw output for diagnosis."""
@@ -90,6 +94,11 @@ def run_command_with_fallback(commands: list[list[str]], timeout: int = 3600) ->
     raise FFmpegError("\n\n".join(errors))
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 2: Audio/Video Extraction & Cutting
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
 def extract_audio(
     input_video: str | Path,
     output_wav: str | Path,
@@ -147,6 +156,11 @@ def _audio_encode_args(output_audio: Path, bitrate_kbps: int | None = None) -> l
     if ext == "opus":
         return ["-vn", "-acodec", "libopus", "-b:a", f"{bitrate}k"]
     return ["-vn"]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 3: Video Concatenation (legacy + new pipeline)
+# ═══════════════════════════════════════════════════════════════════════════════
 
 
 def concat_videos(
@@ -406,6 +420,11 @@ def _short_error(exc: Exception, max_length: int = 500) -> str:
     if len(summary) > max_length:
         return summary[: max_length - 3] + "..."
     return summary
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 4: Error Analysis & Diagnosis (bitstream corruption, ProblemProfile)
+# ═══════════════════════════════════════════════════════════════════════════════
 
 
 # --- Concat / bitstream error classification (centralized for fallback decisions) ---
@@ -705,6 +724,11 @@ def _sum_media_durations(videos: list[str | Path]) -> float | None:
     return total
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 5: Duration & Audio Validation
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
 def _validate_concat_duration(output: Path, expected_duration: float | None) -> None:
     if expected_duration is None:
         return
@@ -866,6 +890,11 @@ def _get_video_codec(video_path: str | Path) -> str | None:
         return None
     codec = completed.stdout.strip().lower()
     return codec or None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 6: Concat Strategies (reencode, remux, transmux, repair)
+# ═══════════════════════════════════════════════════════════════════════════════
 
 
 def _concat_reencoded_bad_segments_copy(
@@ -1944,7 +1973,10 @@ def _parse_ffmpeg_duration(text: str) -> float | None:
     return hours * 3600 + minutes * 60 + seconds
 
 
-# ============ MKVToolNix (mkvmerge) concat ============
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 7: MKVToolNix (mkvmerge) Concat
+# ═══════════════════════════════════════════════════════════════════════════════
+
 
 def require_mkvmerge() -> str:
     """查找 mkvmerge 可执行文件。"""

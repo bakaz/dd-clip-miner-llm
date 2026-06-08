@@ -45,7 +45,24 @@
 
 ## 安装
 
-### 1. Python
+### 傻瓜化安装（推荐）
+
+```powershell
+cd path\to\dd-clip-miner-llm
+python setup.py
+```
+
+脚本会自动：
+- 检测系统环境（OS、GPU、FFmpeg、mkvmerge）
+- 创建 Python 3.12 venv
+- 下载安装 FFmpeg / MKVToolNix
+- 安装核心依赖
+- 询问是否安装 FunASR + CUDA 支持
+- 验证安装结果
+
+### 手动安装
+
+#### 1. Python
 
 建议 Python 3.10–3.12：
 
