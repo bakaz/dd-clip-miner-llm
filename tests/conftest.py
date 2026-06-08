@@ -11,8 +11,10 @@ def pytest_configure(config):
     """Windows 上 AppData\\Local\\Temp 可能无写权限，改用项目内临时目录。"""
     if config.option.basetemp is None:
         project_tmp = Path(__file__).resolve().parent.parent / ".tmp" / "pytest"
-        project_tmp.mkdir(parents=True, exist_ok=True)
-        config.option.basetemp = str(project_tmp)
+    else:
+        project_tmp = Path(config.option.basetemp)
+    project_tmp.mkdir(parents=True, exist_ok=True)
+    config.option.basetemp = str(project_tmp.resolve())
 
 
 def pytest_collection_modifyitems(config, items):

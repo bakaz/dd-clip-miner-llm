@@ -6,6 +6,7 @@ from pathlib import Path
 
 import subprocess
 
+from ..concat.models import ProblemProfile
 from .bitstream import text_indicates_bitstream_corruption, looks_like_video_bitstream_error
 from .compat import pkg_attr
 
@@ -62,12 +63,10 @@ def analyze_ffmpeg_failure(details: str | list[str] | None) -> dict[str, object]
     }
 
 
-def classify_ffmpeg_output(details: str | list[str] | None) -> "ProblemProfile":
+def classify_ffmpeg_output(details: str | list[str] | None) -> ProblemProfile:
     """New structured classifier. Returns ProblemProfile (the heart of output-driven decisions).
     Uses the same patterns as before but produces the dataclass used by the new pipeline.
     """
-    from ..concat.models import ProblemProfile  # avoid circular at import time
-
     if not details:
         return ProblemProfile(summary="no details")
     if isinstance(details, list):
