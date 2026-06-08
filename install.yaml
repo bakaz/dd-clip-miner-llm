@@ -15,10 +15,7 @@ gpu_type: auto
 # 是否安装 FunASR 支持（即使 asr_backend 不是 funasr）
 install_funasr: false
 
-# 是否安装歌词搜索工具 (ddgs)
-install_search_tools: true
-
-# 是否安装开发工具 (pytest, pytest-cov)
+# 是否安装开发/测试工具（pip install -e ".[test]"）
 install_dev_tools: false
 
 # 是否安装 MKVToolNix（需要系统包管理器）

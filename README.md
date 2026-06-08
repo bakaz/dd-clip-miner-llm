@@ -18,7 +18,7 @@
 - **智能 LLM 调用**：reasoning followup、工具调用、JSON 修复、歌词搜索（DuckDuckGo）
 - **歌曲遗漏复查**：首轮识别后对未覆盖 ASR 区间二次送 LLM 检查
 - **断点续传**：同一输入视频再次运行时复用 `01_audio`、`02_asr`、各类型 LLM 结果（见 `progress.json`）
-- **批量处理**：目录扫描；可选多视频拼接后统一处理（`ConcatPipeline` + Strategy：upfront health probe（小文件全扫）+ pre-sanitize corrupt segments（per-file safe remux with discardcorrupt）+ ProblemProfile 分类驱动智能 fallback + 完整日志。符合直播分段 H.264 损坏最佳实践）
+- **批量处理**：目录扫描；可选多视频拼接（`concat/ConcatPipeline`：health probe → pre-sanitize → 6 种 Strategy fallback，完整日志）
 - **切片导出命名**：JSON 主播词典匹配 + 路径解析 YYMMDD → `【主播】歌名-歌手-YYMMDD`
 - **手动重切**：编辑 CSV 后重新导出片段
 - **下头片段短标题**：`title` 作为文件名，少于 20 个中文字
@@ -31,51 +31,76 @@
 4. 按时间切割音频/视频到 `03_clips/`
 5. 生成 `04_reports/` 下 CSV/JSON，可人工修改后 `manual-cut`
 
-## 仓库文件
+## 仓库布局
 
-| 文件 | 说明 |
+### 根目录
+
+| 路径 | 说明 |
 |------|------|
+| `pyproject.toml` | 包元数据与可选依赖（`[test]`、`[funasr]`） |
+| `setup.py` | setuptools 入口；**不是**安装脚本，元数据以 `pyproject.toml` 为准 |
+| `install.py` / `install.yaml` | **推荐**：智能安装（venv、FFmpeg、mkvmerge、可选 FunASR/CUDA） |
+| `setup_env.py` | 旧版交互安装（原 `setup.py` 逻辑，兼容保留） |
+| `requirements*.txt` | 与 `pyproject.toml` 同步，供传统 `pip install -r` 流程 |
 | `config.example.yaml` | 配置模板（复制为 `config.yaml`） |
 | `config.deepseek.example.yaml` | DeepSeek 示例配置 |
 | `config.daily-summary.example.yaml` | 仅当天总结示例 |
 | `streamer_dictionary.example.json` | 主播词典模板（复制为 `streamer_dictionary.json`） |
 | `rename_drag_drop.bat` | 切片拖拽重命名（后处理） |
+| `.github/workflows/tests.yml` | CI：离线单元测试（Python 3.10–3.12） |
+| `tests/` | 单元测试 |
 
-以下文件在 `.gitignore` 中，**勿提交**：`config.yaml`、`streamer_dictionary.json`、`runs/`。
+以下路径在 `.gitignore` 中，**勿提交**：`config.yaml`、`streamer_dictionary.json`、`runs/`、`.tmp/`。
+
+### Python 包 `dd_clip_miner_llm/`
+
+| 模块 | 说明 |
+|------|------|
+| `cli.py` / `pipeline.py` / `batch.py` / `manual.py` | CLI 与主流水线 |
+| `asr_backends/` | ASR 后端：`faster_whisper`、`funasr`、`mimo` |
+| `recognizers/` | 可插拔内容识别器（`@register` 自动发现） |
+| `concat/` | 多段录像合并：`ConcatPipeline` + Strategy 编排 |
+| `ffmpeg/` | FFmpeg / mkvmerge 工具层（由原单文件 `ffmpeg.py` 拆分） |
+
+`concat/` 与 `ffmpeg/` 的职责划分：
+
+- **`ffmpeg/`**：底层命令封装、探测、诊断（`classify_ffmpeg_output`）、单文件处理、concat demuxer/remux 原语、`mkvmerge` 拼接。对外仍通过 `from dd_clip_miner_llm import ffmpeg` 使用。
+- **`concat/`**：面向业务的合并流水线——health probe、pre-sanitize、`ProblemProfile` 驱动的 Strategy 选择与日志。
 
 ## 安装
 
-### 傻瓜化安装（推荐）
+需要 **Python 3.10–3.12**（见 `pyproject.toml` 的 `requires-python`）。
+
+### 智能安装（推荐）
 
 ```powershell
 cd path\to\dd-clip-miner-llm
 python install.py
+# 或：python install.py --config install.yaml --dev
 ```
 
-脚本会自动：
-- 检测系统环境（OS、GPU、FFmpeg、mkvmerge）
-- 创建 Python 3.12 venv
-- 下载安装 FFmpeg / MKVToolNix
-- 安装核心依赖
-- 询问是否安装 FunASR + CUDA 支持
-- 验证安装结果
+`install.py` 会检测 OS / GPU / FFmpeg / mkvmerge，并按计划执行 `pip install -e .` 及可选组件。常用参数：`--check`（只检测）、`--asr funasr`、`--funasr`、`--dev`（测试工具）、`--gpu cuda12`。
+
+旧版完整交互流程仍可用：`python setup_env.py`（功能与早期 `setup.py` 相同）。
 
 ### 手动安装
-
-#### 1. Python
-
-建议 Python 3.10–3.12：
 
 ```powershell
 cd path\to\dd-clip-miner-llm
 py -3.12 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -U pip
-pip install -r requirements.txt
-pip install -e .
+pip install -e .                  # 核心依赖（含 ddgs 歌词搜索）
+pip install -e ".[test]"            # 开发/测试（pytest）
+pip install -e ".[funasr]"        # 可选 FunASR 后端
 ```
 
-开发与测试：`pip install -r requirements-dev.txt`
+等价传统写法（与 `pyproject.toml` 同步）：
+
+```powershell
+pip install -r requirements.txt && pip install -e .
+pip install -r requirements-dev.txt   # 或 pip install -e ".[test]"
+```
 
 ### 2. FFmpeg
 
@@ -211,20 +236,22 @@ python -m dd_clip_miner_llm batch-run "D:\input" --config config.yaml --work-roo
 python -m dd_clip_miner_llm batch-run "D:\input" --config config.yaml --work-root "D:\work" --result-root "D:\results" --concat
 ```
 
-合并策略（重构为 `ConcatPipeline` + `Strategy` 编排，核心是**依据 ffmpeg 完整输出判断问题类型**来选择 fallback）：
+合并由 `dd_clip_miner_llm.concat.ConcatPipeline` 编排，核心是**依据 ffmpeg 完整输出**构建 `ProblemProfile` 再选 fallback。流程概要：
 
-1. 单文件按 `output.single_file_policy` 处理：默认 `copy`；可设为 `remux` 或 `normalize`
-2. **Upfront health probe**：对每个输入做 ffprobe + tail 60s 的 h264_mp4toannexb bitstream 扫描（小文件<120s 全扫，常见于错误爆发“fix”片段），得到结构化 `HealthInfo`（哪些 segment 存在 corruption）。
-3. 使用 `classify_ffmpeg_output`（从完整 stdout/stderr）解析出 `ProblemProfile`（`bitstream_corrupt_indexes`、`demux_errors`、`timestamp_discontinuity` 等 + summary）。
-4. **Pre-sanitize**（新增架构优化，符合 ffmpeg 社区直播分段损坏最佳实践）：对检测到的 corrupt segments，仅对坏的做 individual safe per-part remux，**优先使用 TS 中间格式（mp4 → ts with h264_mp4toannexb bsf + flags → mp4）**，生成 cleaned 版本（好片段不动，廉价）。若 bsf 因太严重损坏失败，则回退到 plain mp4 remux（仍带 discardcorrupt 等 flags）。后续 concat lists/strategies 使用 sanitized inputs for 坏的；如果 TS 中间文件成功生成，会保留为 TS workspace，后续会尝试补齐全量 TS 并直接走 TS 容器 concat。
-5. 按代价/适用性顺序尝试策略（DirectCopyStrategy、AudioReencodeStrategy、Timestamp remux 等 safe per-part、ReuseTsWorkspaceStrategy、FastTransmuxStrategy、RemuxThenCopyStrategy、TargetedRepairStrategy、SelectiveNormalizeStrategy、FullReencodeStrategy + concat filter 兜底）。高 corruption 时按**坏文件时长占比和坏文件总时长**路由：先尝试廉价 TS/remux；坏段总时长较小时可 targeted repair，坏段总时长很大时跳过 mixed targeted，直接进入 normalize/full。
-6. 每个 `Strategy` 通过 `is_applicable(context.profile)` 决定是否执行。audio-only / audio-resync 已收窄为音频类 fallback：只要当前 health/profile 仍显示视频 bitstream corruption，就不会进入单独音频修复路径。执行时强制 `bitstream_fatal`（即使 ffmpeg rc=0 只要 stderr 有 corruption 标志也当作失败），捕获**完整原始 ffmpeg 日志**并保存到 `concat_attempts/<strategy>.log`。
-7. 失败时用输出重新 `classify` 并 `merge` 更新 `ProblemProfile`，驱动后续策略选择（例如检测到 bitstream 后优先 TargetedRepair）。
-8. `TargetedRepairStrategy` 优先使用已诊断的坏段索引，只对坏片段做 reencode（NVENC > QSV > AMF > libx264），好片段直接 copy（并有 tail-window repair）。
-9. 每次合并后校验时长和音频可解码性。
-10. 合并结果 stage 到 `00_input/input_*.mp4`；`manual-cut` 从 `manifest.json` 读输入；处理完成后清理 `concat/` 中间文件（保留最终 concat.mp4）。
+1. **单文件**：按 `output.single_file_policy`（`copy` / `remux` / `normalize`）处理。
+2. **Upfront health probe**（`concat/health.py`）：ffprobe + H.264/HEVC bitstream 扫描（小文件 <120s 全扫，大文件扫尾部 60s），得到 `HealthInfo`。
+3. **Pre-sanitize**：对 corrupt 段做 per-file safe remux（优先 MP4→TS→MP4，失败则 plain MP4 + `discardcorrupt`），好片段不动。
+4. **Strategy 循环**（`concat/strategies.py`，按代价递增）：
+   - `DirectCopyStrategy` — concat demuxer + `-c copy`
+   - `MkvMergeStrategy` — mkvmerge 修正时间戳后拼接（检测到 corruption 时优先在原始文件上尝试）
+   - `DiscardCorruptCopyStrategy` — 单次 ffmpeg + `+discardcorrupt`
+   - `TargetedRepairStrategy` — 只重编码坏段（tail-window repair → 整段 repair）
+   - `SelectiveNormalizeStrategy` — 只标准化参数不匹配的段
+   - `FullReencodeStrategy` — demuxer 全量重编码 + concat filter 兜底
+5. 每次尝试记录完整日志到 `concat/concat_attempts/*.log`；失败时 `classify_ffmpeg_output` 更新 `ProblemProfile` 驱动下一策略。
+6. 输出校验 format / video stream duration / 音频可解码性；结果 stage 到 `00_input/`，处理完清理中间目录（保留 `concat.mp4` 与 `concat_attempts/`）。
 
-常见例子：源文件参数看起来一致，但某段尾部（或小“fix”片段）存在坏 H.264 packet（`Invalid NAL unit size`、`missing picture in access unit`、`h264_mp4toannexb filter failed`、`Error during demuxing`）。程序通过 upfront health probe（小文件全扫）+ classify 识别，**先对坏段做 pre-sanitize（优先 mp4 → ts with h264_mp4toannexb bsf + flags → mp4，或回退 plain mp4 remux with discardcorrupt）生成 cleaned 版本**。如果所有片段都能形成 TS workspace，会直接复用 TS 容器做后续 concat；如果某些坏段连 TS 都无法生成，就禁用 TS workspace，继续走 remux / normalize / full reencode。完整日志在 `concat_attempts/`。
+底层 remux、TS、timestamp/audio resync 等原语在 `ffmpeg/concat_ops.py` 与 `concat/helpers.py` 中实现，由上述 Strategy 按需调用。
 
 ### 手动重切
 
@@ -467,21 +494,18 @@ output:
 ## 识别器架构
 
 ```
-dd_clip_miner_llm/
-├── clip_naming.py
-├── pipeline.py
-├── batch.py / manual.py / merger.py / report.py
-├── concat/             # 合并预检（upfront health probe，小文件全扫）、pre-sanitize corrupt（per-file safe remux）、ProblemProfile 分类、Strategy 编排、完整日志保存
-└── recognizers/
-    ├── __init__.py    # @register 自动发现
-    ├── base.py
-    ├── song.py
-    ├── dialogue.py
-    ├── highlight.py
-    ├── funny.py
-    ├── cringe.py
-    └── daily_summary.py
+dd_clip_miner_llm/recognizers/
+├── __init__.py       # @register 自动发现
+├── base.py
+├── song.py
+├── dialogue.py
+├── highlight.py
+├── funny.py
+├── cringe.py
+└── daily_summary.py
 ```
+
+合并与 FFmpeg 模块见上文「仓库布局」；`ffmpeg/__init__.py` 保留 `concat_videos()` 等对外 API，内部委托 `concat.pipeline.concat_videos_smart()`。
 
 ### 添加自定义识别器
 
@@ -562,20 +586,27 @@ python -m dd_clip_miner_llm ffmpeg-info
 
 ### Concat fallback 逻辑
 
-目录合并的核心原则是：先用 `ffprobe` / health probe / ffmpeg stderr / 输出校验判断问题类型，再选择最低成本的恢复路径。每一步失败都会把完整 ffmpeg 输出写入 `concat/concat_attempts/*.log`，并继续合并到 `ProblemProfile`。
+目录合并的核心原则是：先用 `ffprobe` / health probe / ffmpeg stderr / 输出校验判断问题类型，再选择最低成本的恢复路径。`classify_ffmpeg_output`（`ffmpeg/diagnosis.py`）从日志解析 `ProblemProfile`；每一步失败写入 `concat/concat_attempts/*.log`。
 
-1. **单文件策略**：目录内只有一个视频时，默认 `copy2`；`output.single_file_policy: remux` 会重封装，`normalize` 会标准化转码。
-2. **轻量预检**：读取 duration、codec、分辨率、fps、pix_fmt、SAR、音频参数，计算 `expected_duration` 和目标 profile。
-3. **H.264 health probe**：只扫描 H.264 输入；小于 120s 的文件做 full scan，较大文件默认扫尾部，以便提前发现 `Invalid NAL unit size`、`missing picture`、`h264_mp4toannexb` 失败等问题。
-4. **pre-sanitize**：对已确认 corrupt 的文件先做低成本 per-file sanitize，优先 `MP4 -> TS -> MP4`（`h264_mp4toannexb` + `discardcorrupt`），严重损坏时回退 plain MP4 remux；sanitize 后会重新 `ffprobe`，用清理后的实际时长更新 `expected_duration`。若 TS 成功生成，会保留 TS working copy；只有全量 TS 都可用时才启用 TS workspace fallback。
-5. **direct concat copy**：参数兼容且未强制 normalize 时，尝试 concat demuxer + `-c copy`；输出必须通过 format/video stream duration 校验，且音轨必须可完整解码。
-6. **timestamp/index remux copy**：遇到 timestamp、duration、non-monotonic DTS，或高比例 corrupt 但仍值得低成本尝试时，先走 per-part remux + `+genpts+igndts+discardcorrupt`。
-7. **timestamp/index remux + audio resync**：音频边界、AAC 解码、音频时间戳问题优先使用 `aresample=async=1000:first_pts=0`，视频仍尽量 copy；如果当前仍有视频 bitstream corruption 证据，此路径会被跳过。
-8. **targeted H.264 repair**：强 bitstream corruption 优先修坏段；先做固定 tail-window repair（默认最后 90s），失败后再整段重编码坏文件，其余片段 copy。高坏段时长场景会跳过 mixed targeted，避免把大量损坏视频伪装成局部修复。
-9. **selective / boundary normalize**：参数不一致或结构性时长错误时，只标准化不符合 target profile 的片段，或定位边界文件后只修边界文件；视频统一到最低源分辨率，音频统一 AAC 320k / 48000Hz / stereo，缺音轨会补静音。
-10. **full reencode / concat filter**：所有快速、局部路径失败后，才进入 concat demuxer 全量重编码；最终兜底是 concat filter，最慢但最稳。
+| 阶段 | 实现位置 | 说明 |
+|------|----------|------|
+| 预检 | `concat/probe.py` | duration、codec、分辨率、fps、音频参数 → `expected_duration` |
+| Health | `concat/health.py` | H.264/HEVC bitstream 扫描，小文件全扫、大文件扫尾 |
+| Pre-sanitize | `concat/runner.py` | corrupt 段 MP4→TS→MP4 或 plain remux |
+| 6 Strategies | `concat/strategies.py` | 见上文批量合并一节 |
+| 底层原语 | `ffmpeg/concat_ops.py` | timestamp remux、audio resync、TS concat、tail repair 等 |
 
-校验容忍度针对长直播流做了现实化处理：默认允许 `max(30s, expected_duration * 0.005)` 的小幅误差；但明显短输出、明显长输出、视频流时长不足、音轨不可解码，仍会被判失败并继续 fallback。
+校验容忍度：`max(30s, expected_duration × 0.005)`；明显短/长输出、视频流时长不足、音轨不可解码仍会触发下一策略。
+
+## 开发与测试
+
+```powershell
+pip install -e ".[test]"
+$env:DD_CLIP_MINER_LLM_CI = "1"    # 跳过需网络/密钥的用例（与 CI 一致）
+python -m pytest tests -q --basetemp=.tmp/pytest
+```
+
+GitHub Actions（`.github/workflows/tests.yml`）在 Ubuntu 上对 Python 3.10/3.11/3.12 跑离线单元测试，需系统包 `ffmpeg`、`mkvtoolnix`、`libsndfile1`。本地无需 API key 或 `config.yaml`。
 
 ## 常见问题
 

@@ -1,13 +1,10 @@
-# Development dependencies
-# pip install -r requirements-dev.txt
+# 开发与测试；权威定义见 pyproject.toml [project.optional-dependencies.test]
+# 推荐：pip install -e ".[test]"
 
-# Testing
 pytest>=7.0.0
 pytest-cov>=4.0.0
 
-# Code quality
+# 代码质量（可选，未写入 pyproject.toml）
 ruff>=0.1.0
 mypy>=1.0.0
-
-# Type stubs
 types-PyYAML>=6.0.0

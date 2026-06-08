@@ -1,9 +1,15 @@
 """智能安装脚本 - 自动检测系统环境并安装依赖
 
+核心步骤为 `pip install -e .`（依赖定义见 pyproject.toml）。可选：
+  - `.[funasr]`  FunASR / Qwen3-ASR
+  - `.[test]`    pytest
+  - requirements-cu12.txt  faster-whisper GPU
+
 用法：
     python install.py                    # 自动检测并安装
     python install.py --config install.yaml  # 使用配置文件
     python install.py --check            # 只检查环境，不安装
+    python install.py --dev              # 含测试工具
     python install.py --gpu cuda12       # 指定 GPU 类型
 """
 from __future__ import annotations
@@ -46,7 +52,6 @@ class InstallConfig:
     
     # 可选组件
     install_funasr: bool = False
-    install_search_tools: bool = True
     install_dev_tools: bool = False
     
     # MKVToolNix
@@ -253,7 +258,6 @@ def load_install_config(config_path: str | Path) -> InstallConfig:
     config.asr_backend = data.get("asr_backend", config.asr_backend)
     config.gpu_type = data.get("gpu_type", config.gpu_type)
     config.install_funasr = data.get("install_funasr", config.install_funasr)
-    config.install_search_tools = data.get("install_search_tools", config.install_search_tools)
     config.install_dev_tools = data.get("install_dev_tools", config.install_dev_tools)
     config.install_mkvmerge = data.get("install_mkvmerge", config.install_mkvmerge)
     config.skip_installed = data.get("skip_installed", config.skip_installed)
@@ -298,11 +302,11 @@ def generate_install_plan(info: SystemInfo, config: InstallConfig) -> list[dict[
             "custom_install": _install_mkvmerge,
         })
     
-    # 1. 核心依赖
+    # 1. 核心依赖（editable install，元数据见 pyproject.toml）
     steps.append({
         "name": "核心依赖",
-        "command": [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"],
-        "check": lambda: _check_package("openai"),
+        "command": [sys.executable, "-m", "pip", "install", "-e", "."],
+        "check": lambda: _check_package("dd_clip_miner_llm"),
     })
     
     # 2. GPU 支持
@@ -324,23 +328,15 @@ def generate_install_plan(info: SystemInfo, config: InstallConfig) -> list[dict[
     if config.asr_backend == "funasr" or config.install_funasr:
         steps.append({
             "name": "FunASR 后端",
-            "command": [sys.executable, "-m", "pip", "install", "funasr", "torch", "torchaudio"],
+            "command": [sys.executable, "-m", "pip", "install", "-e", ".[funasr]"],
             "check": lambda: _check_package("funasr"),
         })
     
-    # 4. 搜索工具
-    if config.install_search_tools:
-        steps.append({
-            "name": "歌词搜索工具",
-            "command": [sys.executable, "-m", "pip", "install", "ddgs"],
-            "check": lambda: _check_package("ddgs"),
-        })
-    
-    # 5. 开发工具
+    # 4. 开发/测试工具
     if config.install_dev_tools:
         steps.append({
-            "name": "开发工具",
-            "command": [sys.executable, "-m", "pip", "install", "pytest", "pytest-cov"],
+            "name": "开发/测试工具",
+            "command": [sys.executable, "-m", "pip", "install", "-e", ".[test]"],
             "check": lambda: _check_package("pytest"),
         })
     

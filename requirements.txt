@@ -1,4 +1,6 @@
-# Core dependencies
+# 兼容传统 pip 流程；权威依赖列表见 pyproject.toml [project.dependencies]
+# 推荐：pip install -e .
+
 PyYAML>=6.0.2
 tqdm>=4.66
 imageio-ffmpeg>=0.5.1
@@ -7,15 +9,8 @@ numpy>=1.26
 soundfile>=0.12
 openai>=1.0.0
 httpx>=0.23.0
-
-# Search tools for lyrics lookup
 ddgs>=9.0.0
 
-# Development dependencies (optional)
-# pip install -r requirements-dev.txt
-
-# GPU support for faster-whisper / CTranslate2 (CUDA 12 + cuDNN 9)
-# pip install -r requirements-cu12.txt
-
-# Optional FunASR backend for Qwen3-ASR:
-# pip install funasr qwen-asr torch torchaudio
+# 测试：pip install -e ".[test]"
+# FunASR：pip install -e ".[funasr]"
+# GPU（CUDA 12）：pip install -r requirements-cu12.txt
