@@ -53,6 +53,7 @@ Thumbs.db
 
 # Agent / local tooling
 agent-tools/
+terminals/
 
 # Testing
 .tmp/
