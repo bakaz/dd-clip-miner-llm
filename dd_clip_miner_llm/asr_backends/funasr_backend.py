@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 import tempfile
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,7 @@ class FunASRBackend(ASRBackend):
     def __init__(self, settings: dict[str, Any]) -> None:
         super().__init__(settings)
         self._model: Any = None
+        self._model_lock = threading.Lock()
 
     @property
     def funasr_settings(self) -> dict[str, Any]:
@@ -97,7 +99,8 @@ class FunASRBackend(ASRBackend):
         if isinstance(extra, dict):
             generate_kwargs.update(extra)
 
-        result = model.generate(**generate_kwargs)
+        with self._model_lock:
+            result = model.generate(**generate_kwargs)
         segments = funasr_result_to_segments(result, audio_path)
 
         # 添加时间偏移

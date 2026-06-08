@@ -18,6 +18,7 @@ from .config import get_padding_config
 from .ffmpeg import cut_audio, cut_video, extract_audio, get_duration
 from .merger import build_content_results
 from .models import ContentMatch, ContentResult, TranscriptSegment
+from .asr_backends import resolve_asr_model_name
 from .paths import safe_path_part, stage_input_for_ffmpeg
 from .recognizers import get_recognizer, list_recognizers
 from .clip_naming import ClipNamingProfile, resolve_clip_naming_profile, resolve_export_stem
@@ -751,7 +752,7 @@ def run_pipeline(
         "segment_count": len(segments),
         "content_types": {ct: len(results) for ct, results in all_results.items()},
         "config": {
-            "asr_model": config["asr"]["model"],
+            "asr_model": resolve_asr_model_name(config["asr"]),
             "llm_model": config["llm"]["model"],
         },
     }

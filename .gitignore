@@ -51,7 +51,11 @@ batch_run_*.log
 .DS_Store
 Thumbs.db
 
+# Agent / local tooling
+agent-tools/
+
 # Testing
+.tmp/
 .pytest_cache/
 .pytest_tmp/
 pytest_tmp/

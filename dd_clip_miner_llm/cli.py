@@ -241,7 +241,9 @@ def _apply_run_overrides(config: dict, args: argparse.Namespace) -> None:
         types_list = [ct.strip() for ct in args.content_types.split(",") if ct.strip()]
         config["content_types"] = {ct: True for ct in types_list}
     if args.asr_model:
-        config["asr"]["model"] = args.asr_model
+        from .asr_backends import apply_asr_model_override
+
+        apply_asr_model_override(config["asr"], args.asr_model)
     if args.asr_language:
         config["asr"]["language"] = args.asr_language
     if args.llm_model:

@@ -261,9 +261,42 @@ def load_install_config(config_path: str | Path) -> InstallConfig:
     return config
 
 
+def _install_mkvmerge() -> bool:
+    """尝试安装 MKVToolNix（视频拼接依赖 mkvmerge）。"""
+    if _detect_mkvmerge():
+        return True
+    if platform.system() == "Windows":
+        print("  尝试通过 winget 安装 MKVToolNix...")
+        try:
+            result = subprocess.run(
+                ["winget", "install", "MoritzBunkus.MKVToolNix", "--accept-package-agreements"],
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+            if result.returncode == 0 and _detect_mkvmerge():
+                return True
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+        print("  请手动安装: winget install MoritzBunkus.MKVToolNix")
+        print("  下载: https://mkvtoolnix.download/downloads.html#windows")
+    else:
+        print("  请通过系统包管理器安装 mkvtoolnix，例如:")
+        print("    Debian/Ubuntu: sudo apt install mkvtoolnix")
+        print("    macOS: brew install mkvtoolnix")
+    return False
+
+
 def generate_install_plan(info: SystemInfo, config: InstallConfig) -> list[dict[str, Any]]:
     """生成安装计划"""
     steps = []
+
+    if config.install_mkvmerge:
+        steps.append({
+            "name": "MKVToolNix (mkvmerge)",
+            "check": _detect_mkvmerge,
+            "custom_install": _install_mkvmerge,
+        })
     
     # 1. 核心依赖
     steps.append({
@@ -331,8 +364,9 @@ def execute_install_plan(steps: list[dict[str, Any]], skip_installed: bool = Tru
     
     for i, step in enumerate(steps, 1):
         name = step["name"]
-        command = step["command"]
+        command = step.get("command")
         check = step.get("check")
+        custom_install = step.get("custom_install")
         
         # 检查是否已安装
         if skip_installed and check and check():
@@ -340,6 +374,15 @@ def execute_install_plan(steps: list[dict[str, Any]], skip_installed: bool = Tru
             continue
         
         print(f"\n[{i}/{len(steps)}] {name}")
+        if custom_install:
+            if not custom_install():
+                print("  ✗ 安装失败")
+                return False
+            print("  ✓ 安装成功")
+            continue
+        if not command:
+            print("  ✗ 缺少安装命令")
+            return False
         print(f"  命令: {' '.join(command)}")
         
         try:

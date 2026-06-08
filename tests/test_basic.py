@@ -252,6 +252,27 @@ class TestASRBackends:
         backend = build_asr_backend({"backend": "qwen3_asr", "funasr": {}})
         assert isinstance(backend, FunASRBackend)
 
+    def test_resolve_asr_model_name_for_funasr(self):
+        from dd_clip_miner_llm.asr_backends import resolve_asr_model_name
+
+        name = resolve_asr_model_name({
+            "backend": "funasr",
+            "model": "small",
+            "funasr": {"model": "Qwen/Qwen3-ASR-0.6B"},
+        })
+        assert name == "Qwen/Qwen3-ASR-0.6B"
+
+    def test_apply_asr_model_override_updates_funasr_subconfig(self):
+        from dd_clip_miner_llm.asr_backends import apply_asr_model_override
+
+        asr = {
+            "mode": "local",
+            "local": {"backend": "funasr", "funasr": {"model": "old-model"}},
+        }
+        apply_asr_model_override(asr, "new-model")
+        assert asr["model"] == "new-model"
+        assert asr["local"]["funasr"]["model"] == "new-model"
+
     def test_funasr_timestamp_result_to_segments(self):
         result = [
             {
@@ -478,8 +499,7 @@ class TestFFmpeg:
             lambda videos, _bin, tail_seconds=None: [0] if Path(videos[0]).name == "b.mp4" else [],
         )
         monkeypatch.setattr(
-            concat_pipeline,
-            "probe_many",
+            "dd_clip_miner_llm.concat.runner.probe_many",
             lambda paths: [
                 VideoMeta(Path(path), None, True, True, "h264", 640, 360, 60.0, "yuv420p", "1:1", "aac", 48000, 2, "stereo")
                 for path in paths
@@ -524,8 +544,7 @@ class TestFFmpeg:
 
         monkeypatch.setattr(ffmpeg, "require_binary", lambda name: name)
         monkeypatch.setattr(
-            concat_pipeline,
-            "probe_many",
+            "dd_clip_miner_llm.concat.runner.probe_many",
             lambda probe_paths: [
                 VideoMeta(Path(path), None, True, True, "h264", 640, 360, 60.0, "yuv420p", "1:1", "aac", 48000, 2, "stereo")
                 for path in probe_paths
@@ -605,23 +624,34 @@ class TestFFmpeg:
         assert _is_output_duration_failure("Concat output video stream duration is too short: 1")
         assert not _is_output_duration_failure("Invalid NAL unit size")
 
-    def test_concat_falls_back_to_timestamp_remux_before_audio_reencode(self, tmp_path, monkeypatch):
+    def test_concat_falls_back_to_discard_corrupt_copy_after_direct_copy_fails(self, tmp_path, monkeypatch):
+        from dd_clip_miner_llm.concat import pipeline as concat_pipeline
+
         calls = []
+        copy_attempts = 0
 
         def fake_run_command(args, timeout=3600, **_kwargs):
             calls.append(args)
-            if len(calls) == 1:
-                raise ffmpeg.FFmpegError("copy failed")
+            nonlocal copy_attempts
+            if "-f" in args and "concat" in args and "-c" in args and args[args.index("-c") + 1] == "copy":
+                copy_attempts += 1
+                if copy_attempts == 1:
+                    raise ffmpeg.FFmpegError("copy failed")
             Path(args[-1]).write_bytes(b"ok")
 
         monkeypatch.setattr(ffmpeg, "require_binary", lambda name: name)
         monkeypatch.setattr(ffmpeg, "run_command", fake_run_command)
+        monkeypatch.setattr(concat_pipeline.MkvMergeStrategy, "execute", lambda *_args: False)
+        monkeypatch.setattr(concat_pipeline.SelectiveNormalizeStrategy, "execute", lambda *_args: False)
         monkeypatch.setattr(
             ffmpeg,
             "_find_bad_h264_segments",
             lambda _videos, _bin, tail_seconds=None: [],
         )
         monkeypatch.setattr(ffmpeg, "_get_min_video_size", lambda _videos: (641, 361))
+        monkeypatch.setattr(ffmpeg, "get_duration", lambda _path: 10.0)
+        monkeypatch.setattr(ffmpeg, "_get_stream_duration", lambda *_args: 10.0)
+        monkeypatch.setattr(ffmpeg, "_validate_audio_decodable", lambda *_args: None)
 
         output = tmp_path / "concat.mp4"
         ffmpeg.concat_videos(
@@ -631,9 +661,12 @@ class TestFFmpeg:
             audio_bitrate_kbps=320,
         )
 
-        assert calls[1][calls[1].index("-fflags") + 1] == "+genpts+igndts+discardcorrupt"
-        assert calls[1][calls[1].index("-c") + 1] == "copy"
-        assert "-async" not in calls[1]
+        discard_call = next(
+            call for call in calls
+            if "-fflags" in call and "+discardcorrupt" in call[call.index("-fflags") + 1]
+        )
+        assert discard_call[discard_call.index("-c") + 1] == "copy"
+        assert "-async" not in discard_call
         assert not (tmp_path / "concat_list.txt").exists()
 
     def test_timestamp_audio_resync_uses_aresample_not_async(self, tmp_path, monkeypatch):
@@ -672,18 +705,22 @@ class TestFFmpeg:
 
         monkeypatch.setattr(ffmpeg, "require_binary", lambda name: name)
         monkeypatch.setattr(
-            concat_pipeline,
-            "probe_many",
+            "dd_clip_miner_llm.concat.runner.probe_many",
             lambda probe_paths: [
                 VideoMeta(Path(path), durations[index], True, True, "h264", 640, 360, 60.0, "yuv420p", "1:1", "aac", 48000, 2, "stereo")
                 for index, path in enumerate(probe_paths)
             ],
         )
-        monkeypatch.setattr(
-            ffmpeg,
-            "_find_bad_h264_segments",
-            lambda _videos, _bin, tail_seconds=None: [1, 2, 3],
-        )
+        def fake_find_bad_h264(videos, _bin, tail_seconds=None):
+            bad: list[int] = []
+            for index, video in enumerate(videos):
+                name = Path(video).name
+                if name in {"part_1.mp4", "part_2.mp4", "part_3.mp4"}:
+                    bad.append(index)
+            return bad
+
+        monkeypatch.setattr(ffmpeg, "_find_bad_h264_segments", fake_find_bad_h264)
+        monkeypatch.setattr(concat_pipeline.MkvMergeStrategy, "execute", lambda *_args: False)
 
         def fake_targeted_execute(self, context):
             executed.append(self.name)
@@ -772,7 +809,7 @@ class TestFFmpeg:
             if len(seen_outputs) == 1:
                 raise ffmpeg.FFmpegError("Concat output video stream duration is too short: 10.000s")
 
-        monkeypatch.setattr(concat_pipeline, "_concat_demuxer_full_reencode", fake_demuxer)
+        monkeypatch.setattr("dd_clip_miner_llm.concat.strategies._concat_demuxer_full_reencode", fake_demuxer)
 
         def fake_filter_commands(_inputs, output_path, *_args, **_kwargs):
             return [["ffmpeg", "-y", str(output_path)]]
@@ -782,7 +819,7 @@ class TestFFmpeg:
 
         monkeypatch.setattr(ffmpeg, "_concat_filter_commands", fake_filter_commands)
         monkeypatch.setattr(ffmpeg, "run_command", fake_run_command)
-        monkeypatch.setattr(concat_pipeline, "_validate_output", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr("dd_clip_miner_llm.concat.strategies._validate_output", lambda *_args, **_kwargs: None)
 
         assert concat_pipeline.FullReencodeStrategy().execute(context) is True
 
@@ -995,8 +1032,8 @@ class TestFFmpeg:
             normalized.append(source)
             output.write_bytes(b"normalized")
 
-        monkeypatch.setattr("dd_clip_miner_llm.concat.pipeline._normalize_to_profile", fake_normalize)
-        monkeypatch.setattr("dd_clip_miner_llm.concat.pipeline._concat_copy_with_list", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr("dd_clip_miner_llm.concat.helpers._normalize_to_profile", fake_normalize)
+        monkeypatch.setattr("dd_clip_miner_llm.concat.helpers._concat_copy_with_list", lambda *_args, **_kwargs: None)
 
         _selective_normalize_concat(
             inputs,
@@ -1028,8 +1065,8 @@ class TestFFmpeg:
             normalized.append((source, prefer_cpu))
             output.write_bytes(b"normalized")
 
-        monkeypatch.setattr("dd_clip_miner_llm.concat.pipeline._normalize_to_profile", fake_normalize)
-        monkeypatch.setattr("dd_clip_miner_llm.concat.pipeline._concat_copy_with_list", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr("dd_clip_miner_llm.concat.helpers._normalize_to_profile", fake_normalize)
+        monkeypatch.setattr("dd_clip_miner_llm.concat.helpers._concat_copy_with_list", lambda *_args, **_kwargs: None)
 
         _selective_normalize_concat(
             inputs,
@@ -1130,7 +1167,7 @@ class TestBatch:
 
         _cleanup_concat_source(concat_dir)
 
-        assert not concat_file.exists()
+        assert concat_file.exists()
         assert not list_file.exists()
 
 

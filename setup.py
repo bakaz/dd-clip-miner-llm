@@ -394,14 +394,14 @@ def create_venv(venv_path: str, python_version: str = "3.12") -> bool:
         return True
     
     # 查找 Python 3.12
-    python_cmd = _find_python(python_version)
-    if not python_cmd:
+    python_argv = _find_python(python_version)
+    if not python_argv:
         print(f"  未找到 Python {python_version}")
         return False
     
     print(f"  创建 venv: {venv}")
     result = subprocess.run(
-        [python_cmd, "-m", "venv", str(venv)],
+        [*python_argv, "-m", "venv", str(venv)],
         capture_output=True, text=True
     )
     
@@ -413,8 +413,8 @@ def create_venv(venv_path: str, python_version: str = "3.12") -> bool:
     return True
 
 
-def _find_python(version: str) -> str | None:
-    """查找指定版本的 Python"""
+def _find_python(version: str) -> list[str] | None:
+    """查找指定版本的 Python，返回 subprocess argv 列表。"""
     # Windows
     if platform.system() == "Windows":
         # 尝试 py launcher
@@ -424,7 +424,7 @@ def _find_python(version: str) -> str | None:
                 capture_output=True, text=True
             )
             if result.returncode == 0:
-                return f"py -{version}"
+                return ["py", f"-{version}"]
         except FileNotFoundError:
             pass
         
@@ -435,7 +435,7 @@ def _find_python(version: str) -> str | None:
         ]
         for p in common_paths:
             if Path(p).exists():
-                return p
+                return [p]
     
     # Unix
     for name in [f"python{version}", "python3", "python"]:
@@ -447,12 +447,12 @@ def _find_python(version: str) -> str | None:
                     capture_output=True, text=True
                 )
                 if version in result.stdout:
-                    return path
+                    return [path]
             except Exception:
                 continue
     
     # 回退到当前 Python
-    return sys.executable
+    return [sys.executable]
 
 
 def install_packages(venv_path: str, packages: list[str], name: str = "依赖") -> bool:

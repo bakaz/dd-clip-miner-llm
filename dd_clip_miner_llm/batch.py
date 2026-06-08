@@ -303,12 +303,11 @@ def _load_existing_concat_result(
 
 
 def _cleanup_concat_source(concat_dir: Path) -> None:
-    """清理 concat 中间文件；最终输入保留在 pipeline 的 00_input 目录。
-    （新 ConcatPipeline 下，pre-sanitize 临时目录和完整 attempt 日志会留在对应位置供调试。）
-    """
+    """清理 concat 中间文件，保留最终 concat.mp4 供 resume / manual-cut 使用。"""
+    preserve = {"concat.mp4"}
     try:
         for path in concat_dir.iterdir():
-            if path.is_file():
+            if path.is_file() and path.name not in preserve:
                 path.unlink(missing_ok=True)
     except OSError:
         pass
