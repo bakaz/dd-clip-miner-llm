@@ -55,3 +55,7 @@ include = ["dd_clip_miner_llm*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
+markers = [
+    "network: requires outbound network (skipped when DD_CLIP_MINER_LLM_CI=1)",
+    "secrets: requires API keys or local config (skipped when DD_CLIP_MINER_LLM_CI=1)",
+]

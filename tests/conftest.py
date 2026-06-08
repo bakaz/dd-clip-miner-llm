@@ -1,6 +1,8 @@
 """测试配置"""
 from __future__ import annotations
 
+import os
+
 import pytest
 from pathlib import Path
 
@@ -11,6 +13,16 @@ def pytest_configure(config):
         project_tmp = Path(__file__).resolve().parent.parent / ".tmp" / "pytest"
         project_tmp.mkdir(parents=True, exist_ok=True)
         config.option.basetemp = str(project_tmp)
+
+
+def pytest_collection_modifyitems(config, items):
+    """GitHub CI 只跑离线单元测试，跳过需要网络或密钥的用例。"""
+    if not os.environ.get("DD_CLIP_MINER_LLM_CI"):
+        return
+    skip = pytest.mark.skip(reason="skipped in CI (network/secrets)")
+    for item in items:
+        if "network" in item.keywords or "secrets" in item.keywords:
+            item.add_marker(skip)
 
 
 @pytest.fixture

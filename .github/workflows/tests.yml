@@ -1,10 +1,16 @@
 name: tests
 
+# Offline unit tests only — no config.yaml, API keys, or local media required.
 on:
   push:
     branches: [master, main]
   pull_request:
     branches: [master, main]
+  workflow_dispatch:
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   pytest:
@@ -14,6 +20,12 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ["3.10", "3.11", "3.12"]
+
+    env:
+      DD_CLIP_MINER_LLM_CI: "1"
+      LLM_API_KEY: ""
+      MIMO_API_KEY: ""
+      DEEPSEEK_API_KEY: ""
 
     steps:
       - name: Check out repository
@@ -25,19 +37,19 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
 
-      - name: Install FFmpeg
+      - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg
+          sudo apt-get install -y ffmpeg mkvtoolnix
 
-      - name: Install dependencies
+      - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e .
-          python -m pip install pytest pytest-cov
+          python -m pip install -r requirements-dev.txt
 
       - name: Compile package
-        run: python -m compileall -q dd_clip_miner_llm
+        run: python -m compileall -q dd_clip_miner_llm tests
 
-      - name: Run tests
-        run: python -m pytest tests -q
+      - name: Run unit tests
+        run: python -m pytest tests -q --basetemp=.tmp/pytest
