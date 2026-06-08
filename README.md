@@ -49,7 +49,7 @@
 
 ```powershell
 cd path\to\dd-clip-miner-llm
-python setup.py
+python install.py
 ```
 
 脚本会自动：
