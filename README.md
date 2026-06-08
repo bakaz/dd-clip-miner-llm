@@ -26,7 +26,7 @@
 ## 工作流程
 
 1. FFmpeg 提取 16 kHz 单声道 WAV
-2. ASR backend（默认 FunASR/Qwen3-ASR，可切 faster-whisper）转写为带时间戳的 segment
+2. ASR backend（默认 faster-whisper，可切 FunASR/SenseVoiceSmall 或远程 MiMo ASR）转写为带时间戳的 segment
 3. 各识别器将 transcript 送 LLM 标注片段
 4. 按时间切割音频/视频到 `03_clips/`
 5. 生成 `04_reports/` 下 CSV/JSON，可人工修改后 `manual-cut`
@@ -72,7 +72,18 @@ ffprobe -version
 
 无 `ffprobe` 时会尝试用 `ffmpeg -i` 解析时长，但建议安装完整 FFmpeg。
 
-### 3. CUDA 可选（faster-whisper GPU）
+### 3. MKVToolNix（可选，用于拼接优化）
+
+MKVToolNix 的 `mkvmerge` 可以更稳健地处理 H.264 bitstream 损坏：
+
+```powershell
+winget install MKVToolNix
+mkvmerge --version
+```
+
+未安装时会回退到纯 FFmpeg 拼接。
+
+### 4. CUDA 可选（faster-whisper GPU）
 
 ```powershell
 pip install -r requirements-cu12.txt
@@ -80,15 +91,39 @@ pip install -r requirements-cu12.txt
 
 当前 CTranslate2 / faster-whisper 依赖 CUDA 12 运行时（`cublas64_12.dll`）。本机仅 CUDA 13 时仍需 CUDA 12 DLL；缺失时自动回退 CPU int8。
 
-### 4. FunASR / Qwen3-ASR 可选
+### 5. FunASR / SenseVoiceSmall 可选
 
 ```powershell
 pip install "dd-clip-miner-llm[funasr]"
 ```
 
-默认 `asr.backend: funasr`，会通过 FunASR `AutoModel` 加载 `asr.funasr.model`，默认是 `Qwen/Qwen3-ASR-0.6B`。如需回到原 faster-whisper，设置 `asr.backend: faster_whisper`。
+支持 FunASR 模型（SenseVoiceSmall、Paraformer 等）。配置方式：
 
-### 5. LLM API Key
+```yaml
+asr:
+  mode: local
+  local:
+    backend: funasr
+    funasr:
+      model: iic/SenseVoiceSmall  # 或 paraformer-zh
+      hub: ms                     # ms=ModelScope
+      timestamp_chunk_seconds: 5  # 5秒一个chunk，获取细粒度时间戳
+      max_workers: 4              # 并发处理
+```
+
+### 6. MiMo ASR 远程 API（可选）
+
+```yaml
+asr:
+  mode: remote
+  remote:
+    provider: mimo
+    base_url: https://token-plan-cn.xiaomimimo.com/v1
+    api_key_env: MIMO_API_KEY
+    model: mimo-v2.5-asr
+```
+
+### 7. LLM API Key
 
 ```powershell
 copy config.example.yaml config.yaml

@@ -11,6 +11,11 @@ from .paths import VIDEO_EXTENSIONS, iter_video_files, safe_path_part
 from .pipeline import run_pipeline
 
 
+def _is_generated_concat_output(path: Path) -> bool:
+    stem = path.stem.lower()
+    return stem == "merged_output" or stem.startswith("merged_")
+
+
 def run_batch(
     input_root: str | Path,
     result_root: str | Path,
@@ -26,7 +31,10 @@ def run_batch(
     results_root.mkdir(parents=True, exist_ok=True)
     work.mkdir(parents=True, exist_ok=True)
 
-    videos = iter_video_files(root, extensions or VIDEO_EXTENSIONS)
+    videos = [
+        video for video in iter_video_files(root, extensions or VIDEO_EXTENSIONS)
+        if not _is_generated_concat_output(video)
+    ]
     by_folder: dict[Path, list[Path]] = {}
     for video in videos:
         by_folder.setdefault(video.parent, []).append(video)
@@ -154,12 +162,26 @@ def _process_folder_concat(
     run_dir = work / rel_folder / run_name
     result_dir = results_root / rel_folder / run_name
     concat_dir = run_dir / "concat"
+    
+    # 基于目录状态检测是否已完成（不依赖 marker 文件编码）
+    concat_output = concat_dir / "concat.mp4"
+    progress_path = run_dir / "progress.json"
+    skip_reason = _check_concat_already_done(concat_output, progress_path)
+    if skip_reason:
+        print(f"[skip] {skip_reason}: {folder}")
+        # 尝试加载已有结果
+        existing = _load_existing_concat_result(folder, folder_key, run_dir, result_dir, len(folder_videos))
+        if existing:
+            folder_runs.append(existing)
+            completed_videos[folder_key] = existing
+            _write_marker(marker, completed_videos)
+            return folder_runs, True, False
+    
     concat_dir.mkdir(parents=True, exist_ok=True)
     
     print(f"[concat] {len(folder_videos)} videos in {folder}")
     try:
         # 拼接视频
-        concat_output = concat_dir / "concat.mp4"
         concat_videos(
             folder_videos,
             concat_output,
@@ -210,6 +232,74 @@ def _process_folder_concat(
     
     _write_marker(marker, completed_videos)
     return folder_runs, folder_ok, has_work
+
+
+def _check_concat_already_done(concat_output: Path, progress_path: Path) -> str | None:
+    """检查 concat 是否已完成，返回跳过原因或 None"""
+    if not concat_output.exists():
+        return None
+    
+    # 检查 progress.json
+    if progress_path.exists():
+        try:
+            progress = json.loads(progress_path.read_text(encoding="utf-8"))
+            last_step = progress.get("last_completed_step", "")
+            if last_step == "done":
+                return "Pipeline fully completed"
+            if last_step in ("audio", "asr", "llm", "export"):
+                return f"Pipeline partially done (step: {last_step}), concat.mp4 exists"
+        except (json.JSONDecodeError, OSError):
+            pass
+    
+    # concat.mp4 存在但没有 progress.json，可能是之前的运行
+    # 检查文件大小是否合理（> 100MB）
+    if concat_output.stat().st_size > 100 * 1024 * 1024:
+        return "concat.mp4 exists (>100MB)"
+    
+    return None
+
+
+def _load_existing_concat_result(
+    folder: Path,
+    folder_key: str,
+    run_dir: Path,
+    result_dir: Path,
+    video_count: int,
+) -> dict[str, Any] | None:
+    """加载已有的 concat 结果"""
+    progress_path = run_dir / "progress.json"
+    last_step = ""
+    content_counts: dict[str, int] = {}
+    
+    if progress_path.exists():
+        try:
+            progress = json.loads(progress_path.read_text(encoding="utf-8"))
+            last_step = progress.get("last_completed_step", "")
+        except (json.JSONDecodeError, OSError):
+            pass
+    
+    # 尝试从 manifest.json 获取更多信息
+    manifest_path = run_dir / "manifest.json"
+    if manifest_path.exists():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            content_counts = manifest.get("content_types", {})
+        except (json.JSONDecodeError, OSError):
+            pass
+    
+    total_count = sum(content_counts.values()) if content_counts else 0
+    
+    return {
+        "video": str(folder),
+        "video_key": folder_key,
+        "work_dir": str(run_dir),
+        "result_dir": str(result_dir),
+        "video_count": video_count,
+        "song_count": total_count,
+        "content_counts": content_counts,
+        "status": "success",
+        "last_step": last_step,
+    }
 
 
 def _cleanup_concat_source(concat_dir: Path) -> None:

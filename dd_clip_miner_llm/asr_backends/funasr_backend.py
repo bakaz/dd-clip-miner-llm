@@ -1,10 +1,27 @@
+"""FunASR 后端（支持 SenseVoiceSmall / Paraformer）
+
+功能：
+- 自动分段（timestamp_chunk_seconds 控制粒度，默认 5 秒）
+- 并发处理多个 chunk（max_workers 控制并发数）
+- 支持 SenseVoiceSmall、Paraformer 等 FunASR 模型
+"""
 from __future__ import annotations
 
+import re
+import tempfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
 from ..models import TranscriptSegment
 from .base import ASRBackend
+
+# SenseVoice 特殊标签模式
+_SENSEVOICE_TAG_RE = re.compile(r"<\|[^|]*\|>")
+
+# 默认配置
+_DEFAULT_TIMESTAMP_CHUNK = 5  # 5 秒一个 chunk，用于细粒度时间戳
+_DEFAULT_MAX_WORKERS = 4      # 默认并发数
 
 
 class FunASRBackend(ASRBackend):
@@ -14,8 +31,11 @@ class FunASRBackend(ASRBackend):
 
     @property
     def funasr_settings(self) -> dict[str, Any]:
+        """获取 funasr 配置，兼容新旧格式。"""
         value = self.settings.get("funasr", {})
-        return value if isinstance(value, dict) else {}
+        if isinstance(value, dict) and value:
+            return value
+        return self.settings
 
     def _load_model(self) -> Any:
         if self._model is not None:
@@ -43,8 +63,29 @@ class FunASRBackend(ASRBackend):
         return self._model
 
     def transcribe(self, audio_path: str | Path) -> list[TranscriptSegment]:
-        model = self._load_model()
+        from ..ffmpeg import get_duration
+
+        audio_path = Path(audio_path)
         cfg = self.funasr_settings
+        chunk_seconds = int(cfg.get("timestamp_chunk_seconds", _DEFAULT_TIMESTAMP_CHUNK))
+        max_workers = int(cfg.get("max_workers", _DEFAULT_MAX_WORKERS))
+
+        duration = get_duration(audio_path)
+        total_chunks = int(duration // chunk_seconds) + (1 if duration % chunk_seconds > 0 else 0)
+
+        if total_chunks <= 1:
+            return self._transcribe_chunk(audio_path, 0.0, cfg)
+
+        print(f"[asr] Audio {duration:.0f}s -> {total_chunks} chunks of {chunk_seconds}s (max_workers={max_workers})")
+        return self._transcribe_chunked(audio_path, duration, chunk_seconds, cfg, max_workers)
+
+    def _transcribe_chunk(
+        self,
+        audio_path: Path,
+        time_offset: float,
+        cfg: dict[str, Any],
+    ) -> list[TranscriptSegment]:
+        model = self._load_model()
         generate_kwargs: dict[str, Any] = {
             "input": str(audio_path),
             "batch_size": int(cfg.get("batch_size", 1)),
@@ -57,7 +98,74 @@ class FunASRBackend(ASRBackend):
             generate_kwargs.update(extra)
 
         result = model.generate(**generate_kwargs)
-        return funasr_result_to_segments(result, audio_path)
+        segments = funasr_result_to_segments(result, audio_path)
+
+        # 添加时间偏移
+        if time_offset > 0:
+            segments = [
+                TranscriptSegment(
+                    start=seg.start + time_offset,
+                    end=seg.end + time_offset,
+                    text=seg.text,
+                )
+                for seg in segments
+            ]
+
+        return segments
+
+    def _transcribe_chunked(
+        self,
+        audio_path: Path,
+        total_duration: float,
+        chunk_seconds: int,
+        cfg: dict[str, Any],
+        max_workers: int = 4,
+    ) -> list[TranscriptSegment]:
+        from ..ffmpeg import cut_audio
+
+        # 准备所有 chunk 的切割任务
+        chunks: list[tuple[int, float, float]] = []  # (index, start, end)
+        chunk_start = 0.0
+        chunk_index = 0
+        while chunk_start < total_duration:
+            chunk_end = min(chunk_start + chunk_seconds, total_duration)
+            chunks.append((chunk_index, chunk_start, chunk_end))
+            chunk_index += 1
+            chunk_start = chunk_end
+
+        # 切割所有 chunk 到临时目录
+        with tempfile.TemporaryDirectory(prefix="funasr_chunk_") as tmp_dir:
+            chunk_paths: list[tuple[int, Path, float]] = []
+            for idx, start, end in chunks:
+                chunk_path = Path(tmp_dir) / f"chunk_{idx:04d}.wav"
+                cut_audio(audio_path, chunk_path, start, end)
+                chunk_paths.append((idx, chunk_path, start))
+
+            # 并发处理
+            all_segments: list[tuple[int, list[TranscriptSegment]]] = []
+
+            def process_chunk(item: tuple[int, Path, float]) -> tuple[int, list[TranscriptSegment]]:
+                idx, path, offset = item
+                segs = self._transcribe_chunk(path, offset, cfg)
+                return idx, segs
+
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {
+                    executor.submit(process_chunk, item): item[0]
+                    for item in chunk_paths
+                }
+                for future in as_completed(futures):
+                    idx, segs = future.result()
+                    all_segments.append((idx, segs))
+                    print(f"  [asr] Chunk {idx + 1}/{len(chunks)}: {len(segs)} segments")
+
+        # 按 chunk 顺序排列
+        all_segments.sort(key=lambda x: x[0])
+        result: list[TranscriptSegment] = []
+        for _, segs in all_segments:
+            result.extend(segs)
+
+        return result
 
 
 def funasr_result_to_segments(result: Any, audio_path: str | Path) -> list[TranscriptSegment]:
@@ -68,7 +176,8 @@ def funasr_result_to_segments(result: Any, audio_path: str | Path) -> list[Trans
     for item in items:
         text = _value(item, "text", "sentence", "transcript")
         if text:
-            fallback_texts.append(str(text).strip())
+            text = _clean_sensevoice_text(str(text))
+            fallback_texts.append(text.strip())
         timestamps = _value(item, "timestamp", "timestamps", "time_stamps", "sentence_info", "segments")
         segments.extend(_timestamps_to_segments(timestamps, fallback_text=str(text or "")))
 
@@ -80,11 +189,15 @@ def funasr_result_to_segments(result: Any, audio_path: str | Path) -> list[Trans
         return []
     try:
         from ..ffmpeg import get_duration
-
         duration = get_duration(audio_path)
     except Exception:
         duration = 0.0
     return [TranscriptSegment(start=0.0, end=float(duration), text=text)]
+
+
+def _clean_sensevoice_text(text: str) -> str:
+    """清理 SenseVoice 输出的特殊标签"""
+    return _SENSEVOICE_TAG_RE.sub("", text).strip()
 
 
 def _timestamps_to_segments(timestamps: Any, fallback_text: str = "") -> list[TranscriptSegment]:
@@ -157,7 +270,6 @@ def _resolve_device(device: str) -> str:
     if value == "auto":
         try:
             import torch
-
             return "cuda" if torch.cuda.is_available() else "cpu"
         except Exception:
             return "cpu"

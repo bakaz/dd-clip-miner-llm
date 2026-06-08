@@ -8,25 +8,42 @@ audio:
 
 # ─── ASR 配置 ─────────────────────────────────
 asr:
-  backend: funasr
-  model: small
-  device: auto
-  compute_type: default
-  language: null
-  beam_size: 5
-  vad_filter: true
-  initial_prompt: null
-  funasr:
-    model: Qwen/Qwen3-ASR-0.6B
-    hub: hf
-    trust_remote_code: true
-    device: auto
-    batch_size: 1
+  mode: local
+
+  local:
+    backend: funasr
+
+    faster_whisper:
+      model: small
+      device: auto
+      compute_type: default
+      language: null
+      beam_size: 5
+      vad_filter: true
+      initial_prompt: null
+
+    funasr:
+      model: iic/SenseVoiceSmall
+      hub: ms
+      trust_remote_code: true
+      device: auto
+      batch_size: 1
+      timestamp_chunk_seconds: 5
+      max_workers: 4
+      language: null
+      vad_model: null
+      punc_model: null
+      spk_model: null
+      generate_kwargs: {}
+
+  remote:
+    provider: mimo
+    base_url: https://token-plan-cn.xiaomimimo.com/v1
+    api_key: null
+    api_key_env: MIMO_API_KEY
+    model: mimo-v2.5-asr
+    timestamp_chunk_seconds: 5
     language: null
-    vad_model: null
-    punc_model: null
-    spk_model: null
-    generate_kwargs: {}
 
 # ─── LLM 配置 ─────────────────────────────────
 llm:

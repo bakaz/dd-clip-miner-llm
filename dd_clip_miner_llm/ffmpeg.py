@@ -900,14 +900,44 @@ def _concat_reencoded_bad_segments_copy(
 
             try:
                 for index, video in enumerate(input_videos):
+                    target = candidate_dir / f"part_{index:04d}.mp4"
                     if index not in bad_index_set:
-                        repaired.append(video)
+                        run_command(
+                            [
+                                ffmpeg_bin,
+                                "-y",
+                                "-fflags",
+                                "+genpts+igndts",
+                                "-err_detect",
+                                "ignore_err",
+                                "-i",
+                                str(video),
+                                "-map",
+                                "0:v:0?",
+                                "-map",
+                                "0:a:0?",
+                                "-c",
+                                "copy",
+                                "-avoid_negative_ts",
+                                "make_zero",
+                                "-movflags",
+                                "+faststart",
+                                str(target),
+                            ],
+                            bitstream_fatal=True,
+                        )
+                        repaired.append(target)
                         continue
 
-                    target = candidate_dir / f"part_{index:04d}.mp4"
                     fps = _get_video_fps(video)
                     video_filter = _repair_video_filter_args(fps)
                     audio_filter = ["-af", "asetpts=PTS-STARTPTS"] if _has_audio_stream(video) else []
+                    # Cap re-encode of bad segment to its original (reported) duration to prevent
+                    # corrupt decode + repair filter from producing runaway long output (which
+                    # leads to "duration too long" in final assembly vs original expected).
+                    # This is part of correct handling for wrong splice duration on real corrupt data.
+                    orig_dur = get_duration(video) or 0
+                    cap_args = ["-t", f"{orig_dur:.3f}"] if orig_dur > 0 else []
                     run_command([
                         ffmpeg_bin,
                         "-y",
@@ -921,6 +951,7 @@ def _concat_reencoded_bad_segments_copy(
                         "0:v:0",
                         "-map",
                         "0:a:0?",
+                        *cap_args,
                         *video_filter,
                         *audio_filter,
                         *encode_args,
@@ -940,34 +971,94 @@ def _concat_reencoded_bad_segments_copy(
                     ])
                     repaired.append(target)
 
+                # Write assembly list with explicit durations from the *actual* repaired parts (good originals + re-encoded bads).
+                # This forces the concat demuxer timeline to the real sum of parts (after repair/sanitize), preventing
+                # "duration too long/short" vs original (often bogus) expected from corrupt sources.
+                # Use ffconcat format so duration directives are honored.
+                part_durs = []
+                for v in repaired:
+                    d = get_duration(v) or 0.0
+                    part_durs.append(max(0.001, d))
                 with concat_file.open("w", encoding="utf-8") as handle:
-                    for video in repaired:
+                    handle.write("ffconcat version 1.0\n")
+                    for i, video in enumerate(repaired):
                         escaped_path = str(video).replace("'", "'\\''")
                         handle.write(f"file '{escaped_path}'\n")
+                        if part_durs:
+                            handle.write(f"duration {part_durs[i]:.6f}\n")
 
-                run_command(
-                    [
-                        ffmpeg_bin,
-                        "-y",
-                        "-f",
-                        "concat",
-                        "-safe",
-                        "0",
-                        "-i",
-                        str(concat_file),
-                        "-map",
-                        "0:v:0?",
-                        "-map",
-                        "0:a:0?",
-                        "-c",
-                        "copy",
-                        "-movflags",
-                        "+faststart",
-                        str(output),
-                    ],
-                    bitstream_fatal=True,
-                )
-                _validate_concat_duration(output, expected_duration)
+                candidate_output = candidate_dir / "concat.mp4"
+                # Validate against the sum of the actual repaired parts (the "correct" length after fixing corrupt).
+                actual_expected = sum(part_durs) if part_durs else expected_duration
+                try:
+                    run_command(
+                        [
+                            ffmpeg_bin,
+                            "-y",
+                            "-fflags",
+                            "+genpts+igndts+discardcorrupt",
+                            "-f",
+                            "concat",
+                            "-safe",
+                            "0",
+                            "-i",
+                            str(concat_file),
+                            "-map",
+                            "0:v:0?",
+                            "-map",
+                            "0:a:0?",
+                            "-c",
+                            "copy",
+                            "-avoid_negative_ts",
+                            "make_zero",
+                            "-movflags",
+                            "+faststart",
+                            str(candidate_output),
+                        ],
+                        bitstream_fatal=True,
+                    )
+                    _validate_concat_duration(candidate_output, actual_expected)
+                    _validate_audio_decodable(candidate_output, ffmpeg_bin)
+                except FFmpegError:
+                    _safe_unlink(candidate_output)
+                    filter_complex = _concat_filter_complex(
+                        len(repaired),
+                        _get_min_video_size(repaired),
+                    )
+                    filter_inputs: list[str] = []
+                    for item in repaired:
+                        filter_inputs.extend(["-i", str(item)])
+                    run_command(
+                        [
+                            ffmpeg_bin,
+                            "-y",
+                            *filter_inputs,
+                            "-filter_complex",
+                            filter_complex,
+                            "-map",
+                            "[v]",
+                            "-map",
+                            "[a]",
+                            *encode_args,
+                            "-pix_fmt",
+                            "yuv420p",
+                            "-c:a",
+                            "aac",
+                            "-b:a",
+                            f"{audio_bitrate_kbps}k",
+                            "-ar",
+                            "48000",
+                            "-ac",
+                            "2",
+                            "-movflags",
+                            "+faststart",
+                            str(candidate_output),
+                        ]
+                    )
+                    _validate_concat_duration(candidate_output, actual_expected)
+                    _validate_audio_decodable(candidate_output, ffmpeg_bin)
+                _safe_unlink(output)
+                shutil.move(str(candidate_output), str(output))
                 return
             except FFmpegError as exc:
                 errors.append(str(exc))
@@ -984,10 +1075,17 @@ def _targeted_repair_encode_candidates(
     ffmpeg_bin: str,
     video_codec: str,
 ) -> list[list[str]]:
-    candidates = _video_reencode_arg_candidates(ffmpeg_bin, video_codec)
-    cpu = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23"]
-    if cpu not in candidates:
-        candidates.append(cpu)
+    # 尝试硬件编码，失败时回退到 CPU
+    encoders = detect_video_encoders(ffmpeg_bin)
+    candidates: list[list[str]] = []
+    if "h264_nvenc" in encoders:
+        candidates.append(["-c:v", "h264_nvenc", "-preset", "p5", "-cq", "24"])
+    if "h264_qsv" in encoders:
+        candidates.append(["-c:v", "h264_qsv", "-global_quality", "24"])
+    if "h264_amf" in encoders:
+        candidates.append(["-c:v", "h264_amf", "-quality", "quality", "-qp_i", "24", "-qp_p", "24", "-qp_b", "24"])
+    # CPU 作为最终回退
+    candidates.append(["-c:v", "libx264", "-preset", "ultrafast", "-crf", "28"])
     return candidates
 
 
@@ -1065,21 +1163,27 @@ def _concat_remuxed_copy(
                 escaped_path = str(video).replace("'", "'\\''")
                 handle.write(f"file '{escaped_path}'\n")
 
+        candidate_output = temp_dir / "concat.mp4"
         run_command(
             [
                 ffmpeg_bin, "-y",
+                "-fflags", "+genpts+igndts+discardcorrupt",
                 "-f", "concat",
                 "-safe", "0",
                 "-i", str(concat_file),
                 "-map", "0:v:0?",
                 "-map", "0:a:0?",
                 "-c", "copy",
+                "-avoid_negative_ts", "make_zero",
                 "-movflags", "+faststart",
-                str(output),
+                str(candidate_output),
             ],
             bitstream_fatal=True,
         )
-        _validate_concat_duration(output, expected_duration)
+        _validate_concat_duration(candidate_output, expected_duration)
+        _validate_audio_decodable(candidate_output, ffmpeg_bin)
+        _safe_unlink(output)
+        shutil.move(str(candidate_output), str(output))
     finally:
         _safe_rmtree(temp_dir)
 
@@ -1112,6 +1216,7 @@ def _concat_timestamp_remuxed_copy(
             remuxed.append(target)
 
         _write_ffconcat_list(concat_file, remuxed)
+        candidate_output = temp_dir / "concat.mp4"
         run_command(
             [
                 ffmpeg_bin, "-y",
@@ -1122,12 +1227,14 @@ def _concat_timestamp_remuxed_copy(
                 "-map", "0:a:0?",
                 "-c", "copy",
                 "-movflags", "+faststart",
-                str(output),
+                str(candidate_output),
             ],
             bitstream_fatal=True,
         )
-        _validate_concat_duration(output, expected_duration)
-        _validate_audio_decodable(output, ffmpeg_bin)
+        _validate_concat_duration(candidate_output, expected_duration)
+        _validate_audio_decodable(candidate_output, ffmpeg_bin)
+        _safe_unlink(output)
+        shutil.move(str(candidate_output), str(output))
     finally:
         _safe_rmtree(temp_dir)
 
@@ -1161,9 +1268,11 @@ def _concat_timestamp_remuxed_audio_resync(
             remuxed.append(target)
 
         _write_ffconcat_list(concat_file, remuxed)
+        candidate_output = temp_dir / "concat.mp4"
         run_command(
             [
                 ffmpeg_bin, "-y",
+                "-fflags", "+genpts+igndts+discardcorrupt",
                 "-f", "concat",
                 "-safe", "0",
                 "-i", str(concat_file),
@@ -1176,12 +1285,14 @@ def _concat_timestamp_remuxed_audio_resync(
                 "-ar", "48000",
                 "-ac", "2",
                 "-movflags", "+faststart",
-                str(output),
+                str(candidate_output),
             ],
             bitstream_fatal=True,
         )
-        _validate_concat_duration(output, expected_duration)
-        _validate_audio_decodable(output, ffmpeg_bin)
+        _validate_concat_duration(candidate_output, expected_duration)
+        _validate_audio_decodable(candidate_output, ffmpeg_bin)
+        _safe_unlink(output)
+        shutil.move(str(candidate_output), str(output))
     finally:
         _safe_rmtree(temp_dir)
 
@@ -1217,9 +1328,11 @@ def _concat_fast_transmux_copy(
             path.resolve().as_uri()
             for path in ts_files
         )
+        candidate_output = temp_dir / "concat.mp4"
         run_command(
             [
                 ffmpeg_bin, "-y",
+                "-fflags", "+genpts+igndts+discardcorrupt",
                 "-protocol_whitelist", "file,concat",
                 "-i", concat_url,
                 "-map", "0:v:0?",
@@ -1227,12 +1340,14 @@ def _concat_fast_transmux_copy(
                 "-c", "copy",
                 "-bsf:a", "aac_adtstoasc",
                 "-movflags", "+faststart",
-                str(output),
+                str(candidate_output),
             ],
             bitstream_fatal=True,
         )
-        _validate_concat_duration(output, expected_duration)
-        _validate_audio_decodable(output, ffmpeg_bin)
+        _validate_concat_duration(candidate_output, expected_duration)
+        _validate_audio_decodable(candidate_output, ffmpeg_bin)
+        _safe_unlink(output)
+        shutil.move(str(candidate_output), str(output))
     finally:
         _safe_rmtree(temp_dir)
 
@@ -1243,26 +1358,35 @@ def _concat_ts_protocol_copy(
     ffmpeg_bin: str,
     expected_duration: float | None,
 ) -> None:
-    concat_url = "concat:" + "|".join(
-        Path(path).resolve().as_uri()
-        for path in ts_files
-    )
-    run_command(
-        [
-            ffmpeg_bin, "-y",
-            "-protocol_whitelist", "file,concat",
-            "-i", concat_url,
-            "-map", "0:v:0?",
-            "-map", "0:a:0?",
-            "-c", "copy",
-            "-bsf:a", "aac_adtstoasc",
-            "-movflags", "+faststart",
-            str(output),
-        ],
-        bitstream_fatal=True,
-    )
-    _validate_concat_duration(output, expected_duration)
-    _validate_audio_decodable(output, ffmpeg_bin)
+    temp_dir = output.parent / f"_concat_ts_proto_{uuid4().hex[:8]}"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        concat_url = "concat:" + "|".join(
+            Path(path).resolve().as_uri()
+            for path in ts_files
+        )
+        candidate_output = temp_dir / "concat.mp4"
+        run_command(
+            [
+                ffmpeg_bin, "-y",
+                "-fflags", "+genpts+igndts+discardcorrupt",
+                "-protocol_whitelist", "file,concat",
+                "-i", concat_url,
+                "-map", "0:v:0?",
+                "-map", "0:a:0?",
+                "-c", "copy",
+                "-bsf:a", "aac_adtstoasc",
+                "-movflags", "+faststart",
+                str(candidate_output),
+            ],
+            bitstream_fatal=True,
+        )
+        _validate_concat_duration(candidate_output, expected_duration)
+        _validate_audio_decodable(candidate_output, ffmpeg_bin)
+        _safe_unlink(output)
+        shutil.move(str(candidate_output), str(output))
+    finally:
+        _safe_rmtree(temp_dir)
 
 
 def _concat_tail_window_repaired_bad_segments_copy(
@@ -1326,6 +1450,7 @@ def _concat_tail_window_repaired_bad_segments_copy(
                         "-fflags", "+discardcorrupt",
                         "-err_detect", "ignore_err",
                         "-i", str(video),
+                        "-t", f"{repair_window_seconds + guard_seconds:.3f}",
                         "-map", "0:v:0",
                         "-map", "0:a:0?",
                         *video_filter,
@@ -1360,13 +1485,22 @@ def _concat_tail_window_repaired_bad_segments_copy(
                 ],
                 bitstream_fatal=True,
             )
+            _validate_concat_duration(fixed, duration)
             repaired_inputs.append(fixed)
 
         concat_file = temp_dir / "concat_list.txt"
-        _write_ffconcat_list(concat_file, repaired_inputs)
+        repaired_durations = _durations_or_none(repaired_inputs)
+        _write_ffconcat_list(
+            concat_file,
+            repaired_inputs,
+            repaired_durations,
+            include_duration=repaired_durations is not None,
+        )
+        candidate_output = temp_dir / "concat.mp4"
         run_command(
             [
                 ffmpeg_bin, "-y",
+                "-fflags", "+genpts+igndts+discardcorrupt",
                 "-f", "concat",
                 "-safe", "0",
                 "-i", str(concat_file),
@@ -1374,12 +1508,15 @@ def _concat_tail_window_repaired_bad_segments_copy(
                 "-map", "0:a:0?",
                 "-c", "copy",
                 "-movflags", "+faststart",
-                str(output),
+                str(candidate_output),
             ],
             bitstream_fatal=True,
         )
-        _validate_concat_duration(output, expected_duration)
-        _validate_audio_decodable(output, ffmpeg_bin)
+        actual_expected = sum(repaired_durations) if repaired_durations else expected_duration
+        _validate_concat_duration(candidate_output, actual_expected)
+        _validate_audio_decodable(candidate_output, ffmpeg_bin)
+        _safe_unlink(output)
+        shutil.move(str(candidate_output), str(output))
     finally:
         _safe_rmtree(temp_dir)
 
@@ -1805,3 +1942,260 @@ def _parse_ffmpeg_duration(text: str) -> float | None:
     minutes = int(match.group(2))
     seconds = float(match.group(3))
     return hours * 3600 + minutes * 60 + seconds
+
+
+# ============ MKVToolNix (mkvmerge) concat ============
+
+def require_mkvmerge() -> str:
+    """查找 mkvmerge 可执行文件。"""
+    path = shutil.which("mkvmerge")
+    if path:
+        return path
+    # Windows 默认安装路径
+    default = Path(r"C:\Program Files\MKVToolNix\mkvmerge.exe")
+    if default.exists():
+        return str(default)
+    raise FFmpegError("mkvmerge not found. Install MKVToolNix: winget install MKVToolNix")
+
+
+def concat_with_mkvmerge(
+    input_videos: list[str | Path],
+    output_video: str | Path,
+    *,
+    video_codec: str = "copy",
+    audio_bitrate_kbps: int = 320,
+) -> Path:
+    """使用 mkvmerge 拼接视频，处理 H.264 bitstream 损坏。
+
+    流程：
+    1. mkvmerge 修正每个片段的容器时间戳 / 默认帧时长
+    2. mkvmerge append 合并成一个稳定 MKV
+    3. ffmpeg -c copy 转回 MP4
+
+    优势：
+    - mkvmerge 对 H.264 bitstream timing 的处理比 ffmpeg 更稳健
+    - 不需要多次重试或复杂 fallback
+    - 速度接近 stream copy
+    """
+    mkvmerge_bin = require_mkvmerge()
+    ffmpeg_bin = require_binary("ffmpeg")
+    output = Path(output_video).resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
+
+    if not input_videos:
+        raise ValueError("No input videos provided")
+
+    if len(input_videos) == 1:
+        # 单文件直接 remux
+        _run_mkvmerge_single(mkvmerge_bin, input_videos[0], output)
+        return output
+
+    # 多文件拼接
+    temp_dir = output.parent / f"_mkvmerge_{uuid4().hex[:8]}"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        # Step 1: 每个片段用 mkvmerge 修正容器时间戳
+        fixed_parts: list[Path] = []
+        for i, video in enumerate(input_videos):
+            fixed = temp_dir / f"part_{i:04d}.mkv"
+            try:
+                _run_mkvmerge_fix(mkvmerge_bin, video, fixed)
+            except FFmpegError:
+                # 备用 fallback：加 --default-duration
+                print(f"[mkvmerge] Segment {i+1} fix failed, retrying with --default-duration fallback")
+                _run_mkvmerge_fix_with_default_duration(mkvmerge_bin, video, fixed)
+            fixed_parts.append(fixed)
+
+        # Step 2: mkvmerge append 合并成 MKV
+        merged_mkv = temp_dir / "merged.mkv"
+        try:
+            _run_mkvmerge_append(mkvmerge_bin, fixed_parts, merged_mkv)
+        except FFmpegError:
+            # 备用 fallback：加 --default-duration
+            print("[mkvmerge] Append failed, retrying with --default-duration fallback")
+            _run_mkvmerge_append_with_default_duration(mkvmerge_bin, fixed_parts, merged_mkv)
+
+        # Step 3: ffmpeg -c copy 转回 MP4
+        _run_ffmpeg_copy(ffmpeg_bin, merged_mkv, output)
+
+        return output
+    finally:
+        _safe_rmtree(temp_dir)
+
+
+def _get_video_fps(video_path: str | Path) -> float | None:
+    """用 ffprobe 提取视频 FPS。"""
+    ffprobe_bin = shutil.which("ffprobe")
+    if not ffprobe_bin:
+        return None
+    try:
+        completed = subprocess.run(
+            [
+                ffprobe_bin, "-v", "quiet",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=r_frame_rate,avg_frame_rate",
+                "-of", "csv=p=0",
+                str(video_path),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+        )
+        if completed.returncode != 0:
+            return None
+        # 解析 "30/1" 或 "30000/1001" 格式
+        for line in completed.stdout.strip().splitlines():
+            line = line.strip()
+            if not line or line == "N/A":
+                continue
+            parts = line.split("/")
+            if len(parts) == 2:
+                try:
+                    num, den = float(parts[0]), float(parts[1])
+                    if den > 0:
+                        return round(num / den, 3)
+                except ValueError:
+                    continue
+    except Exception:
+        pass
+    return None
+
+
+def _fps_to_mkvmerge_duration(fps: float) -> str:
+    """将 FPS 转换为 mkvmerge --default-duration 格式（如 '60.000fps'）。"""
+    return f"{fps:.3f}fps"
+
+
+def _run_mkvmerge_single(mkvmerge_bin: str, input_video: str | Path, output: Path) -> None:
+    """单文件 mkvmerge remux。"""
+    cmd = [
+        mkvmerge_bin,
+        "-o", str(output),
+        "--no-subtitles",
+        "--no-buttons",
+        "--no-attachments",
+        "--no-chapters",
+        "--no-global-tags",
+        str(input_video),
+    ]
+    _run_mkvmerge(cmd)
+
+
+def _run_mkvmerge_fix(mkvmerge_bin: str, input_video: str | Path, output: Path) -> None:
+    """用 mkvmerge 修正容器时间戳和默认帧时长。"""
+    cmd = [
+        mkvmerge_bin,
+        "-o", str(output),
+        "--no-subtitles",
+        "--no-buttons",
+        "--no-attachments",
+        "--no-chapters",
+        "--no-global-tags",
+        "--fix-bitstream-timing-information", "0:1",
+        str(input_video),
+    ]
+    _run_mkvmerge(cmd)
+
+
+def _run_mkvmerge_append(mkvmerge_bin: str, inputs: list[Path], output: Path) -> None:
+    """用 mkvmerge append 模式拼接多个 MKV 文件。"""
+    # mkvmerge append 语法：file1 + file2 + file3
+    cmd = [
+        mkvmerge_bin,
+        "-o", str(output),
+        "--fix-bitstream-timing-information", "0:1",
+    ]
+    for i, inp in enumerate(inputs):
+        if i > 0:
+            cmd.append("+")
+        cmd.append(str(inp))
+    _run_mkvmerge(cmd)
+
+
+def _run_mkvmerge_fix_with_default_duration(mkvmerge_bin: str, input_video: str | Path, output: Path) -> None:
+    """用 mkvmerge 修正容器时间戳，带 --default-duration 备用 fallback。"""
+    cmd = [
+        mkvmerge_bin,
+        "-o", str(output),
+        "--no-subtitles",
+        "--no-buttons",
+        "--no-attachments",
+        "--no-chapters",
+        "--no-global-tags",
+    ]
+    fps = _get_video_fps(input_video)
+    if fps and fps > 0:
+        cmd.extend(["--default-duration", f"0:{_fps_to_mkvmerge_duration(fps)}"])
+    cmd.extend(["--fix-bitstream-timing-information", "0:1", str(input_video)])
+    _run_mkvmerge(cmd)
+
+
+def _run_mkvmerge_append_with_default_duration(mkvmerge_bin: str, inputs: list[Path], output: Path) -> None:
+    """用 mkvmerge append 模式拼接多个 MKV 文件，带 --default-duration 备用 fallback。"""
+    cmd = [
+        mkvmerge_bin,
+        "-o", str(output),
+    ]
+    if inputs:
+        fps = _get_video_fps(inputs[0])
+        if fps and fps > 0:
+            cmd.extend(["--default-duration", f"0:{_fps_to_mkvmerge_duration(fps)}"])
+    cmd.extend(["--fix-bitstream-timing-information", "0:1"])
+    for i, inp in enumerate(inputs):
+        if i > 0:
+            cmd.append("+")
+        cmd.append(str(inp))
+    _run_mkvmerge(cmd)
+
+
+def _run_mkvmerge(cmd: list[str]) -> None:
+    """运行 mkvmerge 命令。"""
+    try:
+        completed = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=3600,
+        )
+    except FileNotFoundError as exc:
+        raise FFmpegError(f"mkvmerge not found: {exc}") from exc
+
+    # mkvmerge 返回值：0=成功，1=警告，2=错误
+    if completed.returncode == 2:
+        detail = completed.stderr.strip() or completed.stdout.strip()
+        raise FFmpegError(
+            f"mkvmerge failed: {' '.join(cmd)}\n{detail}",
+            command=cmd,
+            stderr=completed.stderr,
+            returncode=completed.returncode,
+        )
+
+    # 返回值 1 是警告，打印但不报错
+    if completed.returncode == 1:
+        stderr = completed.stderr.strip()
+        if stderr:
+            print(f"[mkvmerge] Warning: {stderr[:200]}")
+
+
+def _run_ffmpeg_copy(ffmpeg_bin: str, input_video: Path, output: Path) -> None:
+    """用 ffmpeg -c copy 转换格式。"""
+    cmd = [
+        ffmpeg_bin, "-y",
+        "-i", str(input_video),
+        "-map", "0:v:0?",
+        "-map", "0:a:0?",
+        "-c", "copy",
+        "-movflags", "+faststart",
+        str(output),
+    ]
+    # MKV 文件已经过 mkvmerge 处理，bitstream_fatal=False 避免误判
+    run_command(cmd, bitstream_fatal=False)
+    _validate_concat_duration(output, None)
+    _validate_audio_decodable(output, ffmpeg_bin)

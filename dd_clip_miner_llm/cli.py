@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 from pathlib import Path
@@ -356,6 +356,8 @@ def main(argv: list[str] | None = None) -> int:
         _apply_output_overrides(config, args)
         
         # 应用 --concat 参数
+        # Respect config default for concat_videos (splicing). --concat forces enable for full daily/clip concat
+        # with our pre-sanitize/TS/force-full-TS logic. For your splicing purpose, config now has it true (or use --concat).
         if args.concat:
             config["output"]["concat_videos"] = True
         

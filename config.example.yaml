@@ -8,25 +8,47 @@ audio:
 
 # ─── ASR 配置 ─────────────────────────────────
 asr:
-  backend: funasr             # faster_whisper | funasr
-  model: small               # tiny | base | small | medium | large-v3
-  device: auto               # auto | cpu | cuda
-  compute_type: default      # default | float16 | int8
-  language: null             # null=自动 | "zh" | "ja" | "en"
-  beam_size: 5
-  vad_filter: true           # 启用 VAD 过滤静音段
-  initial_prompt: null
-  funasr:
-    model: Qwen/Qwen3-ASR-0.6B
-    hub: hf
-    trust_remote_code: true
-    device: auto
-    batch_size: 1
+  # 模式选择: local（本地模型）或 remote（远程 API）
+  mode: local
+
+  # ========== 本地模式 ==========
+  local:
+    backend: faster_whisper   # faster_whisper | funasr
+
+    # faster_whisper 配置
+    faster_whisper:
+      model: small               # tiny | base | small | medium | large-v3
+      device: auto               # auto | cpu | cuda
+      compute_type: default      # default | float16 | int8
+      language: null             # null=自动 | "zh" | "ja" | "en"
+      beam_size: 5
+      vad_filter: true
+      initial_prompt: null
+
+    # funasr 配置（SenseVoiceSmall / Paraformer）
+    funasr:
+      model: iic/SenseVoiceSmall
+      hub: ms                    # ms=ModelScope, hf=HuggingFace
+      trust_remote_code: true
+      device: auto
+      batch_size: 1
+      timestamp_chunk_seconds: 5  # 每段秒数，用于细粒度时间戳
+      max_workers: 4              # 并发处理 chunk 数
+      language: null
+      vad_model: null
+      punc_model: null
+      spk_model: null
+      generate_kwargs: {}
+
+  # ========== 远程模式 ==========
+  remote:
+    provider: mimo              # mimo（后续可扩展）
+    base_url: https://token-plan-cn.xiaomimimo.com/v1
+    api_key: null
+    api_key_env: MIMO_API_KEY
+    model: mimo-v2.5-asr
+    timestamp_chunk_seconds: 5
     language: null
-    vad_model: null
-    punc_model: null
-    spk_model: null
-    generate_kwargs: {}
 
 # ─── LLM 配置 ─────────────────────────────────
 llm:

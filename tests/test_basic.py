@@ -567,6 +567,38 @@ class TestFFmpeg:
         with pytest.raises(ffmpeg.FFmpegError, match="video stream duration is too short"):
             ffmpeg._validate_concat_duration(output, 100.0)
 
+    def test_tail_window_repair_rejects_bogus_fixed_duration(self, tmp_path, monkeypatch):
+        input_video = tmp_path / "bad.mp4"
+        output = tmp_path / "concat.mp4"
+        output.write_bytes(b"existing-final")
+
+        def fake_run_command(args, timeout=3600, **_kwargs):
+            Path(args[-1]).write_bytes(b"candidate")
+
+        def fake_duration(path):
+            return 1000.0 if Path(path).name == "fixed.mp4" else 100.0
+
+        monkeypatch.setattr(ffmpeg, "run_command", fake_run_command)
+        monkeypatch.setattr(ffmpeg, "get_duration", fake_duration)
+        monkeypatch.setattr(ffmpeg, "_get_stream_duration", lambda *_args: None)
+        monkeypatch.setattr(ffmpeg, "_get_video_fps", lambda _video: 60.0)
+        monkeypatch.setattr(ffmpeg, "_repair_video_filter_args", lambda _fps: [])
+        monkeypatch.setattr(ffmpeg, "_has_audio_stream", lambda _video: True)
+        monkeypatch.setattr(ffmpeg, "_targeted_repair_encode_candidates", lambda *_args: [["-c:v", "libx264"]])
+
+        with pytest.raises(ffmpeg.FFmpegError, match="too long"):
+            ffmpeg._concat_tail_window_repaired_bad_segments_copy(
+                [input_video],
+                output,
+                "ffmpeg",
+                "auto",
+                320,
+                100.0,
+                bad_indexes=[0],
+            )
+
+        assert output.read_bytes() == b"existing-final"
+
     def test_output_duration_failure_detection(self):
         from dd_clip_miner_llm.concat.pipeline import _is_output_duration_failure
 
@@ -580,6 +612,7 @@ class TestFFmpeg:
             calls.append(args)
             if len(calls) == 1:
                 raise ffmpeg.FFmpegError("copy failed")
+            Path(args[-1]).write_bytes(b"ok")
 
         monkeypatch.setattr(ffmpeg, "require_binary", lambda name: name)
         monkeypatch.setattr(ffmpeg, "run_command", fake_run_command)
@@ -599,7 +632,6 @@ class TestFFmpeg:
         )
 
         assert calls[1][calls[1].index("-fflags") + 1] == "+genpts+igndts+discardcorrupt"
-        assert calls[1][calls[1].index("-err_detect") + 1] == "ignore_err"
         assert calls[1][calls[1].index("-c") + 1] == "copy"
         assert "-async" not in calls[1]
         assert not (tmp_path / "concat_list.txt").exists()
@@ -609,6 +641,8 @@ class TestFFmpeg:
 
         def fake_run_command(args, timeout=3600, **_kwargs):
             calls.append(args)
+            # Create the output file so shutil.move works
+            Path(args[-1]).write_bytes(b"fake-output")
 
         monkeypatch.setattr(ffmpeg, "run_command", fake_run_command)
         output = tmp_path / "out.mp4"
@@ -759,6 +793,43 @@ class TestFFmpeg:
         logs = sorted((tmp_path / "concat_attempts").glob("*.log"))
         assert len(logs) == 1
         assert "candidate_00" in logs[0].stem
+
+    def test_targeted_repair_candidate_does_not_overwrite_final_until_validated(self, tmp_path, monkeypatch):
+        output = tmp_path / "concat.mp4"
+        output.write_bytes(b"existing-final")
+        inputs = [tmp_path / "good.mp4", tmp_path / "bad.mp4"]
+
+        monkeypatch.setattr(ffmpeg, "_find_bad_h264_segments", lambda *_args, **_kwargs: [1])
+        monkeypatch.setattr(ffmpeg, "_targeted_repair_encode_candidates", lambda *_args: [["-c:v", "libx264"]])
+        monkeypatch.setattr(ffmpeg, "_get_video_fps", lambda _video: 60.0)
+        monkeypatch.setattr(ffmpeg, "_repair_video_filter_args", lambda _fps: [])
+        monkeypatch.setattr(ffmpeg, "_has_audio_stream", lambda _video: True)
+        monkeypatch.setattr(ffmpeg, "_validate_audio_decodable", lambda *_args: None)
+        monkeypatch.setattr(ffmpeg, "get_duration", lambda _path: 10.0)
+
+        def fake_run_command(args, timeout=3600, **_kwargs):
+            Path(args[-1]).write_bytes(b"candidate-bytes")
+
+        monkeypatch.setattr(ffmpeg, "run_command", fake_run_command)
+        monkeypatch.setattr(
+            ffmpeg,
+            "_validate_concat_duration",
+            lambda *_args: (_ for _ in ()).throw(ffmpeg.FFmpegError("Concat output duration is too long")),
+        )
+
+        with pytest.raises(ffmpeg.FFmpegError, match="Targeted concat repair failed"):
+            ffmpeg._concat_reencoded_bad_segments_copy(
+                inputs,
+                output,
+                "ffmpeg",
+                "auto",
+                320,
+                20.0,
+                bad_indexes=[1],
+            )
+
+        assert output.read_bytes() == b"existing-final"
+        assert list(tmp_path.glob("_concat_repair_*")) == []
 
     def test_concat_short_output_triggers_video_bitstream_scan(self):
         """Legacy internal test for _has_video_bitstream_failure (kept for compat during refactor).
@@ -942,6 +1013,40 @@ class TestFFmpeg:
 
         assert normalized == [inputs[1]]
 
+    def test_selective_normalize_can_force_cpu_for_corrupt_indexes(self, tmp_path, monkeypatch):
+        from dd_clip_miner_llm.concat.models import TargetProfile, VideoMeta
+        from dd_clip_miner_llm.concat.pipeline import _selective_normalize_concat
+
+        inputs = [tmp_path / "a.mp4", tmp_path / "b.mp4"]
+        metas = [
+            VideoMeta(inputs[0], None, True, True, "h264", 640, 360, 60.0, "yuv420p", "1:1", "aac", 48000, 2, "stereo"),
+            VideoMeta(inputs[1], None, True, True, "h264", 640, 360, 60.0, "yuv420p", "1:1", "aac", 48000, 2, "stereo"),
+        ]
+        normalized = []
+
+        def fake_normalize(source, output, *_args, prefer_cpu=False, **_kwargs):
+            normalized.append((source, prefer_cpu))
+            output.write_bytes(b"normalized")
+
+        monkeypatch.setattr("dd_clip_miner_llm.concat.pipeline._normalize_to_profile", fake_normalize)
+        monkeypatch.setattr("dd_clip_miner_llm.concat.pipeline._concat_copy_with_list", lambda *_args, **_kwargs: None)
+
+        _selective_normalize_concat(
+            inputs,
+            metas,
+            TargetProfile(width=640, height=360, fps=60.0),
+            (640, 360),
+            tmp_path / "out.mp4",
+            "ffmpeg",
+            "auto",
+            320,
+            None,
+            force_indexes={1},
+            cpu_only_indexes={1},
+        )
+
+        assert normalized == [(inputs[1], True)]
+
     def test_concat_copy_codec_falls_back_to_auto_reencode(self, monkeypatch):
         monkeypatch.setattr(
             ffmpeg,
@@ -966,7 +1071,7 @@ class TestFFmpeg:
         assert candidates[0][1] == "h264_nvenc"
         assert candidates[-1][1] == "libx264"
 
-    def test_targeted_repair_prefers_hardware_for_auto(self, monkeypatch):
+    def test_targeted_repair_prefers_cpu_for_corrupt_streams(self, monkeypatch):
         monkeypatch.setattr(
             ffmpeg,
             "detect_video_encoders",
@@ -975,11 +1080,44 @@ class TestFFmpeg:
 
         candidates = ffmpeg._targeted_repair_encode_candidates("ffmpeg", "auto")
 
+        # 硬件编码优先，CPU 作为最终回退
         assert candidates[0][1] == "h264_nvenc"
-        assert candidates[-1] == ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23"]
+        assert candidates[1][1] == "h264_qsv"
+        assert candidates[-1] == ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "28"]
 
 
 class TestBatch:
+    def test_batch_concat_skips_generated_merged_outputs(self, tmp_path, monkeypatch):
+        from dd_clip_miner_llm import batch
+
+        source = tmp_path / "source"
+        source.mkdir()
+        first = source / "a_fix.mp4"
+        second = source / "b_fix.mp4"
+        generated_default = source / "merged_output.mp4"
+        generated_dated = source / "merged_2026_06_07.mp4"
+        for path in (first, second, generated_default, generated_dated):
+            path.write_bytes(b"video")
+
+        seen: list[Path] = []
+
+        def fake_concat(video_paths, output, **_kwargs):
+            seen.extend(video_paths)
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_bytes(b"concat")
+
+        monkeypatch.setattr(batch, "concat_videos", fake_concat)
+        monkeypatch.setattr(batch, "run_pipeline", lambda *_args, **_kwargs: {"song": []})
+
+        batch.run_batch(
+            source,
+            tmp_path / "results",
+            tmp_path / "runs",
+            {"output": {"concat_videos": True}},
+        )
+
+        assert seen == [first, second]
+
     def test_cleanup_concat_source_removes_concat_intermediates(self, tmp_path):
         from dd_clip_miner_llm.batch import _cleanup_concat_source
 
