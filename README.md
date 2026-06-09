@@ -1,6 +1,6 @@
 # dd-clip-miner-llm
 
-基于 Whisper ASR + LLM 的直播内容挖掘工具。支持从直播录像中识别和提取：
+基于 ASR + LLM 的直播内容挖掘工具。支持从直播录像中识别和提取：
 
 - 歌曲片段
 - 有趣对话
@@ -18,7 +18,7 @@
 - **智能 LLM**：reasoning followup、工具调用、JSON 修复、歌词搜索
 - **歌曲遗漏复查**：首轮后对未覆盖 ASR 区间二次检查
 - **断点续传**：复用 `01_audio`、`02_asr`、LLM 结果（`progress.json`）
-- **批量 + 多段合并**：`ConcatPipeline` 处理直播分段 H.264 损坏
+- **批量 + 多段合并**：`ConcatPipeline` 处理直播分段 H.264 损坏（mkvmerge 优先 + 6 策略 fallback）
 - **切片命名**：主播词典 + 路径日期 → `【主播】歌名-歌手-YYMMDD`
 - **手动重切**：改 CSV 后 `manual-cut`
 
@@ -107,6 +107,20 @@ ASR 支持两种写法（见 `config.example.yaml`）：
 
 LLM Key 优先环境变量：`LLM_API_KEY`、`DEEPSEEK_API_KEY`、`MIMO_API_KEY` 等，对应 `llm.api_key_env`。
 
+### MiMo ASR 远程配置示例
+
+```yaml
+asr:
+  mode: remote
+  remote:
+    provider: mimo
+    base_url: https://token-plan-cn.xiaomimimo.com/v1
+    api_key: null
+    api_key_env: MIMO_API_KEY
+    model: mimo-v2.5-asr
+    timestamp_chunk_seconds: 5
+```
+
 ## 用法
 
 ### 单视频
@@ -167,7 +181,7 @@ python -m dd_clip_miner_llm manual-cut "D:\runs\某次运行" --config config.ya
 dd-clip-miner-llm/
 ├── pyproject.toml              # 包元数据；可选依赖 [test] [funasr]
 ├── setup.py                    # setuptools 入口（非安装脚本）
-├── install.py / install.yaml   # 推荐安装
+├── install.py / install.yaml   # 推荐安装（install.yaml 为安装配置模板）
 ├── setup_env.py                # 旧版交互安装
 ├── requirements*.txt           # 与 pyproject 同步的 pip 清单
 ├── config*.yaml                # 配置模板
@@ -232,9 +246,20 @@ runs/<run_name>/
 
 `daily_summary` 只写报告，不生成 `03_clips`。
 
-## 视频编码
+## 视频编码与拼接
 
 `output.video_codec` 默认 `copy`。`auto` 或需重编码时按 NVENC → QSV → AMF → libx264 选择。探测：`python -m dd_clip_miner_llm ffmpeg-info`。
+
+多段合并（`--concat`）策略顺序：
+
+1. **DirectCopy** — 参数一致时直接 copy
+2. **MkvMerge** — mkvmerge 处理 H.264 bitstream 损坏（推荐）
+3. **DiscardCorruptCopy** — ffmpeg `+discardcorrupt` 在 demux 层丢弃损坏包
+4. **TargetedRepair** — 只重编码坏段，好段 copy
+5. **SelectiveNormalize** — 只重编码不匹配的段
+6. **FullReencode** — 最后兜底
+
+安装 mkvmerge：`winget install MKVToolNix`。未安装时跳过 MkvMerge 策略。
 
 ## 开发与测试
 
@@ -251,10 +276,13 @@ GitHub Actions（`.github/workflows/tests.yml`）在 Ubuntu + Python 3.10–3.12
 | 现象 | 处理 |
 |------|------|
 | `Binary not found: ffprobe` | 安装完整 FFmpeg |
+| `Binary not found: mkvmerge` | `winget install MKVToolNix` |
 | `cublas64_12.dll is not found` | `pip install -r requirements-cu12.txt`，或接受 CPU 回退 |
 | 中文路径乱码 | 用 PowerShell 7；或 `batch-run` 扫目录 |
-| LLM 返回 0 条 | 查 `02_asr/llm/<type>/` 下 JSON；检查 key / `base_url` |
+| LLM 返回 0 条 | 查 `02_asr/llm/<type>/` 下 JSON；检查 key / `base_url`；网络是否可达 |
 | `clip_naming` 未生效 | 确认 `enabled`、词典路径、路径含日期、`apply_to` |
+| concat 输出时长异常 | 查 `concat_attempts/*.log`；确认输入文件无损坏 |
+| MiMo ASR 连接失败 | 检查 `base_url` 和 `api_key`；确认网络可达 |
 
 ## 与 dd-song-miner-llm 的兼容性
 
