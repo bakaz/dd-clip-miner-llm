@@ -89,6 +89,8 @@ def run_batch(
                     results = run_pipeline(video, run_dir, config, config_path=config_path)
                     if run_dir.resolve() != result_dir.resolve():
                         shutil.copytree(run_dir, result_dir, dirs_exist_ok=True)
+                        shutil.rmtree(run_dir, ignore_errors=True)
+                        print(f"  [cleanup] Removed work dir: {run_dir}")
                     total_count = sum(len(v) for v in results.values()) if isinstance(results, dict) else len(results)
                     item = {
                         "video": str(video),
@@ -201,6 +203,8 @@ def _process_folder_concat(
         # 复制结果
         if run_dir.resolve() != result_dir.resolve():
             shutil.copytree(run_dir, result_dir, dirs_exist_ok=True)
+            shutil.rmtree(run_dir, ignore_errors=True)
+            print(f"  [cleanup] Removed work dir: {run_dir}")
 
         total_count = sum(len(v) for v in results.values()) if isinstance(results, dict) else len(results)
         item = {

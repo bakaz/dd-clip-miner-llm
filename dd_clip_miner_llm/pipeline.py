@@ -123,10 +123,17 @@ def _write_structured_summary(
     reports_dir: Path,
     content_type: str,
     config: dict[str, Any],
+    naming_profile: Any = None,
 ) -> None:
+    # 构建文件名：【streamername】summary-YYMMDD 或 summary
+    if naming_profile and naming_profile.streamer and naming_profile.date:
+        stem = f"【{naming_profile.streamer}】summary-{naming_profile.date}"
+    else:
+        stem = "summary"
+
     for target_dir in (llm_dir, reports_dir / content_type):
         target_dir.mkdir(parents=True, exist_ok=True)
-        (target_dir / "summary.json").write_text(
+        (target_dir / f"{stem}.json").write_text(
             json.dumps(summary, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
@@ -136,7 +143,7 @@ def _write_structured_summary(
             markdown = formatter(summary, config)
         else:
             markdown = "```json\n" + json.dumps(summary, ensure_ascii=False, indent=2) + "\n```\n"
-        (target_dir / "summary.md").write_text(markdown, encoding="utf-8")
+        (target_dir / f"{stem}.md").write_text(markdown, encoding="utf-8")
 
 
 class _OffsetRecognizer:
@@ -690,7 +697,7 @@ def run_pipeline(
                 from .llm import identify_structured_content
                 summary = identify_structured_content(segments, config, recognizer, debug_dir=llm_dir)
 
-            _write_structured_summary(summary or {}, recognizer, llm_dir, reports_dir, content_type, config)
+            _write_structured_summary(summary or {}, recognizer, llm_dir, reports_dir, content_type, config, naming_profile)
             print(f"  Wrote {content_type} summary")
             all_results[content_type] = []
             continue
