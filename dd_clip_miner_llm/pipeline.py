@@ -359,7 +359,7 @@ def _recheck_overlong_song_matches(
     kept_count = 0
     all_rechecked_matches: list[ContentMatch] = []
 
-    for match in matches:
+    for mi, match in enumerate(matches, 1):
         valid_indices = sorted({i for i in match.segment_indices if 0 <= i < len(segments)})
         groups = _split_indices_by_time_gap_for_recheck(
             segments,
@@ -377,7 +377,7 @@ def _recheck_overlong_song_matches(
             continue
 
         recheck_root.mkdir(parents=True, exist_ok=True)
-        for group in groups:
+        for gi, group in enumerate(groups, 1):
             group_start = min(group)
             group_end = max(group)
             group_match = _clone_match_with_indices(match, group)
@@ -386,6 +386,7 @@ def _recheck_overlong_song_matches(
                 continue
 
             rechecked_count += 1
+            print(f"  Song overlong recheck: match {mi}/{len(matches)}, group {gi}/{len(groups)} (segments {group_start}-{group_end})...")
             context_start, context_end = _expand_segment_range(
                 group_start,
                 group_end,
@@ -467,7 +468,7 @@ def _recheck_uncovered_song_segments(
     recheck_root = llm_dir / "missed_recheck"
     recheck_root.mkdir(parents=True, exist_ok=True)
 
-    for start, end in ranges:
+    for ri, (start, end) in enumerate(ranges, 1):
         context_start, context_end = _expand_segment_range(
             start,
             end,
@@ -477,10 +478,12 @@ def _recheck_uncovered_song_segments(
         chunk = segments[context_start:context_end + 1]
         debug_dir = recheck_root / f"{start:06d}_{end:06d}"
         offset_recognizer = _OffsetRecognizer(recognizer, context_start)
+        print(f"  Song missed recheck: processing range {ri}/{len(ranges)} (segments {start}-{end})...")
         rechecked_matches = identify_content(chunk, config, offset_recognizer, debug_dir=debug_dir)
         extra_matches.extend(
             _filter_matches_to_segment_range(rechecked_matches, start, end)
         )
+        print(f"  Song missed recheck: range {ri}/{len(ranges)} done, found {len(rechecked_matches)} match(es)")
 
     if extra_matches:
         (recheck_root / "matches.json").write_text(
@@ -657,7 +660,7 @@ def run_pipeline(
     
     all_results: dict[str, list[ContentResult]] = {}
 
-    for content_type in content_types:
+    for ct_idx, content_type in enumerate(content_types, 1):
         # 获取识别器
         recognizer = get_recognizer(content_type)
         if recognizer is None:
@@ -670,7 +673,7 @@ def run_pipeline(
             print(f"  {content_type}: 已禁用，跳过")
             continue
 
-        print(f"\n  === {content_type} 识别 ===")
+        print(f"\n  === {content_type} 识别 ({ct_idx}/{len(content_types)}) ===")
         llm_dir = asr_dir / "llm" / content_type
         llm_dir.mkdir(parents=True, exist_ok=True)
 

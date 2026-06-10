@@ -647,7 +647,8 @@ def identify_content(
 
     tools = recognizer.get_tools(config)
 
-    for batch_start, batch_segments in batches:
+    for batch_idx, (batch_start, batch_segments) in enumerate(batches, 1):
+        print(f"  LLM batch {batch_idx}/{len(batches)}: segments {batch_start}-{batch_start + len(batch_segments) - 1}...")
         prompt = recognizer.build_prompt(batch_segments, batch_start, config)
         batch_debug: dict[str, Any] = {
             "batch_start": batch_start,
@@ -770,5 +771,6 @@ def identify_content(
         # 使用识别器解析响应
         matches = recognizer.parse_response(items, config)
         all_matches.extend(matches)
+        print(f"  LLM batch {batch_idx}/{len(batches)}: done, found {len(matches)} match(es)")
 
     return all_matches
