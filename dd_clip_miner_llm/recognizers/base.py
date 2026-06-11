@@ -57,6 +57,20 @@ class BaseRecognizer(ABC):
         """
         ...
     
+    def build_system_prompt(self, config: dict[str, Any]) -> str | None:
+        """构建 system message（可选，用于 prompt 压缩）
+        
+        如果返回非 None，LLM 调用时会使用 system message + 精简的 user message，
+        而不是将所有指令放在 user message 中。
+        
+        Args:
+            config: 完整配置字典
+            
+        Returns:
+            system message 内容，或 None 表示不使用
+        """
+        return None
+    
     def get_tools(self, config: dict[str, Any]) -> list[dict[str, Any]] | None:
         """获取 LLM 工具列表（可选）
         

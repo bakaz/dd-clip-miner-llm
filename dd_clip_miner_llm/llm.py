@@ -98,8 +98,20 @@ def call_llm(
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]] | None = None,
     max_tokens_override: int | None = None,
+    max_retries: int = 3,
 ) -> Any:
-    """调用 LLM，返回完整的 response 对象"""
+    """调用 LLM，返回完整的 response 对象
+    
+    Args:
+        client: OpenAI 客户端
+        provider: LLM provider 配置
+        messages: 消息列表
+        tools: 工具定义
+        max_tokens_override: 最大 token 数覆盖
+        max_retries: 最大重试次数（指数退避）
+    """
+    import time
+    
     token_args = (
         {"max_completion_tokens": max_tokens_override}
         if max_tokens_override is not None
@@ -119,6 +131,21 @@ def call_llm(
 
     if tools:
         kwargs["tools"] = tools
+
+    last_exc = None
+    for retry in range(max_retries):
+        try:
+            return client.chat.completions.create(**kwargs)
+        except Exception as exc:
+            last_exc = exc
+            if retry < max_retries - 1:
+                # 指数退避：1s, 2s, 4s
+                wait_time = 2 ** retry
+                print(f"  [llm] API call failed (retry {retry + 1}/{max_retries}, wait {wait_time}s): {exc}")
+                time.sleep(wait_time)
+            continue
+    
+    raise last_exc
 
     return client.chat.completions.create(**kwargs)
 
@@ -525,6 +552,17 @@ def identify_structured_content(
     if not providers:
         raise RuntimeError("LLM API key not configured. Set llm.api_key in config.")
 
+    # 预创建客户端（复用连接）
+    clients: dict[str, Any] = {}
+    for candidate in providers:
+        if not candidate.api_key:
+            continue
+        if candidate.api_key not in clients:
+            client_kwargs: dict[str, Any] = {"api_key": candidate.api_key}
+            if candidate.base_url:
+                client_kwargs["base_url"] = candidate.base_url
+            clients[candidate.api_key] = OpenAI(**client_kwargs)
+
     debug_path = Path(debug_dir) if debug_dir is not None else None
     if debug_path is not None:
         debug_path.mkdir(parents=True, exist_ok=True)
@@ -551,17 +589,21 @@ def identify_structured_content(
             continue
 
         try:
-            client_kwargs: dict[str, Any] = {"api_key": candidate.api_key}
-            if candidate.base_url:
-                client_kwargs["base_url"] = candidate.base_url
-
-            client = OpenAI(**client_kwargs)
+            client = clients[candidate.api_key]
             provider = candidate
             batch_debug["provider"] = {
                 "base_url": candidate.base_url or "openai",
                 "model": candidate.model,
             }
-            response = call_llm(client, candidate, [{"role": "user", "content": prompt}])
+            
+            # 构建 system message（如果识别器支持）
+            system_prompt = hasattr(recognizer, 'build_system_prompt') and recognizer.build_system_prompt(config)
+            messages: list[dict[str, Any]] = []
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            messages.append({"role": "user", "content": prompt})
+            
+            response = call_llm(client, candidate, messages)
             debug = llm_response_debug(response)
             content = debug["content"]
             if not content.strip() and debug["reasoning_content"].strip():
@@ -630,6 +672,17 @@ def identify_content(
     if not providers:
         raise RuntimeError("LLM API key not configured. Set llm.api_key in config.")
 
+    # 预创建客户端（复用连接，减少 TCP 握手开销）
+    clients: dict[str, Any] = {}
+    for provider in providers:
+        if not provider.api_key:
+            continue
+        if provider.api_key not in clients:
+            client_kwargs: dict[str, Any] = {"api_key": provider.api_key}
+            if provider.base_url:
+                client_kwargs["base_url"] = provider.base_url
+            clients[provider.api_key] = OpenAI(**client_kwargs)
+
     batch_size = config["llm"].get("batch_size")
     if batch_size in (None, "", 0, "0"):
         batches = [(0, segments)]
@@ -667,19 +720,22 @@ def identify_content(
         content = None
         last_error = None
 
+        # 构建 system message（如果识别器支持）
+        system_prompt = recognizer.get_tools and hasattr(recognizer, 'build_system_prompt') and recognizer.build_system_prompt(config)
+
         for provider in providers:
             if not provider.api_key:
                 continue
 
             try:
-                client_kwargs: dict[str, Any] = {"api_key": provider.api_key}
-                if provider.base_url:
-                    client_kwargs["base_url"] = provider.base_url
-
-                client = OpenAI(**client_kwargs)
-                messages: list[dict[str, Any]] = [
-                    {"role": "user", "content": prompt}
-                ]
+                client = clients[provider.api_key]
+                messages: list[dict[str, Any]] = []
+                
+                # 添加 system message（如果有）
+                if system_prompt:
+                    messages.append({"role": "system", "content": system_prompt})
+                
+                messages.append({"role": "user", "content": prompt})
 
                 batch_debug["provider"] = {
                     "base_url": provider.base_url or "openai",
