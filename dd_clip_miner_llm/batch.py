@@ -95,7 +95,7 @@ def run_batch(
                     item = {
                         "video": str(video),
                         "video_key": video_key,
-                        "work_dir": str(run_dir),
+                        "work_dir": str(result_dir),  # 指向实际存在的目录
                         "result_dir": str(result_dir),
                         "song_count": total_count,
                         "content_counts": {k: len(v) for k, v in results.items()} if isinstance(results, dict) else {"song": len(results)},
@@ -197,12 +197,11 @@ def _process_folder_concat(
         print(f"[run] Processing concatenated video...")
         results = run_pipeline(concat_output, run_dir, config, config_path=config_path)
 
-        # 清理合并前的临时文件（保留拼接后的视频）
-        _cleanup_concat_source(concat_dir)
-
         # 复制结果
         if run_dir.resolve() != result_dir.resolve():
             shutil.copytree(run_dir, result_dir, dirs_exist_ok=True)
+            # 清理合并前的临时文件（复制成功后再清理，避免复制失败时丢失数据）
+            _cleanup_concat_source(concat_dir)
             shutil.rmtree(run_dir, ignore_errors=True)
             print(f"  [cleanup] Removed work dir: {run_dir}")
 

@@ -648,7 +648,7 @@ def identify_content(
     tools = recognizer.get_tools(config)
 
     for batch_idx, (batch_start, batch_segments) in enumerate(batches, 1):
-        print(f"  LLM batch {batch_idx}/{len(batches)}: segments {batch_start}-{batch_start + len(batch_segments) - 1}...")
+        print(f"  LLM batch {batch_idx}/{len(batches)}: segments {batch_start}-{batch_start + len(batch_segments) - 1} (total {len(segments)})...")
         prompt = recognizer.build_prompt(batch_segments, batch_start, config)
         batch_debug: dict[str, Any] = {
             "batch_start": batch_start,
