@@ -43,6 +43,11 @@ class SongRecognizer(BaseRecognizer):
                 "context_segments": 10,
                 "max_completion_tokens": 4096,
                 "max_tool_rounds": 1,
+                "adaptive": {
+                    "mode": "cost_estimate",
+                    "full_transcript_max_segments": 3500,
+                    "windowed_min_target_ranges": 19,
+                },
             },
             "review": {
                 "enabled": False,
@@ -53,6 +58,12 @@ class SongRecognizer(BaseRecognizer):
                 "max_completion_tokens": 4096,
                 "max_tool_rounds": 1,
                 "fallback": "local_best",
+                "adaptive": {
+                    "mode": "cost_estimate",
+                    "local_max_clusters": 3,
+                    "full_min_clusters": 6,
+                    "full_min_segments": 2000,
+                },
             },
         }
     

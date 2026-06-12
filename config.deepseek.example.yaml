@@ -89,17 +89,52 @@ profiles:
       final_tool_max_tokens: 32768
     song:
       missed_recheck:
-        strategy: full_transcript
+        strategy: adaptive
         fallback_strategy: windowed_on_structural_failure
         max_completion_tokens: 4096
         max_tool_rounds: 1
+        adaptive:
+          mode: cost_estimate
+          cost_margin_ratio: 0.05
+          fallback_penalty: 1.0
+          full_transcript_max_segments: 3500
+          windowed_min_target_ranges: 19
+          pricing:
+            input_cache_hit_per_1m: 0.0028
+            input_cache_miss_per_1m: 0.14
+            output_per_1m: 0.28
+          token_chars_ratio: 0.62
+          estimated_completion_tokens:
+            main: 720
+            review: 420
+            overlong: 360
+            missed_full: 1100
+            missed_window: 360
       review:
         enabled: true
+        transcript_scope: adaptive
         context_segments: 10
         max_window_segments: 500
         max_completion_tokens: 4096
         max_tool_rounds: 1
         fallback: local_best
+        adaptive:
+          mode: cost_estimate
+          cost_margin_ratio: 0.05
+          local_max_clusters: 3
+          full_min_clusters: 6
+          full_min_segments: 2000
+          pricing:
+            input_cache_hit_per_1m: 0.0028
+            input_cache_miss_per_1m: 0.14
+            output_per_1m: 0.28
+          token_chars_ratio: 0.62
+          estimated_completion_tokens:
+            main: 720
+            review: 420
+            overlong: 360
+            missed_full: 1100
+            missed_window: 360
 
 # ─── 时间 padding ─────────────────────────────
 padding:

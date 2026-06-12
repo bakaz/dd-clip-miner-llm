@@ -450,14 +450,15 @@ class TestSongMissedRecheck:
         assert recheck["max_tool_rounds"] == 1
         assert DEFAULT_CONFIG["song"]["padding"]["max_song_seconds"] == 360.0
 
-    def test_shipped_kv_profile_uses_full_transcript_missed_recheck(self):
-        config = load_config("config.deepseek.example.yaml", profile="kv_optimized")
+    def test_shipped_kv_profile_uses_adaptive_missed_recheck(self):
+        config = load_config("config.example.yaml", profile="kv_optimized")
 
-        assert config["song"]["missed_recheck"]["strategy"] == "full_transcript"
+        assert config["song"]["missed_recheck"]["strategy"] == "adaptive"
         assert (
             config["song"]["missed_recheck"]["fallback_strategy"]
             == "windowed_on_structural_failure"
         )
+        assert config["song"]["review"]["transcript_scope"] == "adaptive"
 
     def test_song_normalization_splits_disjoint_ranges_and_deduplicates(self):
         from dd_clip_miner_llm.pipeline import _normalize_song_matches
@@ -2506,7 +2507,7 @@ class TestCLI:
         assert run_args.profile == "kv_optimized"
         assert batch_args.profile == "accuracy"
 
-    def test_generated_config_enables_full_transcript_for_kv_profile(self):
+    def test_generated_config_enables_adaptive_strategies_for_kv_profile(self):
         import yaml
 
         from dd_clip_miner_llm.cli import _generate_config_yaml
@@ -2514,12 +2515,290 @@ class TestCLI:
         config = yaml.safe_load(_generate_config_yaml())
 
         missed = config["profiles"]["kv_optimized"]["song"]["missed_recheck"]
-        assert missed == {
-            "strategy": "full_transcript",
-            "fallback_strategy": "windowed_on_structural_failure",
-            "max_completion_tokens": 4096,
-            "max_tool_rounds": 1,
+        review = config["profiles"]["kv_optimized"]["song"]["review"]
+        assert missed["strategy"] == "adaptive"
+        assert missed["fallback_strategy"] == "windowed_on_structural_failure"
+        assert review["transcript_scope"] == "adaptive"
+
+    def test_adaptive_review_scope_prefers_local_for_few_clusters(self):
+        from dd_clip_miner_llm.song_adaptive import resolve_review_transcript_scope
+
+        config = {
+            "_profile_name": "kv_optimized",
+            "llm": {"cache_friendly_prompt_layout": True},
+            "song": {
+                "review": {
+                    "transcript_scope": "adaptive",
+                    "adaptive": {"mode": "heuristic"},
+                }
+            },
         }
+        scope, reason, _details = resolve_review_transcript_scope(
+            config,
+            cluster_count=2,
+            segment_count=3211,
+        )
+        assert scope == "local"
+        assert reason.startswith("adaptive_clusters_le_")
+
+    def test_adaptive_review_scope_prefers_full_for_many_clusters(self):
+        from dd_clip_miner_llm.song_adaptive import resolve_review_transcript_scope
+
+        config = {
+            "_profile_name": "kv_optimized",
+            "llm": {"cache_friendly_prompt_layout": True},
+            "song": {
+                "review": {
+                    "transcript_scope": "adaptive",
+                    "adaptive": {"mode": "heuristic"},
+                }
+            },
+        }
+        scope, reason, _details = resolve_review_transcript_scope(
+            config,
+            cluster_count=9,
+            segment_count=2875,
+        )
+        assert scope == "full"
+        assert "clusters_ge_6" in reason
+        assert "segments_ge_2000" in reason
+
+    def test_adaptive_review_scope_forces_local_on_accuracy_profile(self):
+        from dd_clip_miner_llm.song_adaptive import resolve_review_transcript_scope
+
+        config = {
+            "_profile_name": "accuracy",
+            "llm": {"cache_friendly_prompt_layout": False},
+            "song": {"review": {"transcript_scope": "adaptive"}},
+        }
+        scope, reason, _details = resolve_review_transcript_scope(
+            config,
+            cluster_count=12,
+            segment_count=3211,
+        )
+        assert scope == "local"
+        assert reason == "accuracy_profile_forced_local"
+
+    def test_adaptive_missed_recheck_prefers_windowed_for_many_targets(self):
+        from dd_clip_miner_llm.song_adaptive import resolve_missed_recheck_strategy
+
+        config = {
+            "_profile_name": "kv_optimized",
+            "llm": {"cache_friendly_prompt_layout": True},
+            "song": {
+                "missed_recheck": {
+                    "strategy": "adaptive",
+                    "adaptive": {"mode": "heuristic"},
+                }
+            },
+        }
+        strategy, reason, _details = resolve_missed_recheck_strategy(
+            config,
+            segment_count=2875,
+            target_range_count=20,
+        )
+        assert strategy == "windowed"
+        assert "target_ranges_ge_" in reason
+
+    def test_adaptive_missed_recheck_prefers_full_for_kv_friendly_stream(self):
+        from dd_clip_miner_llm.song_adaptive import resolve_missed_recheck_strategy
+
+        config = {
+            "_profile_name": "kv_optimized",
+            "llm": {"cache_friendly_prompt_layout": True},
+            "song": {
+                "missed_recheck": {
+                    "strategy": "adaptive",
+                    "adaptive": {"mode": "heuristic"},
+                }
+            },
+        }
+        strategy, reason, _details = resolve_missed_recheck_strategy(
+            config,
+            segment_count=2875,
+            target_range_count=14,
+        )
+        assert strategy == "full_transcript"
+        assert reason == "adaptive_kv_friendly_full_audit"
+
+    def test_adaptive_missed_recheck_forces_windowed_on_accuracy_profile(self):
+        from dd_clip_miner_llm.song_adaptive import resolve_missed_recheck_strategy
+
+        config = {
+            "_profile_name": "accuracy",
+            "llm": {"cache_friendly_prompt_layout": False},
+            "song": {"missed_recheck": {"strategy": "adaptive"}},
+        }
+        strategy, reason, _details = resolve_missed_recheck_strategy(
+            config,
+            segment_count=2875,
+            target_range_count=14,
+        )
+        assert strategy == "windowed"
+        assert reason == "accuracy_profile_forced_windowed"
+
+    def test_joint_adaptive_strategies_picks_minimum_total(self):
+        from dd_clip_miner_llm.models import ContentMatch, TranscriptSegment
+        from dd_clip_miner_llm.song_adaptive import resolve_song_adaptive_strategies
+
+        segments = [
+            TranscriptSegment(start=float(i), end=float(i + 1), text=f"歌词片段{i}" * 12)
+            for i in range(2875)
+        ]
+        clusters = []
+        for index in range(9):
+            start = 100 + index * 280
+            end = start + 479
+            clusters.append([
+                ContentMatch(
+                    content_type="song",
+                    title=f"未知歌曲：测试{index}",
+                    artist="",
+                    segment_indices=list(range(start, end)),
+                    confidence=0.5,
+                    tags=[],
+                    description="",
+                ),
+            ])
+        config = {
+            "_profile_name": "kv_optimized",
+            "llm": {"cache_friendly_prompt_layout": True},
+            "song": {
+                "review": {
+                    "transcript_scope": "adaptive",
+                    "context_segments": 10,
+                    "max_window_segments": 500,
+                    "adaptive": {"mode": "cost_estimate"},
+                },
+                "missed_recheck": {
+                    "strategy": "adaptive",
+                    "adaptive": {"mode": "cost_estimate"},
+                },
+            },
+        }
+        joint = resolve_song_adaptive_strategies(
+            config,
+            clusters=clusters,
+            segments=segments,
+            matches=[],
+            target_ranges=[(10, 40), (500, 530)],
+        )
+        assert joint["resolution_mode"] == "joint_cost_estimate"
+        assert len(joint["combinations"]) == 4
+        min_combo = min(joint["combinations"], key=lambda item: item["total_usd"])
+        assert joint["review_scope_resolved"] == min_combo["review_scope"]
+        assert joint["missed_strategy_resolved"] == min_combo["missed_strategy"]
+        assert joint["chosen_total_usd"] == min_combo["total_usd"]
+        assert "main_cost_usd" in joint
+        assert "overlong_cost_usd" in joint
+        assert "review_before_cost_usd" in joint
+        assert "review_after_cost_usd" in joint
+        assert min_combo["main_cost_usd"] == joint["main_cost_usd"]
+
+    def test_pipeline_joint_cost_includes_review_after_discount_for_full_transcript(self):
+        from dd_clip_miner_llm.models import ContentMatch, TranscriptSegment
+        from dd_clip_miner_llm.song_adaptive_cost import (
+            estimate_review_after_cost,
+            estimate_review_cost,
+        )
+
+        segments = [
+            TranscriptSegment(start=float(i), end=float(i + 1), text=f"歌词片段{i}" * 12)
+            for i in range(400)
+        ]
+        cluster = [
+            ContentMatch(
+                content_type="song",
+                title="未知歌曲：测试",
+                artist="",
+                segment_indices=list(range(120, 180)),
+                confidence=0.5,
+                tags=[],
+                description="",
+            ),
+        ]
+        config = {
+            "_profile_name": "kv_optimized",
+            "llm": {"cache_friendly_prompt_layout": True},
+            "song": {
+                "review": {
+                    "enabled": True,
+                    "transcript_scope": "adaptive",
+                    "context_segments": 10,
+                    "max_window_segments": 500,
+                    "adaptive": {"mode": "cost_estimate"},
+                },
+            },
+        }
+        before = estimate_review_cost(
+            config,
+            scope="local",
+            clusters=[cluster],
+            segments=segments,
+        )
+        after_windowed = estimate_review_after_cost(
+            config,
+            scope="local",
+            missed_strategy="windowed",
+            clusters=[cluster],
+            segments=segments,
+            target_ranges=[(120, 180)],
+        )
+        after_full = estimate_review_after_cost(
+            config,
+            scope="local",
+            missed_strategy="full_transcript",
+            clusters=[cluster],
+            segments=segments,
+            target_ranges=[(120, 180)],
+        )
+        assert after_windowed.total_usd == before.total_usd
+        assert after_full.total_usd == 0.0
+
+    def test_adaptive_review_cost_estimate_prefers_full_for_many_clusters(self):
+        from dd_clip_miner_llm.models import ContentMatch, TranscriptSegment
+        from dd_clip_miner_llm.song_adaptive import resolve_review_transcript_scope
+
+        segments = [
+            TranscriptSegment(start=float(i), end=float(i + 1), text=f"歌词片段{i}" * 12)
+            for i in range(2875)
+        ]
+        clusters = []
+        for index in range(9):
+            start = 100 + index * 280
+            end = start + 479
+            clusters.append([
+                ContentMatch(
+                    content_type="song",
+                    title=f"未知歌曲：测试{index}",
+                    artist="",
+                    segment_indices=list(range(start, end)),
+                    confidence=0.5,
+                    tags=[],
+                    description="",
+                ),
+            ])
+        config = {
+            "_profile_name": "kv_optimized",
+            "llm": {"cache_friendly_prompt_layout": True},
+            "song": {
+                "review": {
+                    "transcript_scope": "adaptive",
+                    "context_segments": 10,
+                    "max_window_segments": 500,
+                    "adaptive": {"mode": "cost_estimate"},
+                }
+            },
+        }
+        scope, reason, details = resolve_review_transcript_scope(
+            config,
+            clusters=clusters,
+            segments=segments,
+        )
+        assert scope == "full"
+        assert reason.startswith("adaptive_cost_")
+        assert details["adaptive_mode"] == "cost_estimate"
+        assert details["cost_estimate_full_usd"] < details["cost_estimate_local_usd"]
 
     def test_build_parser_manual_cut(self):
         from dd_clip_miner_llm.cli import build_parser

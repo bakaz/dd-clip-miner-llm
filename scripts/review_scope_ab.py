@@ -118,12 +118,10 @@ def _seed_run_dir(fixture: Path, out_dir: Path) -> tuple[Path, Path]:
     asr_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(fixture / "02_asr" / "transcript.json", asr_dir / "transcript.json")
 
-    video = out_dir / "00_input" / "input_82fc64d326a0.flv"
-    if not video.exists():
-        inputs = list((out_dir / "00_input").glob("*"))
-        if not inputs:
-            raise FileNotFoundError(f"No input video under {out_dir / '00_input'}")
-        video = inputs[0]
+    inputs = sorted((out_dir / "00_input").glob("*"))
+    if not inputs:
+        raise FileNotFoundError(f"No input video under {out_dir / '00_input'}")
+    video = inputs[0]
 
     progress = {
         "input_video": str(video.resolve()),
@@ -268,14 +266,24 @@ def _evaluate_run(profile_llm_dir: Path) -> dict[str, Any]:
     }
 
 
+def _default_run_id(fixture: Path) -> str:
+    name = fixture.name
+    if "-" in name:
+        suffix = name.rsplit("-", 1)[-1].strip()
+        if suffix:
+            return suffix
+    return name
+
+
 def _run_variant(
     *,
     fixture: Path,
     out_root: Path,
     scope: str,
     config_path: Path,
+    run_id: str,
 ) -> dict[str, Any]:
-    out_dir = out_root / f"260610_ab_{scope}"
+    out_dir = out_root / f"{run_id}_ab_{scope}"
     if out_dir.exists():
         shutil.rmtree(out_dir)
     _, video = _seed_run_dir(fixture, out_dir)
@@ -299,9 +307,15 @@ def _run_variant(
     return metrics
 
 
-def _write_report(report_path: Path, local: dict[str, Any], full: dict[str, Any]) -> None:
+def _write_report(
+    report_path: Path,
+    local: dict[str, Any],
+    full: dict[str, Any],
+    *,
+    run_id: str,
+) -> None:
     lines = [
-        "# Review transcript_scope A/B (260610_original)",
+        f"# Review transcript_scope A/B ({run_id})",
         "",
         f"Fixture: `{local.get('fixture', '')}`",
         "",
@@ -362,21 +376,16 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "fixture",
-        nargs="?",
-        default=(
-            ROOT
-            / "results"
-            / "2026_06_10"
-            / "example_fixture_run"
-        ),
-        help="Legacy run directory with 00_input, 01_audio, 02_asr/transcript.json",
+        help="Run directory with 00_input, 01_audio, 02_asr/transcript.json",
     )
     parser.add_argument("--config", default=str(ROOT / "config.yaml"))
     parser.add_argument("--out-root", default=str(ROOT / ".tmp"))
-    parser.add_argument("--report", default=str(ROOT / ".tmp" / "review_scope_ab_260610.json"))
+    parser.add_argument("--run-id", default=None, help="Output dir suffix; default from fixture name")
+    parser.add_argument("--report", default=None, help="Report JSON path; default .tmp/review_scope_ab_<run-id>.json")
     args = parser.parse_args()
 
     fixture = Path(args.fixture).resolve()
+    run_id = str(args.run_id or _default_run_id(fixture))
     if not (fixture / "02_asr" / "transcript.json").exists():
         print(f"Missing ASR fixture: {fixture}")
         return 1
@@ -389,20 +398,24 @@ def main() -> int:
         out_root=out_root,
         scope="local",
         config_path=Path(args.config),
+        run_id=run_id,
     )
     local["fixture"] = str(fixture)
+    local["run_id"] = run_id
 
     full = _run_variant(
         fixture=fixture,
         out_root=out_root,
         scope="full",
         config_path=Path(args.config),
+        run_id=run_id,
     )
     full["fixture"] = str(fixture)
+    full["run_id"] = run_id
 
-    report_path = Path(args.report)
+    report_path = Path(args.report or (ROOT / ".tmp" / f"review_scope_ab_{run_id}.json"))
     report_path.parent.mkdir(parents=True, exist_ok=True)
-    _write_report(report_path, local, full)
+    _write_report(report_path, local, full, run_id=run_id)
 
     print(f"\nReport: {report_path}")
     print(f"Markdown: {report_path.with_suffix('.md')}")

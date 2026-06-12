@@ -8,6 +8,12 @@ from typing import Any
 
 from .config import get_padding_config
 from .models import ContentMatch, TranscriptSegment
+from .song_adaptive import (
+    ensure_song_adaptive_strategies,
+    load_adaptive_strategies_cache,
+    resolve_missed_recheck_strategy,
+    resolve_review_transcript_scope,
+)
 
 from .profile_state import (
     _config_fingerprint,
@@ -998,13 +1004,24 @@ def _review_song_matches(
     review_root.mkdir(parents=True, exist_ok=True)
     full_audit: dict[str, Any] | None = None
     full_audit_candidate_keys: set[tuple[str, tuple[int, ...]]] | None = None
+    missed_strategy = str(
+        config.get("song", {}).get("missed_recheck", {}).get("strategy", "windowed")
+    ).strip().lower()
+    missed_audit_path = llm_dir / "missed_recheck" / "audit.json"
+    missed_strategy_resolved = missed_strategy
+    if missed_audit_path.exists():
+        try:
+            missed_audit = json.loads(missed_audit_path.read_text(encoding="utf-8"))
+            missed_strategy_resolved = str(
+                missed_audit.get("strategy_resolved")
+                or missed_audit.get("strategy")
+                or missed_strategy
+            ).strip().lower()
+        except (OSError, json.JSONDecodeError):
+            missed_strategy_resolved = missed_strategy
     if (
         phase == "after_missed_recheck"
-        and str(
-            config.get("song", {})
-            .get("missed_recheck", {})
-            .get("strategy", "windowed")
-        ).strip().lower() == "full_transcript"
+        and missed_strategy_resolved == "full_transcript"
     ):
         full_audit_path = llm_dir / "missed_recheck" / "audit.json"
         try:
@@ -1024,6 +1041,85 @@ def _review_song_matches(
     searched_titles = _load_searched_titles(llm_dir)
     context_segments = int(review_config.get("context_segments", 10) or 0)
     max_window_segments = int(review_config.get("max_window_segments", 500) or 500)
+    transcript_scope_requested = str(
+        review_config.get("transcript_scope", "local")
+    ).strip().lower()
+    scope_cost_details: dict[str, Any] = {}
+    if phase == "before_missed_recheck":
+        min_gap_segments = int(
+            config.get("song", {}).get("missed_recheck", {}).get("min_gap_segments", 1) or 1
+        )
+        min_song_seconds = float(
+            get_padding_config(config, "song").get("min_song_seconds", 75.0)
+        )
+        preview_ranges, _ = _filter_short_segment_ranges(
+            segments,
+            _uncovered_segment_ranges(
+                len(segments),
+                normalized,
+                min_gap_segments=min_gap_segments,
+            ),
+            min_song_seconds,
+        )
+        adaptive_resolution = ensure_song_adaptive_strategies(
+            llm_dir,
+            config,
+            clusters=clusters,
+            segments=segments,
+            matches=normalized,
+            target_ranges=preview_ranges,
+            recognizer=recognizer,
+        )
+    else:
+        adaptive_resolution = load_adaptive_strategies_cache(llm_dir) or {}
+
+    if adaptive_resolution.get("review_scope_resolved"):
+        transcript_scope = str(adaptive_resolution["review_scope_resolved"])
+        transcript_scope_reason = str(adaptive_resolution.get("reason", "cached_joint"))
+        scope_cost_details = dict(adaptive_resolution.get("review_details") or {})
+        if scope_cost_details:
+            scope_cost_details["joint_resolution_mode"] = adaptive_resolution.get(
+                "resolution_mode"
+            )
+            scope_cost_details["joint_combinations"] = adaptive_resolution.get(
+                "combinations",
+                []
+            )
+            scope_cost_details["joint_chosen_total_usd"] = adaptive_resolution.get(
+                "chosen_total_usd"
+            )
+    else:
+        transcript_scope, transcript_scope_reason, scope_cost_details = (
+            resolve_review_transcript_scope(
+                config,
+                clusters=clusters,
+                segments=segments,
+                recognizer=recognizer,
+            )
+        )
+
+    if (
+        phase == "before_missed_recheck"
+        and adaptive_resolution.get("resolution_mode") == "joint_cost_estimate"
+    ):
+        print(
+            "  Song adaptive (joint): "
+            f"review={adaptive_resolution.get('review_scope_resolved')} + "
+            f"missed={adaptive_resolution.get('missed_strategy_resolved')} "
+            f"({adaptive_resolution.get('reason')}, "
+            f"pipeline=${adaptive_resolution.get('chosen_total_usd')}, "
+            f"main=${adaptive_resolution.get('main_cost_usd')}, "
+            f"review_before=${adaptive_resolution.get('review_before_cost_usd')}, "
+            f"overlong=${adaptive_resolution.get('overlong_cost_usd')}, "
+            f"missed=${adaptive_resolution.get('missed_cost_usd')}, "
+            f"review_after=${adaptive_resolution.get('review_after_cost_usd')})"
+        )
+    elif transcript_scope != transcript_scope_requested:
+        print(
+            f"  Song review ({phase}): adaptive transcript_scope "
+            f"{transcript_scope_requested} -> {transcript_scope} "
+            f"({transcript_scope_reason}, clusters={len(clusters)})"
+        )
     resolved: list[ContentMatch] = []
     cluster_member_ids = {id(match) for cluster in clusters for match in cluster}
     resolved.extend(match for match in normalized if id(match) not in cluster_member_ids)
@@ -1059,13 +1155,6 @@ def _review_song_matches(
         review_succeeded = False
         audit_path = review_root / f"cluster_{cluster_index:03d}.json"
         cluster_span = target_end - target_start + 1
-        transcript_scope = "local"
-        if str(config.get("_profile_name") or "") != "accuracy":
-            transcript_scope = str(
-                review_config.get("transcript_scope", "local")
-            ).strip().lower()
-        if transcript_scope not in {"local", "full"}:
-            transcript_scope = "local"
         debug_phase = (
             "review_before"
             if phase == "before_missed_recheck"
@@ -1211,6 +1300,10 @@ def _review_song_matches(
         "normalized_count": len(normalized),
         "cluster_count": len(clusters),
         "output_count": len(final_matches),
+        "transcript_scope_requested": transcript_scope_requested,
+        "transcript_scope_resolved": transcript_scope,
+        "transcript_scope_reason": transcript_scope_reason,
+        **scope_cost_details,
         "normalization_events": normalization_events,
         "final_normalization_events": final_events,
         "full_transcript_sanitation_events": sanitation_events,
@@ -1565,14 +1658,86 @@ def _recheck_uncovered_song_segments(
     if recheck_config.get("enabled", True) is False:
         return matches
 
-    strategy = str(recheck_config.get("strategy", "windowed")).strip().lower()
-    if strategy not in {"windowed", "full_transcript"}:
-        raise ValueError(
-            "song.missed_recheck.strategy must be 'windowed' or 'full_transcript'"
-        )
+    strategy_requested = str(recheck_config.get("strategy", "windowed")).strip().lower()
 
     recheck_root = llm_dir / "missed_recheck"
     recheck_root.mkdir(parents=True, exist_ok=True)
+
+    min_gap_segments = int(recheck_config.get("min_gap_segments", 1) or 1)
+    min_song_seconds = float(
+        get_padding_config(config, "song").get("min_song_seconds", 75.0)
+    )
+    preview_ranges, _ = _filter_short_segment_ranges(
+        segments,
+        _uncovered_segment_ranges(
+            len(segments),
+            matches,
+            min_gap_segments=min_gap_segments,
+        ),
+        min_song_seconds,
+    )
+    adaptive_resolution = load_adaptive_strategies_cache(llm_dir) or {}
+    if not adaptive_resolution:
+        review_config = config.get("song", {}).get("review", {})
+        normalized, _, suspicious = _normalize_song_matches(segments, config, matches)
+        max_cluster_span = max(
+            1,
+            int(review_config.get("max_window_segments", 500) or 500)
+            - 2 * int(review_config.get("context_segments", 10) or 0),
+        )
+        clusters = (
+            _build_song_review_clusters(
+                normalized,
+                suspicious,
+                max_span_segments=max_cluster_span,
+                nearby_title_conflict_gap_segments=int(
+                    review_config.get("nearby_title_conflict_gap_segments", 2) or 0
+                ),
+            )
+            if review_config.get("enabled", False)
+            else []
+        )
+        adaptive_resolution = ensure_song_adaptive_strategies(
+            llm_dir,
+            config,
+            clusters=clusters,
+            segments=segments,
+            matches=normalized,
+            target_ranges=preview_ranges,
+            recognizer=recognizer,
+        )
+    if adaptive_resolution.get("missed_strategy_resolved"):
+        strategy = str(adaptive_resolution["missed_strategy_resolved"])
+        strategy_reason = str(adaptive_resolution.get("reason", "cached_joint"))
+        strategy_cost_details = dict(adaptive_resolution.get("missed_details") or {})
+        if strategy_cost_details:
+            strategy_cost_details["joint_resolution_mode"] = adaptive_resolution.get(
+                "resolution_mode"
+            )
+            strategy_cost_details["joint_combinations"] = adaptive_resolution.get(
+                "combinations",
+                []
+            )
+            strategy_cost_details["joint_chosen_total_usd"] = adaptive_resolution.get(
+                "chosen_total_usd"
+            )
+    else:
+        strategy, strategy_reason, strategy_cost_details = resolve_missed_recheck_strategy(
+            config,
+            segments=segments,
+            matches=matches,
+            target_ranges=preview_ranges,
+            recognizer=recognizer,
+        )
+    if (
+        strategy != strategy_requested
+        and adaptive_resolution.get("resolution_mode") != "joint_cost_estimate"
+    ):
+        print(
+            f"  Song missed recheck: adaptive strategy {strategy_requested} -> "
+            f"{strategy} ({strategy_reason}, targets={len(preview_ranges)})"
+        )
+
     if strategy == "windowed":
         extra_matches, active_files = _run_windowed_missed_recheck(
             segments,
@@ -1591,6 +1756,10 @@ def _recheck_uncovered_song_segments(
             json.dumps(
                 {
                     "strategy": "windowed",
+                    "strategy_requested": strategy_requested,
+                    "strategy_resolved": strategy,
+                    "strategy_reason": strategy_reason,
+                    **strategy_cost_details,
                     "status": "success",
                     "fallback_used": False,
                     "active_debug_files": active_files,
@@ -1604,10 +1773,6 @@ def _recheck_uncovered_song_segments(
         )
         return finalized_matches
 
-    min_gap_segments = int(recheck_config.get("min_gap_segments", 1) or 1)
-    min_song_seconds = float(
-        get_padding_config(config, "song").get("min_song_seconds", 75.0)
-    )
     target_ranges, skipped_short = _filter_short_segment_ranges(
         segments,
         _uncovered_segment_ranges(
@@ -1704,6 +1869,10 @@ def _recheck_uncovered_song_segments(
     )
     audit: dict[str, Any] = {
         "strategy": "full_transcript",
+        "strategy_requested": strategy_requested,
+        "strategy_resolved": strategy,
+        "strategy_reason": strategy_reason,
+        **strategy_cost_details,
         "status": "success" if not structural_failures else "structural_failure",
         "fallback_strategy": fallback_strategy,
         "fallback_used": False,

@@ -103,6 +103,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "context_segments": 10,
             "max_completion_tokens": 4096,
             "max_tool_rounds": 1,
+            "adaptive": {
+                "full_transcript_max_segments": 3500,
+                "windowed_min_target_ranges": 19,
+            },
         },
         "review": {
             "enabled": False,
@@ -113,6 +117,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "max_tool_rounds": 1,
             "fallback": "local_best",
             "nearby_title_conflict_gap_segments": 2,
+            "adaptive": {
+                "local_max_clusters": 3,
+                "full_min_clusters": 6,
+                "full_min_segments": 2000,
+            },
         },
     },
     # 对话识别配置
@@ -286,6 +295,9 @@ def load_config(
         config.setdefault("song", {}).setdefault("review", {})[
             "transcript_scope"
         ] = "local"
+        config.setdefault("song", {}).setdefault("missed_recheck", {})[
+            "strategy"
+        ] = "windowed"
     return _migrate_padding_config(config)
 
 
