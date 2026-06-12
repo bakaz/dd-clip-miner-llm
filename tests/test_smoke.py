@@ -145,6 +145,179 @@ class TestLLM:
         assert items == []
         assert is_valid is False
 
+    def test_bare_llm_config_defaults_to_task_first_layout(self, sample_segments):
+        from dd_clip_miner_llm.llm import build_llm_messages
+
+        messages = build_llm_messages(
+            get_recognizer("song"),
+            sample_segments,
+            0,
+            {"llm": {}},
+        )
+
+        assert messages[0]["role"] == "user"
+        assert "ASR 转写开始" not in messages[0]["content"]
+
+    def test_debug_store_requests_disabled_omits_messages(self, sample_segments, config, tmp_path):
+        from dd_clip_miner_llm.llm import identify_content, write_llm_debug
+
+        config["llm"]["debug_store_requests"] = False
+        config["llm"]["reuse_valid_batches"] = False
+        debug_dir = tmp_path / "debug"
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "batch_start": 0,
+            "parsed_items": [],
+            "parse_valid": True,
+            "usage": [],
+        }
+        write_llm_debug(debug_dir, 0, payload)
+        saved = json.loads((debug_dir / "llm_batch_000000.json").read_text(encoding="utf-8"))
+        assert "request_messages" not in saved
+
+    def test_batch_cache_reuse_and_invalidation(self, sample_segments, config, tmp_path):
+        from dd_clip_miner_llm.llm import (
+            build_llm_messages,
+            build_request_debug_metadata,
+            build_providers,
+            identify_content,
+            write_llm_debug,
+        )
+
+        config["llm"]["reuse_valid_batches"] = True
+        config["llm"]["debug_store_requests"] = False
+        config["llm"]["api_key"] = "test-key"
+        config["llm"]["use_tools"] = False
+        recognizer = get_recognizer("song")
+        provider = build_providers(config)[0]
+        messages = build_llm_messages(recognizer, sample_segments, 0, config)
+        metadata = build_request_debug_metadata(
+            messages,
+            config=config,
+            provider=provider,
+            recognizer=recognizer,
+            segments=sample_segments,
+            batch_start=0,
+            tools=None,
+            debug_phase="main",
+        )
+        debug_dir = tmp_path / "debug"
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        write_llm_debug(debug_dir, 0, {
+            **metadata,
+            "provider": {
+                "base_url": provider.base_url or "openai",
+                "model": provider.model,
+            },
+            "raw_response": "[{\"title\":\"cached\"}]",
+            "parsed_items": [{
+                "content_type": "song",
+                "title": "cached",
+                "segment_indices": [0],
+                "confidence": 0.9,
+                "tags": [],
+                "description": "",
+                "artist": "",
+            }],
+            "parse_valid": True,
+            "usage": [{
+                "prompt_cache_hit_tokens": 100,
+                "prompt_cache_miss_tokens": 20,
+                "completion_tokens": 3,
+            }],
+            "tool_rounds": [],
+            "json_fix_rounds": [],
+            "reasoning_followups": [],
+        })
+
+        def fail_call_llm(*_args, **_kwargs):
+            raise AssertionError("cached batch should not call LLM")
+
+        import dd_clip_miner_llm.llm as llm_module
+        original = llm_module.call_llm
+        llm_module.call_llm = fail_call_llm
+        try:
+            matches = identify_content(
+                sample_segments,
+                config,
+                recognizer,
+                debug_dir=debug_dir,
+                debug_phase="main",
+            )
+        finally:
+            llm_module.call_llm = original
+
+        assert len(matches) == 1
+        assert matches[0].title == "cached"
+        saved = json.loads(
+            (debug_dir / "llm_batch_000000.json").read_text(encoding="utf-8")
+        )
+        assert saved["usage"][0]["prompt_cache_miss_tokens"] == 20
+        assert saved["provider"]["model"] == provider.model
+        assert saved["raw_response"] == "[{\"title\":\"cached\"}]"
+        assert saved["cache_reuse"]["count"] == 1
+
+        llm_module.call_llm = fail_call_llm
+        try:
+            identify_content(
+                sample_segments,
+                config,
+                recognizer,
+                debug_dir=debug_dir,
+                debug_phase="main",
+            )
+        finally:
+            llm_module.call_llm = original
+        saved = json.loads(
+            (debug_dir / "llm_batch_000000.json").read_text(encoding="utf-8")
+        )
+        assert saved["usage"][0]["prompt_cache_miss_tokens"] == 20
+        assert saved["cache_reuse"]["count"] == 2
+
+        config["llm"]["model"] = "different-model"
+        called = {"value": False}
+
+        def mark_call_llm(*_args, **_kwargs):
+            called["value"] = True
+            raise RuntimeError("model changed, cache should miss")
+
+        llm_module.call_llm = mark_call_llm
+        try:
+            matches_after_change = identify_content(
+                sample_segments,
+                config,
+                recognizer,
+                debug_dir=debug_dir,
+                debug_phase="main",
+            )
+        finally:
+            llm_module.call_llm = original
+        assert called["value"] is True
+        assert matches_after_change == []
+
+    def test_batch_cache_rejects_top_level_and_tool_truncation(self):
+        from dd_clip_miner_llm.llm import batch_debug_is_reusable
+
+        metadata = {"request_fingerprint": "same"}
+        base = {
+            **metadata,
+            "error": None,
+            "parse_valid": True,
+            "json_fix_rounds": [],
+            "reasoning_followups": [],
+            "tool_rounds": [],
+        }
+
+        assert batch_debug_is_reusable(base, expected_metadata=metadata)
+        assert not batch_debug_is_reusable(
+            {**base, "finish_reason": "length"},
+            expected_metadata=metadata,
+        )
+        assert not batch_debug_is_reusable(
+            {**base, "tool_rounds": [{"finish_reason": "length"}]},
+            expected_metadata=metadata,
+        )
+
     def test_cache_friendly_messages_share_transcript_prefix(self, sample_segments, config):
         from dd_clip_miner_llm.llm import build_llm_messages
 
@@ -465,6 +638,23 @@ class TestCLI:
         parser = build_parser()
         args = parser.parse_args(["run", "test.mp4", "--content-types", "song,cringe"])
         assert args.content_types == "song,cringe"
+
+    def test_resolve_profile_all_order(self, tmp_path):
+        from dd_clip_miner_llm.cli import _resolve_profile_names
+
+        config_file = tmp_path / "profiles.yaml"
+        config_file.write_text(
+            "default_profile: kv_optimized\n"
+            "profiles:\n"
+            "  accuracy: {}\n"
+            "  kv_optimized: {}\n",
+            encoding="utf-8",
+        )
+
+        assert _resolve_profile_names(config_file, "all") == [
+            "kv_optimized",
+            "accuracy",
+        ]
 
 
 # ============ 7. 工具函数测试 ============

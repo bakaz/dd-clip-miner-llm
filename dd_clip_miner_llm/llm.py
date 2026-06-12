@@ -11,10 +11,12 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from .models import ContentMatch, TranscriptSegment
+from .profile_state import _fingerprint_payload
 from .recognizers.base import BaseRecognizer
 
 
@@ -211,6 +213,199 @@ def _record_usage(
     })
 
 
+def _message_lengths(messages: list[dict[str, Any]]) -> list[dict[str, str | int]]:
+    lengths: list[dict[str, str | int]] = []
+    for index, message in enumerate(messages):
+        content = message.get("content", "")
+        lengths.append({
+            "index": index,
+            "role": str(message.get("role", "")),
+            "chars": len(str(content)),
+        })
+    return lengths
+
+
+def _transcript_batch_fingerprint(
+    segments: list[TranscriptSegment],
+    batch_start: int,
+    recognizer: BaseRecognizer,
+) -> str:
+    index_start = batch_start
+    resolve_start = getattr(recognizer, "transcript_index_start", None)
+    if callable(resolve_start):
+        index_start = int(resolve_start(batch_start))
+    payload = [
+        {
+            "index": index_start + offset,
+            "start": segment.start,
+            "end": segment.end,
+            "text": segment.text,
+        }
+        for offset, segment in enumerate(segments)
+    ]
+    return _fingerprint_payload(payload)
+
+
+def _tools_schema_fingerprint(tools: list[dict[str, Any]] | None) -> str | None:
+    if not tools:
+        return None
+    return _fingerprint_payload(tools)
+
+
+def _provider_request_fingerprint(provider: LLMProvider, config: dict[str, Any]) -> str:
+    llm_config = config.get("llm", {})
+    return _fingerprint_payload({
+        "base_url": provider.base_url or "openai",
+        "model": provider.model,
+        "temperature": provider.temperature,
+        "max_tokens": provider.max_tokens,
+        "max_completion_tokens": provider.max_completion_tokens,
+        "thinking": provider.thinking,
+        "max_tool_rounds": llm_config.get("max_tool_rounds"),
+        "final_tool_max_tokens": llm_config.get("final_tool_max_tokens"),
+        "force_final_tool_round": llm_config.get("force_final_tool_round"),
+        "final_tool_instruction": llm_config.get("final_tool_instruction"),
+        "json_fix_rounds": llm_config.get("json_fix_rounds"),
+        "retry_empty_with_reasoning": llm_config.get("retry_empty_with_reasoning"),
+    })
+
+
+def _recognizer_protocol_fingerprint(recognizer: BaseRecognizer) -> str:
+    return (
+        f"{recognizer.__class__.__module__}."
+        f"{recognizer.__class__.__name__}:{recognizer.name}"
+    )
+
+
+def build_request_debug_metadata(
+    messages: list[dict[str, Any]],
+    *,
+    config: dict[str, Any],
+    provider: LLMProvider,
+    recognizer: BaseRecognizer,
+    segments: list[TranscriptSegment],
+    batch_start: int,
+    tools: list[dict[str, Any]] | None,
+    debug_phase: str | None,
+) -> dict[str, Any]:
+    llm_config = config.get("llm", {})
+    metadata: dict[str, Any] = {
+        "request_fingerprint": _fingerprint_payload(messages),
+        "message_count": len(messages),
+        "message_lengths": _message_lengths(messages),
+        "transcript_batch_fingerprint": _transcript_batch_fingerprint(
+            segments,
+            batch_start,
+            recognizer,
+        ),
+        "tools_schema_fingerprint": _tools_schema_fingerprint(tools),
+        "provider_request_fingerprint": _provider_request_fingerprint(provider, config),
+        "recognizer_protocol": _recognizer_protocol_fingerprint(recognizer),
+        "cache_friendly_prompt_layout": bool(
+            llm_config.get("cache_friendly_prompt_layout", False)
+        ),
+        "compact_segment_ranges": bool(llm_config.get("compact_segment_ranges", False)),
+    }
+    if debug_phase:
+        metadata["phase"] = debug_phase
+    return metadata
+
+
+def _attach_request_debug(
+    batch_debug: dict[str, Any],
+    messages: list[dict[str, Any]],
+    *,
+    store_requests: bool,
+    metadata: dict[str, Any],
+) -> None:
+    batch_debug.update(metadata)
+    if store_requests:
+        batch_debug["request_messages"] = messages
+    else:
+        batch_debug.pop("request_messages", None)
+
+
+def batch_debug_is_reusable(
+    payload: dict[str, Any],
+    *,
+    expected_metadata: dict[str, Any],
+) -> bool:
+    if payload.get("error"):
+        return False
+    if payload.get("parse_valid") is not True:
+        return False
+    if payload.get("json_fix_rounds"):
+        return False
+    if payload.get("reasoning_followups"):
+        return False
+    if payload.get("finish_reason") == "length":
+        return False
+    if any(
+        item.get("finish_reason") == "length"
+        for item in payload.get("tool_rounds", [])
+        if isinstance(item, dict)
+    ):
+        return False
+    for key, value in expected_metadata.items():
+        if payload.get(key) != value:
+            return False
+    return True
+
+
+def _try_load_cached_batch(
+    debug_path: Path,
+    batch_start: int,
+    *,
+    expected_metadata: dict[str, Any],
+) -> tuple[dict[str, Any], list[dict[str, Any]]] | None:
+    path = debug_path / f"llm_batch_{batch_start:06d}.json"
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not batch_debug_is_reusable(payload, expected_metadata=expected_metadata):
+        return None
+    items = payload.get("parsed_items")
+    if not isinstance(items, list):
+        return None
+    return payload, [item for item in items if isinstance(item, dict)]
+
+
+def _record_cache_reuse(
+    debug_path: Path,
+    batch_start: int,
+    payload: dict[str, Any],
+) -> None:
+    reuse = payload.get("cache_reuse")
+    if not isinstance(reuse, dict):
+        reuse = {}
+    payload["cache_reuse"] = {
+        "count": int(reuse.get("count") or 0) + 1,
+        "last_reused_at": datetime.now(timezone.utc).isoformat(),
+    }
+    write_llm_debug(debug_path, batch_start, payload)
+
+
+def _write_active_debug_files(
+    debug_path: Path | None,
+    batch_starts: list[int],
+) -> list[str]:
+    if debug_path is None:
+        return []
+    relative_paths = [
+        f"llm_batch_{batch_start:06d}.json"
+        for batch_start in batch_starts
+        if (debug_path / f"llm_batch_{batch_start:06d}.json").is_file()
+    ]
+    (debug_path / "active_debug_files.json").write_text(
+        json.dumps(relative_paths, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return relative_paths
+
+
 def _cache_usage_summary(batch_debug: dict[str, Any]) -> str | None:
     hit_tokens = 0
     miss_tokens = 0
@@ -260,7 +455,7 @@ def build_llm_messages(
     """构建请求消息；缓存友好模式把可复用 ASR 长文本放在任务指令之前。"""
     prompt = recognizer.build_prompt(segments, batch_start, config)
     llm_config = config.get("llm", {})
-    if not llm_config.get("cache_friendly_prompt_layout", True):
+    if not llm_config.get("cache_friendly_prompt_layout", False):
         system_prompt = recognizer.build_system_prompt(config)
         messages: list[dict[str, Any]] = []
         if system_prompt:
@@ -339,6 +534,7 @@ def run_llm_with_tools(
         )
         debug = llm_response_debug(response)
         _record_usage(batch_debug, "tool", debug, round=tool_round + 1)
+        batch_debug["finish_reason"] = debug["finish_reason"]
         batch_debug.setdefault("tool_rounds", []).append({
             "round": tool_round + 1,
             "content": debug["content"][:200],
@@ -753,11 +949,27 @@ def identify_structured_content(
             }
             
             messages = build_llm_messages(recognizer, segments, 0, config)
-            batch_debug["request_messages"] = messages
-            
+            request_metadata = build_request_debug_metadata(
+                messages,
+                config=config,
+                provider=candidate,
+                recognizer=recognizer,
+                segments=segments,
+                batch_start=0,
+                tools=None,
+                debug_phase=content_type,
+            )
+            _attach_request_debug(
+                batch_debug,
+                messages,
+                store_requests=bool(config.get("llm", {}).get("debug_store_requests", False)),
+                metadata=request_metadata,
+            )
+
             response = call_llm(client, candidate, messages)
             debug = llm_response_debug(response)
             _record_usage(batch_debug, "initial", debug)
+            batch_debug["finish_reason"] = debug["finish_reason"]
             content = debug["content"]
             if not content.strip() and debug["reasoning_content"].strip():
                 content = debug["reasoning_content"]
@@ -772,6 +984,7 @@ def identify_structured_content(
         batch_debug["error"] = str(last_error)
         if debug_path is not None:
             write_llm_debug(debug_path, 0, batch_debug)
+            _write_active_debug_files(debug_path, [0])
         print(f"  [error] All LLM providers failed for {content_type}. Last error: {last_error}")
         return {
             "content_type": content_type,
@@ -797,6 +1010,7 @@ def identify_structured_content(
     batch_debug["raw_response"] = content
     if debug_path is not None:
         write_llm_debug(debug_path, 0, batch_debug)
+        _write_active_debug_files(debug_path, [0])
     cache_summary = _cache_usage_summary(batch_debug)
     if cache_summary:
         print(f"  LLM {cache_summary}")
@@ -811,6 +1025,8 @@ def identify_content(
     config: dict[str, Any],
     recognizer: BaseRecognizer,
     debug_dir: Path | None = None,
+    *,
+    debug_phase: str | None = None,
 ) -> list[ContentMatch]:
     """通用内容识别
     
@@ -855,6 +1071,9 @@ def identify_content(
         debug_path.mkdir(parents=True, exist_ok=True)
 
     tools = recognizer.get_tools(config)
+    llm_config = config.get("llm", {})
+    store_requests = bool(llm_config.get("debug_store_requests", False))
+    reuse_valid_batches = bool(llm_config.get("reuse_valid_batches", True))
 
     for batch_idx, (batch_start, batch_segments) in enumerate(batches, 1):
         print(f"  LLM batch {batch_idx}/{len(batches)}: segments {batch_start}-{batch_start + len(batch_segments) - 1} (total {len(segments)})...")
@@ -872,9 +1091,12 @@ def identify_content(
             "usage": [],
             "error": None,
         }
+        if debug_phase:
+            batch_debug["phase"] = debug_phase
 
         content = None
         last_error = None
+        request_metadata: dict[str, Any] | None = None
 
         for provider in providers:
             if not provider.api_key:
@@ -888,7 +1110,48 @@ def identify_content(
                     batch_start,
                     config,
                 )
-                batch_debug["request_messages"] = messages
+                request_metadata = build_request_debug_metadata(
+                    messages,
+                    config=config,
+                    provider=provider,
+                    recognizer=recognizer,
+                    segments=batch_segments,
+                    batch_start=batch_start,
+                    tools=tools,
+                    debug_phase=debug_phase,
+                )
+                if (
+                    reuse_valid_batches
+                    and debug_path is not None
+                    and request_metadata is not None
+                ):
+                    cached_batch = _try_load_cached_batch(
+                        debug_path,
+                        batch_start,
+                        expected_metadata=request_metadata,
+                    )
+                    if cached_batch is not None:
+                        cached_payload, cached_items = cached_batch
+                        _record_cache_reuse(
+                            debug_path,
+                            batch_start,
+                            cached_payload,
+                        )
+                        matches = recognizer.parse_response(cached_items, config)
+                        all_matches.extend(matches)
+                        print(
+                            f"  LLM batch {batch_idx}/{len(batches)}: reused cached result, "
+                            f"found {len(matches)} match(es)"
+                        )
+                        content = "__cache_reused__"
+                        break
+
+                _attach_request_debug(
+                    batch_debug,
+                    messages,
+                    store_requests=store_requests,
+                    metadata=request_metadata,
+                )
 
                 batch_debug["provider"] = {
                     "base_url": provider.base_url or "openai",
@@ -928,6 +1191,7 @@ def identify_content(
                     response = call_llm(client, provider, messages)
                     debug = llm_response_debug(response)
                     _record_usage(batch_debug, "initial", debug)
+                    batch_debug["finish_reason"] = debug["finish_reason"]
                     content = debug["content"]
                     if not content.strip() and debug["reasoning_content"].strip():
                         content = debug["reasoning_content"]
@@ -938,6 +1202,9 @@ def identify_content(
                 last_error = exc
                 print(f"  [warn] Provider {provider.model} failed: {exc}")
                 continue
+
+        if content == "__cache_reused__":
+            continue
 
         if content is None:
             batch_debug["error"] = str(last_error)
@@ -1014,4 +1281,8 @@ def identify_content(
             f"found {len(matches)} match(es){cache_suffix}"
         )
 
+    _write_active_debug_files(
+        debug_path,
+        [batch_start for batch_start, _ in batches],
+    )
     return all_matches

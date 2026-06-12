@@ -3,7 +3,7 @@
 import argparse
 from pathlib import Path
 
-from .config import DEFAULT_CONFIG, load_config
+from .config import DEFAULT_CONFIG, PROFILE_ALL, list_profile_names, load_config
 from .ffmpeg import detect_ffmpeg_environment
 
 
@@ -20,7 +20,11 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--out", default=None, help="输出目录")
     run_parser.add_argument("--out-root", default="runs", help="自动创建运行目录的根目录")
     run_parser.add_argument("--config", default=None, help="YAML 配置文件")
-    run_parser.add_argument("--profile", default=None, help="配置 profile 名称")
+    run_parser.add_argument(
+        "--profile",
+        default=None,
+        help="配置 profile 名称，或 all 串行运行全部 profile",
+    )
     run_parser.add_argument("--content-types", default=None, help="要识别的内容类型，逗号分隔 (song,dialogue,highlight,funny)。不指定则使用配置文件")
     run_parser.add_argument("--asr-model", default=None, help="Whisper 模型")
     run_parser.add_argument("--asr-language", default=None, help="ASR 语言提示")
@@ -41,7 +45,11 @@ def build_parser() -> argparse.ArgumentParser:
     batch_parser.add_argument("--result-root", required=True, help="结果输出目录")
     batch_parser.add_argument("--work-root", default="runs/batch", help="工作目录")
     batch_parser.add_argument("--config", default=None, help="YAML 配置文件")
-    batch_parser.add_argument("--profile", default=None, help="配置 profile 名称")
+    batch_parser.add_argument(
+        "--profile",
+        default=None,
+        help="配置 profile 名称，或 all 串行运行全部 profile",
+    )
     batch_parser.add_argument("--content-types", default=None, help="要识别的内容类型，逗号分隔")
     batch_parser.add_argument("--marker", default=".dd_clip_miner_done.json", help="完成标记文件")
     batch_parser.add_argument("--extensions", default=None, help="视频扩展名，逗号分隔")
@@ -119,6 +127,8 @@ def _generate_config_yaml() -> str:
         "  compact_segment_ranges: false",
         "  max_tool_rounds: 2",
         "  final_tool_max_tokens: null",
+        "  debug_store_requests: false",
+        "  reuse_valid_batches: true",
         "  use_tools: true",
         "  verify_with_search: true",
         "  json_fix_rounds: 3",
@@ -151,6 +161,7 @@ def _generate_config_yaml() -> str:
         "        max_tool_rounds: 1",
         "      review:",
         "        enabled: true",
+        "        transcript_scope: local",
         "        context_segments: 10",
         "        max_window_segments: 500",
         "        max_completion_tokens: 4096",
@@ -206,6 +217,7 @@ def _generate_config_yaml() -> str:
         "    max_tool_rounds: 1",
         "  review:",
         "    enabled: false",
+        "    transcript_scope: local",
         "    context_segments: 10",
         "    max_window_segments: 500",
         "    max_completion_tokens: 4096",
@@ -339,6 +351,33 @@ def _has_api_key(config: dict) -> bool:
     return bool(api_key)
 
 
+def _load_raw_yaml_config(path: str | Path) -> dict:
+    try:
+        import yaml
+    except ImportError as exc:
+        raise RuntimeError("PyYAML is required. Install with: pip install PyYAML") from exc
+    config_path = Path(path)
+    with config_path.open("r", encoding="utf-8") as handle:
+        loaded = yaml.safe_load(handle) or {}
+    if not isinstance(loaded, dict):
+        raise ValueError(f"Config file must contain a mapping: {config_path}")
+    return loaded
+
+
+def _resolve_profile_names(
+    config_path: str | Path | None,
+    profile: str | None,
+) -> list[str | None]:
+    if profile != PROFILE_ALL:
+        return [profile]
+    if config_path is None:
+        raise ValueError("--profile all requires a YAML config with profiles.")
+    names = list_profile_names(_load_raw_yaml_config(config_path))
+    if not names:
+        raise ValueError("Config does not define profiles; cannot use --profile all.")
+    return names
+
+
 def _print_ffmpeg_info(ffmpeg_bin: str | None = None) -> None:
     info = detect_ffmpeg_environment(ffmpeg_bin)
     print(f"FFmpeg: {info['ffmpeg']}")
@@ -380,55 +419,97 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "run":
         from .pipeline import run_pipeline
 
-        config = load_config(args.config, profile=args.profile)
-        _apply_run_overrides(config, args)
-
-        if not _has_api_key(config):
-            print("Error: LLM API key required. Set in config or --llm-api-key")
+        try:
+            profile_names = _resolve_profile_names(args.config, args.profile)
+        except ValueError as exc:
+            print(f"Error: {exc}")
             return 1
 
         output_dir = Path(args.out) if args.out else (
             Path(args.out_root) / Path(args.video).stem
         )
+        failures: list[tuple[str, Exception]] = []
+        last_total = 0
 
-        results = run_pipeline(
-            Path(args.video),
-            output_dir,
-            config,
-            config_path=args.config,
-        )
-        total = sum(len(v) for v in results.values())
-        print(f"\nDone! Found {total} clips in: {output_dir}")
+        for profile_name in profile_names:
+            label = profile_name or "default"
+            try:
+                config = load_config(args.config, profile=profile_name)
+                _apply_run_overrides(config, args)
+                if not _has_api_key(config):
+                    raise RuntimeError(
+                        "LLM API key required. Set in config or --llm-api-key"
+                    )
+                if len(profile_names) > 1:
+                    print(f"\n[profile] Running {label}...")
+                results = run_pipeline(
+                    Path(args.video),
+                    output_dir,
+                    config,
+                    config_path=args.config,
+                )
+                last_total = sum(len(v) for v in results.values())
+            except Exception as exc:
+                failures.append((label, exc))
+                print(f"[error] Profile {label} failed: {exc}")
+
+        if failures:
+            print("\nFailed profiles:")
+            for label, exc in failures:
+                print(f"  - {label}: {exc}")
+            return 1
+
+        print(f"\nDone! Found {last_total} clips in: {output_dir}")
         return 0
 
     if args.command == "batch-run":
         from .batch import run_batch
 
-        config = load_config(args.config, profile=args.profile)
-        _apply_output_overrides(config, args)
-        
-        # 应用 --concat 参数
-        # Respect config default for concat_videos (splicing). --concat forces enable for full daily/clip concat
-        # with our pre-sanitize/TS/force-full-TS logic. For your splicing purpose, config now has it true (or use --concat).
-        if args.concat:
-            config["output"]["concat_videos"] = True
-        
-        if not _has_api_key(config):
-            print("Error: LLM API key required. Set in config or environment")
+        try:
+            profile_names = _resolve_profile_names(args.config, args.profile)
+        except ValueError as exc:
+            print(f"Error: {exc}")
             return 1
+
+        failures: list[tuple[str, Exception]] = []
         extensions = None
         if args.extensions:
             extensions = {item.strip() for item in args.extensions.split(",") if item.strip()}
-        runs = run_batch(
-            args.input_root,
-            args.result_root,
-            args.work_root,
-            config,
-            marker_name=args.marker,
-            extensions=extensions,
-            config_path=args.config,
-        )
-        print(f"\nDone! Batch produced {len(runs)} run records.")
+
+        for profile_name in profile_names:
+            label = profile_name or "default"
+            try:
+                config = load_config(args.config, profile=profile_name)
+                _apply_output_overrides(config, args)
+                if args.concat:
+                    config["output"]["concat_videos"] = True
+                if not _has_api_key(config):
+                    raise RuntimeError(
+                        "LLM API key required. Set in config or environment"
+                    )
+                if len(profile_names) > 1:
+                    print(f"\n[profile] Running batch for {label}...")
+                runs = run_batch(
+                    args.input_root,
+                    args.result_root,
+                    args.work_root,
+                    config,
+                    marker_name=args.marker,
+                    extensions=extensions,
+                    config_path=args.config,
+                )
+                print(f"Profile {label}: {len(runs)} run records.")
+            except Exception as exc:
+                failures.append((label, exc))
+                print(f"[error] Profile {label} failed: {exc}")
+
+        if failures:
+            print("\nFailed profiles:")
+            for label, exc in failures:
+                print(f"  - {label}: {exc}")
+            return 1
+
+        print("\nDone! Batch run completed.")
         return 0
 
     if args.command == "manual-cut":

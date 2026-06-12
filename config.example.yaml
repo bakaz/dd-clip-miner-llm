@@ -67,6 +67,8 @@ llm:
   compact_segment_ranges: false
   max_tool_rounds: 2
   final_tool_max_tokens: null
+  debug_store_requests: false
+  reuse_valid_batches: true
   use_tools: true            # 启用歌词搜索工具
   verify_with_search: true
   json_fix_rounds: 3
@@ -99,6 +101,7 @@ profiles:
         max_tool_rounds: 1
       review:
         enabled: true
+        transcript_scope: local
         context_segments: 10
         max_window_segments: 500
         max_completion_tokens: 4096
@@ -154,6 +157,7 @@ song:
     max_tool_rounds: 1
   review:
     enabled: false
+    transcript_scope: local
     context_segments: 10
     max_window_segments: 500
     nearby_title_conflict_gap_segments: 2

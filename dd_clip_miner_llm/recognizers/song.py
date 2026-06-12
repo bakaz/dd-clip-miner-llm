@@ -46,6 +46,7 @@ class SongRecognizer(BaseRecognizer):
             },
             "review": {
                 "enabled": False,
+                "transcript_scope": "local",
                 "context_segments": 10,
                 "max_window_segments": 500,
                 "nearby_title_conflict_gap_segments": 2,

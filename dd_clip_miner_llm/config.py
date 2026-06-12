@@ -48,6 +48,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "compact_segment_ranges": False,
         "max_tool_rounds": 2,
         "final_tool_max_tokens": None,
+        "debug_store_requests": False,
+        "reuse_valid_batches": True,
         "use_tools": True,
         "verify_with_search": True,
         "json_fix_rounds": 3,
@@ -104,11 +106,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
         },
         "review": {
             "enabled": False,
+            "transcript_scope": "local",
             "context_segments": 10,
             "max_window_segments": 500,
             "max_completion_tokens": 4096,
             "max_tool_rounds": 1,
             "fallback": "local_best",
+            "nearby_title_conflict_gap_segments": 2,
         },
     },
     # 对话识别配置
@@ -205,6 +209,23 @@ def _migrate_padding_config(config: dict[str, Any]) -> dict[str, Any]:
     return config
 
 
+PROFILE_ALL = "all"
+
+
+def list_profile_names(loaded: dict[str, Any]) -> list[str]:
+    profiles = loaded.get("profiles")
+    if not isinstance(profiles, dict) or not profiles:
+        return []
+    default_profile = loaded.get("default_profile")
+    names = [str(name) for name in profiles]
+    if default_profile and str(default_profile) in names:
+        ordered = [str(default_profile), *[
+            name for name in names if name != str(default_profile)
+        ]]
+        return ordered
+    return names
+
+
 def load_config(
     path: str | Path | None = None,
     profile: str | None = None,
@@ -239,6 +260,10 @@ def load_config(
     if not selected_profile:
         selected_profile = next(iter(profiles))
     selected_profile = str(selected_profile)
+    if selected_profile == PROFILE_ALL:
+        raise ValueError(
+            f"{PROFILE_ALL!r} is a reserved CLI value; load one profile at a time."
+        )
     if selected_profile not in profiles:
         available = ", ".join(sorted(str(name) for name in profiles))
         raise ValueError(
@@ -257,6 +282,10 @@ def load_config(
     config = deep_merge(config, profile_override)
     config["_profile_name"] = selected_profile
     config["_profile_enabled"] = True
+    if selected_profile == "accuracy":
+        config.setdefault("song", {}).setdefault("review", {})[
+            "transcript_scope"
+        ] = "local"
     return _migrate_padding_config(config)
 
 
