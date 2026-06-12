@@ -20,6 +20,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--out", default=None, help="输出目录")
     run_parser.add_argument("--out-root", default="runs", help="自动创建运行目录的根目录")
     run_parser.add_argument("--config", default=None, help="YAML 配置文件")
+    run_parser.add_argument("--profile", default=None, help="配置 profile 名称")
     run_parser.add_argument("--content-types", default=None, help="要识别的内容类型，逗号分隔 (song,dialogue,highlight,funny)。不指定则使用配置文件")
     run_parser.add_argument("--asr-model", default=None, help="Whisper 模型")
     run_parser.add_argument("--asr-language", default=None, help="ASR 语言提示")
@@ -40,6 +41,7 @@ def build_parser() -> argparse.ArgumentParser:
     batch_parser.add_argument("--result-root", required=True, help="结果输出目录")
     batch_parser.add_argument("--work-root", default="runs/batch", help="工作目录")
     batch_parser.add_argument("--config", default=None, help="YAML 配置文件")
+    batch_parser.add_argument("--profile", default=None, help="配置 profile 名称")
     batch_parser.add_argument("--content-types", default=None, help="要识别的内容类型，逗号分隔")
     batch_parser.add_argument("--marker", default=".dd_clip_miner_done.json", help="完成标记文件")
     batch_parser.add_argument("--extensions", default=None, help="视频扩展名，逗号分隔")
@@ -113,10 +115,47 @@ def _generate_config_yaml() -> str:
         "  reasoning_followup_rounds: 5",
         "  reasoning_followup_max_tokens: 32768",
         "  batch_size: null",
+        "  cache_friendly_prompt_layout: false",
+        "  compact_segment_ranges: false",
+        "  max_tool_rounds: 2",
+        "  final_tool_max_tokens: null",
         "  use_tools: true",
         "  verify_with_search: true",
         "  json_fix_rounds: 3",
         "  fallbacks: []",
+        "",
+        "default_profile: accuracy",
+        "",
+        "profiles:",
+        "  accuracy:",
+        "    llm:",
+        "      cache_friendly_prompt_layout: false",
+        "      compact_segment_ranges: false",
+        "      max_tokens: 8192",
+        "      max_completion_tokens: null",
+        "      final_tool_max_tokens: 16384",
+        "    song:",
+        "      review:",
+        "        enabled: true",
+        "  kv_optimized:",
+        "    llm:",
+        "      cache_friendly_prompt_layout: true",
+        "      compact_segment_ranges: true",
+        "      max_completion_tokens: 32768",
+        "      final_tool_max_tokens: 32768",
+        "    song:",
+        "      missed_recheck:",
+        "        strategy: full_transcript",
+        "        fallback_strategy: windowed_on_structural_failure",
+        "        max_completion_tokens: 4096",
+        "        max_tool_rounds: 1",
+        "      review:",
+        "        enabled: true",
+        "        context_segments: 10",
+        "        max_window_segments: 500",
+        "        max_completion_tokens: 4096",
+        "        max_tool_rounds: 1",
+        "        fallback: local_best",
         "",
         "# 时间 padding（兼容旧项目配置）",
         "padding:",
@@ -158,9 +197,20 @@ def _generate_config_yaml() -> str:
         "    merge_gap_seconds: 20.0",
         "  missed_recheck:",
         "    enabled: true",
+        "    strategy: windowed",
+        "    fallback_strategy: windowed_on_structural_failure",
         "    batch_size: 500",
         "    min_gap_segments: 1",
         "    context_segments: 10",
+        "    max_completion_tokens: 4096",
+        "    max_tool_rounds: 1",
+        "  review:",
+        "    enabled: false",
+        "    context_segments: 10",
+        "    max_window_segments: 500",
+        "    max_completion_tokens: 4096",
+        "    max_tool_rounds: 1",
+        "    fallback: local_best",
         "",
         "# 对话识别配置",
         "dialogue:",
@@ -330,7 +380,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "run":
         from .pipeline import run_pipeline
 
-        config = load_config(args.config)
+        config = load_config(args.config, profile=args.profile)
         _apply_run_overrides(config, args)
 
         if not _has_api_key(config):
@@ -354,7 +404,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "batch-run":
         from .batch import run_batch
 
-        config = load_config(args.config)
+        config = load_config(args.config, profile=args.profile)
         _apply_output_overrides(config, args)
         
         # 应用 --concat 参数

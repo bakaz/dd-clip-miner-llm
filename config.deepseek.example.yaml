@@ -50,7 +50,8 @@ llm:
   api_key: null
   api_key_env: DEEPSEEK_API_KEY
   base_url: https://api.deepseek.com
-  model: deepseek-chat
+  model: deepseek-v4-flash
+  thinking: disabled
   temperature: 0.1
   max_tokens: 8192
   max_completion_tokens: null
@@ -58,10 +59,47 @@ llm:
   reasoning_followup_rounds: 5
   reasoning_followup_max_tokens: 32768
   batch_size: null
+  cache_friendly_prompt_layout: false
+  compact_segment_ranges: false
+  max_tool_rounds: 2
+  final_tool_max_tokens: null
   use_tools: true
   verify_with_search: true
   json_fix_rounds: 3
   fallbacks: []
+
+default_profile: accuracy
+
+profiles:
+  accuracy:
+    llm:
+      cache_friendly_prompt_layout: false
+      compact_segment_ranges: false
+      max_tokens: 8192
+      max_completion_tokens: null
+      final_tool_max_tokens: 16384
+    song:
+      review:
+        enabled: true
+  kv_optimized:
+    llm:
+      cache_friendly_prompt_layout: true
+      compact_segment_ranges: true
+      max_completion_tokens: 32768
+      final_tool_max_tokens: 32768
+    song:
+      missed_recheck:
+        strategy: full_transcript
+        fallback_strategy: windowed_on_structural_failure
+        max_completion_tokens: 4096
+        max_tool_rounds: 1
+      review:
+        enabled: true
+        context_segments: 10
+        max_window_segments: 500
+        max_completion_tokens: 4096
+        max_tool_rounds: 1
+        fallback: local_best
 
 # ─── 时间 padding ─────────────────────────────
 padding:
@@ -101,8 +139,21 @@ song:
     merge_gap_seconds: 35.0
   missed_recheck:
     enabled: true
+    strategy: windowed
+    fallback_strategy: windowed_on_structural_failure
     batch_size: 500
     min_gap_segments: 1
+    context_segments: 10
+    max_completion_tokens: 4096
+    max_tool_rounds: 1
+  review:
+    enabled: false
+    context_segments: 10
+    max_window_segments: 500
+    nearby_title_conflict_gap_segments: 2
+    max_completion_tokens: 4096
+    max_tool_rounds: 1
+    fallback: local_best
 
 # ─── 对话识别配置 ─────────────────────────────
 dialogue:

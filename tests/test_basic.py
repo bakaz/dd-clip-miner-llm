@@ -223,6 +223,64 @@ padding:
         assert config["asr"]["model"] == "medium"
         assert config["padding"]["before_seconds"] == 5.0
 
+    def test_load_config_profile_merges_common_and_override(self, tmp_path):
+        config_file = tmp_path / "profiles.yaml"
+        config_file.write_text(
+            """
+default_profile: accuracy
+llm:
+  model: shared-model
+  max_tokens: 100
+profiles:
+  accuracy:
+    llm:
+      cache_friendly_prompt_layout: false
+  kv_optimized:
+    llm:
+      cache_friendly_prompt_layout: true
+      compact_segment_ranges: true
+      max_completion_tokens: 32768
+""",
+            encoding="utf-8",
+        )
+
+        accuracy = load_config(config_file)
+        optimized = load_config(config_file, profile="kv_optimized")
+
+        assert accuracy["_profile_name"] == "accuracy"
+        assert accuracy["llm"]["model"] == "shared-model"
+        assert accuracy["llm"]["cache_friendly_prompt_layout"] is False
+        assert optimized["_profile_name"] == "kv_optimized"
+        assert optimized["llm"]["cache_friendly_prompt_layout"] is True
+        assert optimized["llm"]["compact_segment_ranges"] is True
+        assert optimized["llm"]["max_completion_tokens"] == 32768
+
+    def test_load_config_rejects_unknown_profile(self, tmp_path):
+        config_file = tmp_path / "profiles.yaml"
+        config_file.write_text(
+            "profiles:\n  accuracy: {}\n",
+            encoding="utf-8",
+        )
+
+        with pytest.raises(ValueError, match="Unknown config profile"):
+            load_config(config_file, profile="missing")
+
+    def test_shipped_accuracy_profile_keeps_legacy_layout_with_review(self):
+        config = load_config("config.deepseek.example.yaml", profile="accuracy")
+
+        assert config["llm"]["cache_friendly_prompt_layout"] is False
+        assert config["llm"]["compact_segment_ranges"] is False
+        assert config["song"]["review"]["enabled"] is True
+
+    def test_legacy_config_does_not_enable_profile_isolation(self, tmp_path):
+        config_file = tmp_path / "legacy.yaml"
+        config_file.write_text("llm:\n  model: legacy\n", encoding="utf-8")
+
+        config = load_config(config_file)
+
+        assert config["llm"]["model"] == "legacy"
+        assert "_profile_name" not in config
+
     def test_migrate_padding_config(self):
         """测试旧项目 padding 配置迁移到 song.padding"""
         from dd_clip_miner_llm.config import _migrate_padding_config
@@ -313,13 +371,235 @@ class TestSongMissedRecheck:
             (8, 9),
         ]
 
+    def test_group_segment_ranges_combines_targets_within_request_span(self):
+        from dd_clip_miner_llm.pipeline import _group_segment_ranges
+
+        assert _group_segment_ranges(
+            [(0, 20), (40, 60), (490, 499), (500, 520)],
+            500,
+        ) == [
+            [(0, 20), (40, 60), (490, 499)],
+            [(500, 520)],
+        ]
+
     def test_default_config_enables_song_missed_recheck(self):
         recheck = DEFAULT_CONFIG["song"]["missed_recheck"]
 
         assert recheck["enabled"] is True
+        assert recheck["strategy"] == "windowed"
+        assert recheck["fallback_strategy"] == "windowed_on_structural_failure"
         assert recheck["batch_size"] == 500
         assert recheck["context_segments"] == 10
+        assert recheck["max_completion_tokens"] == 4096
+        assert recheck["max_tool_rounds"] == 1
         assert DEFAULT_CONFIG["song"]["padding"]["max_song_seconds"] == 360.0
+
+    def test_shipped_kv_profile_uses_full_transcript_missed_recheck(self):
+        config = load_config("config.deepseek.example.yaml", profile="kv_optimized")
+
+        assert config["song"]["missed_recheck"]["strategy"] == "full_transcript"
+        assert (
+            config["song"]["missed_recheck"]["fallback_strategy"]
+            == "windowed_on_structural_failure"
+        )
+
+    def test_song_normalization_splits_disjoint_ranges_and_deduplicates(self):
+        from dd_clip_miner_llm.pipeline import _normalize_song_matches
+
+        segments = [
+            TranscriptSegment(start=float(i * 10), end=float(i * 10 + 5), text=str(i))
+            for i in range(8)
+        ]
+        config = deep_merge(DEFAULT_CONFIG, {
+            "song": {
+                "padding": {
+                    "merge_gap_seconds": 20.0,
+                    "max_song_seconds": 360.0,
+                }
+            }
+        })
+        matches = [
+            ContentMatch(
+                content_type="song",
+                title="下雨天",
+                segment_indices=[0, 1, 6, 7],
+                confidence=0.9,
+            ),
+            ContentMatch(
+                content_type="song",
+                title="下雨天",
+                segment_indices=[0, 1],
+                confidence=0.9,
+            ),
+        ]
+
+        normalized, events, suspicious = _normalize_song_matches(
+            segments,
+            config,
+            matches,
+        )
+
+        assert [match.segment_indices for match in normalized] == [[0, 1], [6, 7]]
+        assert any(event["type"] == "disjoint_ranges" for event in events)
+        assert any(event["type"] == "exact_duplicate" for event in events)
+        assert len(suspicious) == 2
+
+    def test_review_clusters_connect_different_title_overlaps(self):
+        from dd_clip_miner_llm.pipeline import _build_song_review_clusters
+
+        matches = [
+            ContentMatch(content_type="song", title="七月七日晴", segment_indices=[1, 2], confidence=0.9),
+            ContentMatch(content_type="song", title="说了再见", segment_indices=[2, 3], confidence=0.8),
+            ContentMatch(content_type="song", title="天后", segment_indices=[8, 9], confidence=0.9),
+        ]
+
+        clusters = _build_song_review_clusters(matches, set())
+
+        assert len(clusters) == 1
+        assert {match.title for match in clusters[0]} == {"七月七日晴", "说了再见"}
+
+    def test_review_clusters_group_nearby_suspicious_ranges_from_same_title(self):
+        from dd_clip_miner_llm.pipeline import _build_song_review_clusters, _match_key
+
+        matches = [
+            ContentMatch(content_type="song", title="天后", segment_indices=[10, 11], confidence=0.9),
+            ContentMatch(content_type="song", title="天后", segment_indices=[20, 21], confidence=0.9),
+            ContentMatch(content_type="song", title="天后", segment_indices=[800, 801], confidence=0.9),
+        ]
+        suspicious = {_match_key(match) for match in matches}
+
+        clusters = _build_song_review_clusters(
+            matches,
+            suspicious,
+            max_span_segments=100,
+        )
+
+        assert [[match.segment_indices for match in cluster] for cluster in clusters] == [
+            [[10, 11], [20, 21]],
+            [[800, 801]],
+        ]
+
+    def test_review_clusters_connect_adjacent_different_titles_when_enabled(self):
+        from dd_clip_miner_llm.pipeline import _build_song_review_clusters
+
+        matches = [
+            ContentMatch(content_type="song", title="七月七日晴", segment_indices=[999, 1002], confidence=0.85),
+            ContentMatch(content_type="song", title="说了再见", segment_indices=[1003, 1059], confidence=0.9),
+            ContentMatch(content_type="song", title="天后", segment_indices=[1200, 1250], confidence=0.9),
+        ]
+
+        clusters = _build_song_review_clusters(
+            matches,
+            set(),
+            nearby_title_conflict_gap_segments=2,
+        )
+
+        assert len(clusters) == 1
+        assert {match.title for match in clusters[0]} == {"七月七日晴", "说了再见"}
+
+    def test_review_clusters_leave_adjacent_different_titles_disabled_by_default(self):
+        from dd_clip_miner_llm.pipeline import _build_song_review_clusters
+
+        matches = [
+            ContentMatch(content_type="song", title="七月七日晴", segment_indices=[1, 2], confidence=0.9),
+            ContentMatch(content_type="song", title="说了再见", segment_indices=[3, 4], confidence=0.8),
+        ]
+
+        assert _build_song_review_clusters(matches, set()) == []
+
+    def test_local_best_prefers_known_higher_confidence_candidate(self):
+        from dd_clip_miner_llm.pipeline import _local_best_song_cluster
+
+        segments = [
+            TranscriptSegment(start=0.0, end=30.0, text="a"),
+            TranscriptSegment(start=30.0, end=60.0, text="b"),
+        ]
+        cluster = [
+            ContentMatch(content_type="song", title="未知歌曲：一句歌词", segment_indices=[0, 1], confidence=0.95),
+            ContentMatch(content_type="song", title="七月七日晴", segment_indices=[0, 1], confidence=0.9),
+        ]
+
+        selected, decisions = _local_best_song_cluster(
+            segments,
+            DEFAULT_CONFIG,
+            cluster,
+            set(),
+        )
+
+        assert [match.title for match in selected] == ["七月七日晴"]
+        assert any(item["action"] == "discard" for item in decisions)
+
+    def test_profile_state_requires_matching_fingerprints(self, tmp_path):
+        from dd_clip_miner_llm.pipeline import _profile_state_matches, _write_profile_state
+
+        state_path = tmp_path / "profile.json"
+        config = deep_merge(DEFAULT_CONFIG, {
+            "_profile_name": "accuracy",
+            "_profile_enabled": True,
+        })
+        input_path = tmp_path / "input.mp4"
+        _write_profile_state(
+            state_path,
+            input_path=input_path,
+            config=config,
+            config_fingerprint="config-a",
+            transcript_fingerprint="asr-a",
+            status="complete",
+        )
+
+        assert _profile_state_matches(
+            state_path,
+            input_path=input_path,
+            config_fingerprint="config-a",
+            transcript_fingerprint="asr-a",
+        )
+        assert not _profile_state_matches(
+            state_path,
+            input_path=input_path,
+            config_fingerprint="config-b",
+            transcript_fingerprint="asr-a",
+        )
+
+    def test_profile_comparison_report_is_written_for_two_profiles(self, tmp_path):
+        from dd_clip_miner_llm.pipeline import _write_profile_comparison
+
+        for name, title, hit, miss in [
+            ("accuracy", "七月七日晴", 10, 90),
+            ("kv_optimized", "七月七日晴", 98, 2),
+        ]:
+            profile_dir = tmp_path / name
+            song_dir = profile_dir / "song"
+            song_dir.mkdir(parents=True)
+            (profile_dir / "profile.json").write_text(
+                json.dumps({"profile": name, "status": "complete", "model": "same-model"}),
+                encoding="utf-8",
+            )
+            (song_dir / "matches.json").write_text(
+                json.dumps([{
+                    "title": title,
+                    "segment_indices": [1, 2],
+                }]),
+                encoding="utf-8",
+            )
+            (song_dir / "llm_batch_000000.json").write_text(
+                json.dumps({
+                    "usage": [{
+                        "prompt_cache_hit_tokens": hit,
+                        "prompt_cache_miss_tokens": miss,
+                        "completion_tokens": 5,
+                    }]
+                }),
+                encoding="utf-8",
+            )
+
+        _write_profile_comparison(tmp_path)
+
+        comparison = json.loads(
+            (tmp_path / "profile_comparison.json").read_text(encoding="utf-8")
+        )
+        assert comparison["profiles"]["accuracy"]["cache_hit_ratio"] == 0.1
+        assert comparison["profiles"]["kv_optimized"]["cache_hit_ratio"] == 0.98
+        assert (tmp_path / "profile_comparison.md").exists()
 
     def test_short_recheck_ranges_are_filtered_by_min_song_seconds(self):
         from dd_clip_miner_llm.pipeline import _filter_short_segment_ranges
@@ -391,6 +671,435 @@ class TestSongMissedRecheck:
         assert seen["range"] == ("左上下文", "右上下文")
         assert seen["debug_dir"] == "000001_000003"
         assert result[-1].segment_indices == [1, 2, 3]
+
+    def test_full_transcript_audit_keeps_main_asr_prefix_and_tools(self, sample_segments, sample_config):
+        from dd_clip_miner_llm.llm import build_llm_messages
+        from dd_clip_miner_llm.pipeline import _SongCoverageAuditRecognizer
+        from dd_clip_miner_llm.recognizers import get_recognizer
+
+        sample_config["llm"]["cache_friendly_prompt_layout"] = True
+        sample_config["llm"]["compact_segment_ranges"] = True
+        recognizer = get_recognizer("song")
+        audit = _SongCoverageAuditRecognizer(recognizer, [(1, 2)], [])
+
+        main_messages = build_llm_messages(recognizer, sample_segments, 0, sample_config)
+        audit_messages = build_llm_messages(audit, sample_segments, 0, sample_config)
+
+        marker = "ASR 转写结束。"
+        assert main_messages[0] == audit_messages[0]
+        assert main_messages[1]["content"].split(marker, 1)[0] == (
+            audit_messages[1]["content"].split(marker, 1)[0]
+        )
+        assert recognizer.get_tools(sample_config) == audit.get_tools(sample_config)
+        assert '"title":' not in audit_messages[1]["content"]
+        assert "[[1,2]]" in audit_messages[1]["content"]
+
+    def test_filter_matches_to_segment_ranges_rejects_covered_indices(self):
+        from dd_clip_miner_llm.pipeline import _filter_matches_to_segment_ranges
+
+        matches = [
+            ContentMatch(
+                content_type="song",
+                title="mixed",
+                segment_indices=[1, 2, 3, 8, 9],
+                confidence=0.9,
+            )
+        ]
+
+        filtered = _filter_matches_to_segment_ranges(matches, [(2, 3), (9, 9)])
+
+        assert len(filtered) == 1
+        assert filtered[0].segment_indices == [2, 3, 9]
+
+    def test_full_transcript_merges_adjacent_same_title_results(self):
+        from dd_clip_miner_llm.pipeline import _merge_adjacent_same_title_matches
+
+        segments = [
+            TranscriptSegment(start=0.0, end=10.0, text="a"),
+            TranscriptSegment(start=12.0, end=20.0, text="b"),
+            TranscriptSegment(start=45.0, end=55.0, text="c"),
+        ]
+        matches = [
+            ContentMatch("song", "same", [0], 0.8),
+            ContentMatch("song", "same", [1], 0.9),
+            ContentMatch("song", "same", [2], 0.7),
+        ]
+
+        merged, events = _merge_adjacent_same_title_matches(
+            segments,
+            matches,
+            max_gap_seconds=20.0,
+        )
+
+        assert [match.segment_indices for match in merged] == [[0, 1], [2]]
+        assert merged[0].confidence == 0.9
+        assert len(events) == 1
+
+    def test_full_transcript_sanitizes_review_output(self):
+        from dd_clip_miner_llm.pipeline import (
+            _sanitize_full_transcript_review_results,
+        )
+
+        segments = [
+            TranscriptSegment(start=float(i * 10), end=float(i * 10 + 8), text=str(i))
+            for i in range(8)
+        ]
+        candidates = [ContentMatch("song", "known", [1, 2], 0.8)]
+        reviewed = [
+            ContentMatch("song", "known", [1, 2, 3], 0.9),
+            ContentMatch("song", "new", [4, 5, 6], 0.8),
+            ContentMatch("song", "对话片段", [4], 1.0),
+            ContentMatch("speech", "looks named", [4], 1.0),
+            ContentMatch("song", "outside", [7], 0.7),
+        ]
+
+        sanitized, events = _sanitize_full_transcript_review_results(
+            segments,
+            deep_merge(DEFAULT_CONFIG, {}),
+            reviewed,
+            candidates,
+            [(4, 5)],
+        )
+
+        assert [(match.title, match.segment_indices) for match in sanitized] == [
+            ("known", [1, 2, 3]),
+            ("new", [4, 5]),
+        ]
+        assert {event["type"] for event in events} >= {
+            "invalid_audit_result",
+            "review_result_cropped_to_audit_targets",
+            "review_result_outside_audit_targets",
+        }
+
+    def test_full_transcript_empty_array_does_not_fallback(self, tmp_path, monkeypatch):
+        from dd_clip_miner_llm.pipeline import _recheck_uncovered_song_segments
+        from dd_clip_miner_llm.recognizers import get_recognizer
+
+        segments = [
+            TranscriptSegment(start=float(i * 30), end=float((i + 1) * 30), text=str(i))
+            for i in range(4)
+        ]
+        matches = [
+            ContentMatch(
+                content_type="song",
+                title="covered",
+                segment_indices=[0],
+                confidence=0.9,
+            )
+        ]
+        config = deep_merge(DEFAULT_CONFIG, {
+            "llm": {
+                "cache_friendly_prompt_layout": True,
+                "compact_segment_ranges": True,
+            },
+            "song": {
+                "padding": {"min_song_seconds": 0.0},
+                "missed_recheck": {
+                    "strategy": "full_transcript",
+                    "fallback_strategy": "windowed_on_structural_failure",
+                },
+            },
+        })
+
+        def fake_identify_content(_segments, _config, _recognizer, debug_dir=None):
+            debug_dir = Path(debug_dir)
+            debug_dir.mkdir(parents=True, exist_ok=True)
+            (debug_dir / "llm_batch_000000.json").write_text(
+                json.dumps({
+                    "error": None,
+                    "parse_valid": True,
+                    "parsed_items": [],
+                    "json_fix_rounds": [],
+                    "tool_rounds": [{"finish_reason": "stop"}],
+                    "usage": [],
+                }),
+                encoding="utf-8",
+            )
+            return []
+
+        def fail_windowed(*_args, **_kwargs):
+            raise AssertionError("windowed fallback must not run for a valid empty array")
+
+        monkeypatch.setattr("dd_clip_miner_llm.llm.identify_content", fake_identify_content)
+        monkeypatch.setattr(
+            "dd_clip_miner_llm.pipeline._run_windowed_missed_recheck",
+            fail_windowed,
+        )
+
+        result = _recheck_uncovered_song_segments(
+            segments,
+            config,
+            get_recognizer("song"),
+            matches,
+            tmp_path,
+        )
+
+        audit = json.loads(
+            (tmp_path / "missed_recheck" / "audit.json").read_text(encoding="utf-8")
+        )
+        assert result == matches
+        assert audit["status"] == "success"
+        assert audit["fallback_used"] is False
+        assert audit["additional_match_count"] == 0
+
+    @pytest.mark.parametrize(
+        ("payload", "expected_reason"),
+        [
+            ({"error": "network", "parse_valid": False}, "api_error"),
+            ({"error": None, "parse_valid": False}, "invalid_result_json"),
+            ({
+                "error": None,
+                "parse_valid": True,
+                "tool_rounds": [{"finish_reason": "length"}],
+            }, "output_truncated"),
+            ({
+                "error": None,
+                "parse_valid": True,
+                "json_fix_rounds": [{"round": 1}],
+            }, "json_repair"),
+        ],
+    )
+    def test_full_transcript_structural_failure_falls_back(
+        self,
+        tmp_path,
+        monkeypatch,
+        payload,
+        expected_reason,
+    ):
+        from dd_clip_miner_llm.pipeline import _recheck_uncovered_song_segments
+        from dd_clip_miner_llm.recognizers import get_recognizer
+
+        segments = [
+            TranscriptSegment(start=0.0, end=30.0, text="covered"),
+            TranscriptSegment(start=30.0, end=120.0, text="target"),
+        ]
+        matches = [
+            ContentMatch(
+                content_type="song",
+                title="covered",
+                segment_indices=[0],
+                confidence=0.9,
+            )
+        ]
+        config = deep_merge(DEFAULT_CONFIG, {
+            "llm": {
+                "cache_friendly_prompt_layout": True,
+                "compact_segment_ranges": True,
+            },
+            "song": {
+                "padding": {"min_song_seconds": 0.0},
+                "missed_recheck": {
+                    "strategy": "full_transcript",
+                    "fallback_strategy": "windowed_on_structural_failure",
+                },
+            },
+        })
+
+        def fake_identify_content(_segments, _config, _recognizer, debug_dir=None):
+            debug_dir = Path(debug_dir)
+            debug_dir.mkdir(parents=True, exist_ok=True)
+            debug_payload = {
+                "parsed_items": [],
+                "json_fix_rounds": [],
+                "tool_rounds": [{"finish_reason": "stop"}],
+                "usage": [],
+                **payload,
+            }
+            (debug_dir / "llm_batch_000000.json").write_text(
+                json.dumps(debug_payload),
+                encoding="utf-8",
+            )
+            return []
+
+        fallback_match = ContentMatch(
+            content_type="song",
+            title="fallback",
+            segment_indices=[1],
+            confidence=0.8,
+        )
+
+        def fake_windowed(*_args, **_kwargs):
+            return [fallback_match], ["000001_000001/llm_batch_000000.json"]
+
+        monkeypatch.setattr("dd_clip_miner_llm.llm.identify_content", fake_identify_content)
+        monkeypatch.setattr(
+            "dd_clip_miner_llm.pipeline._run_windowed_missed_recheck",
+            fake_windowed,
+        )
+
+        result = _recheck_uncovered_song_segments(
+            segments,
+            config,
+            get_recognizer("song"),
+            matches,
+            tmp_path,
+        )
+
+        audit = json.loads(
+            (tmp_path / "missed_recheck" / "audit.json").read_text(encoding="utf-8")
+        )
+        assert result[-1].title == "fallback"
+        assert audit["status"] == "fallback_success"
+        assert audit["fallback_used"] is True
+        assert expected_reason in audit["structural_failures"]
+
+    def test_missed_recheck_fingerprint_changes_for_each_input(self):
+        from dd_clip_miner_llm.pipeline import _missed_recheck_fingerprint
+
+        segments = [TranscriptSegment(start=0.0, end=10.0, text="a")]
+        matches = [
+            ContentMatch(
+                content_type="song",
+                title="song",
+                segment_indices=[0],
+                confidence=0.9,
+            )
+        ]
+        base = _missed_recheck_fingerprint(
+            segments,
+            DEFAULT_CONFIG,
+            matches,
+            [(0, 0)],
+        )
+        changed_transcript = _missed_recheck_fingerprint(
+            [TranscriptSegment(start=0.0, end=10.0, text="b")],
+            DEFAULT_CONFIG,
+            matches,
+            [(0, 0)],
+        )
+        changed_candidates = _missed_recheck_fingerprint(
+            segments,
+            DEFAULT_CONFIG,
+            [
+                ContentMatch(
+                    content_type="song",
+                    title="other",
+                    segment_indices=[0],
+                    confidence=0.9,
+                )
+            ],
+            [(0, 0)],
+        )
+        changed_ranges = _missed_recheck_fingerprint(
+            segments,
+            DEFAULT_CONFIG,
+            matches,
+            [(1, 1)],
+        )
+        changed_config = _missed_recheck_fingerprint(
+            segments,
+            deep_merge(DEFAULT_CONFIG, {"llm": {"model": "other"}}),
+            matches,
+            [(0, 0)],
+        )
+
+        assert base["transcript"] != changed_transcript["transcript"]
+        assert base["candidates"] != changed_candidates["candidates"]
+        assert base["target_ranges"] != changed_ranges["target_ranges"]
+        assert base["config"] != changed_config["config"]
+
+    def test_profile_usage_totals_respects_valid_debug_manifest(self, tmp_path):
+        from dd_clip_miner_llm.pipeline import _profile_usage_totals
+
+        song_dir = tmp_path / "song"
+        song_dir.mkdir()
+        for name, miss in [("active.json", 10), ("stale.json", 999)]:
+            (song_dir / name).write_text(
+                json.dumps({
+                    "usage": [{
+                        "prompt_cache_hit_tokens": 20,
+                        "prompt_cache_miss_tokens": miss,
+                        "completion_tokens": 3,
+                    }]
+                }),
+                encoding="utf-8",
+            )
+        (song_dir / "valid_debug_files.json").write_text(
+            json.dumps(["active.json"]),
+            encoding="utf-8",
+        )
+
+        totals = _profile_usage_totals(tmp_path)
+
+        assert totals == {
+            "prompt_cache_hit_tokens": 20,
+            "prompt_cache_miss_tokens": 10,
+            "completion_tokens": 3,
+        }
+
+    def test_valid_debug_manifest_skips_unchanged_review_clusters(self, tmp_path):
+        from dd_clip_miner_llm.pipeline import _write_valid_debug_manifest
+
+        review_dir = tmp_path / "review" / "after_missed_recheck"
+        for index in (1, 2):
+            cluster_dir = review_dir / f"cluster_{index:03d}"
+            cluster_dir.mkdir(parents=True, exist_ok=True)
+            (cluster_dir / "llm_batch_000000.json").write_text(
+                json.dumps({"usage": []}),
+                encoding="utf-8",
+            )
+        (review_dir / "summary.json").write_text(
+            json.dumps({
+                "cluster_count": 2,
+                "clusters": [
+                    {"cluster": 1, "resolution": "llm"},
+                    {
+                        "cluster": 2,
+                        "resolution": "unchanged_pre_audit_cluster",
+                    },
+                ],
+            }),
+            encoding="utf-8",
+        )
+
+        _write_valid_debug_manifest(tmp_path)
+
+        manifest = json.loads(
+            (tmp_path / "valid_debug_files.json").read_text(encoding="utf-8")
+        )
+        assert manifest == [
+            "review/after_missed_recheck/cluster_001/llm_batch_000000.json"
+        ]
+
+    def test_offset_recognizer_forwards_system_prompt(self):
+        from dd_clip_miner_llm.pipeline import _OffsetRecognizer
+
+        class Recognizer:
+            name = "song"
+            default_config = {}
+
+            def build_system_prompt(self, config):
+                return f"system:{config['value']}"
+
+        offset = _OffsetRecognizer(Recognizer(), 10)
+
+        assert offset.build_system_prompt({"value": "ok"}) == "system:ok"
+
+    def test_cached_identify_matches_loads_valid_debug(self, tmp_path):
+        from dd_clip_miner_llm.pipeline import _load_cached_identify_matches
+        from dd_clip_miner_llm.recognizers import get_recognizer
+
+        debug_dir = tmp_path / "debug"
+        debug_dir.mkdir()
+        (debug_dir / "llm_batch_000000.json").write_text(
+            json.dumps({
+                "error": None,
+                "parse_valid": True,
+                "parsed_items": [{
+                    "content_type": "song",
+                    "title": "天后",
+                    "segment_indices": [1, 2],
+                    "confidence": 0.9,
+                }],
+            }),
+            encoding="utf-8",
+        )
+        recognizer = get_recognizer("song")
+
+        matches = _load_cached_identify_matches(debug_dir, recognizer, DEFAULT_CONFIG)
+
+        assert matches is not None
+        assert [match.title for match in matches] == ["天后"]
 
 
 # ============ ffmpeg.py 测试 ============
@@ -1400,6 +2109,38 @@ class TestCLI:
         assert args.command == "batch-run"
         assert args.input_root == "input/"
 
+    def test_build_parser_profile(self):
+        from dd_clip_miner_llm.cli import build_parser
+
+        parser = build_parser()
+        run_args = parser.parse_args(["run", "test.mp4", "--profile", "kv_optimized"])
+        batch_args = parser.parse_args([
+            "batch-run",
+            "input/",
+            "--result-root",
+            "output/",
+            "--profile",
+            "accuracy",
+        ])
+
+        assert run_args.profile == "kv_optimized"
+        assert batch_args.profile == "accuracy"
+
+    def test_generated_config_enables_full_transcript_for_kv_profile(self):
+        import yaml
+
+        from dd_clip_miner_llm.cli import _generate_config_yaml
+
+        config = yaml.safe_load(_generate_config_yaml())
+
+        missed = config["profiles"]["kv_optimized"]["song"]["missed_recheck"]
+        assert missed == {
+            "strategy": "full_transcript",
+            "fallback_strategy": "windowed_on_structural_failure",
+            "max_completion_tokens": 4096,
+            "max_tool_rounds": 1,
+        }
+
     def test_build_parser_manual_cut(self):
         from dd_clip_miner_llm.cli import build_parser
         parser = build_parser()
@@ -1505,6 +2246,42 @@ class TestRecognizers:
         assert len(matches) == 1
         assert matches[0].title == "Test Song"
         assert matches[0].content_type == "song"
+
+    def test_song_compact_segment_ranges_expand_to_indices(self):
+        from dd_clip_miner_llm.recognizers import get_recognizer
+
+        song = get_recognizer("song")
+        matches = song.parse_response(
+            [{
+                "content_type": "song",
+                "title": "Test Song",
+                "segment_ranges": [[12, 14], [18, 18], [20, 19], ["bad", 22]],
+                "confidence": 0.9,
+            }],
+            {},
+        )
+
+        assert len(matches) == 1
+        assert matches[0].segment_indices == [12, 13, 14, 18]
+
+    def test_song_cache_friendly_prompt_requests_compact_ranges(self, sample_segments, sample_config):
+        from dd_clip_miner_llm.recognizers import get_recognizer
+
+        sample_config["llm"]["cache_friendly_prompt_layout"] = True
+        prompt = get_recognizer("song").build_prompt(sample_segments, 0, sample_config)
+
+        assert "segment_ranges" in prompt
+        assert "不要输出 segment_indices" in prompt
+        assert "从第一个 segment 到最后一个 segment 按时间顺序检查一遍" in prompt
+        assert "不能只返回能确认歌名的歌曲" in prompt
+
+    def test_song_accuracy_prompt_keeps_legacy_coverage_layout(self, sample_segments, sample_config):
+        from dd_clip_miner_llm.recognizers import get_recognizer
+
+        prompt = get_recognizer("song").build_prompt(sample_segments, 0, sample_config)
+
+        assert "segment_indices" in prompt
+        assert "从第一个 segment 到最后一个 segment 按时间顺序检查一遍" not in prompt
 
     def test_cringe_title_is_short_summary(self):
         from dd_clip_miner_llm.recognizers import get_recognizer

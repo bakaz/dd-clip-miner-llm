@@ -47,6 +47,7 @@ def run_batch(
     force_normalize = bool(config.get("output", {}).get("concat_force_normalize", False))
 
     runs: list[dict[str, Any]] = []
+    profile_name = str(config.get("_profile_name") or "")
     for folder in sorted(by_folder):
         marker = folder / marker_name
         completed_videos = _load_marker(marker)
@@ -71,11 +72,12 @@ def run_batch(
             # 正常逐个处理
             for video in folder_videos:
                 video_key = str(video.resolve())
+                marker_key = _profile_marker_key(video_key, profile_name)
 
-                if video_key in completed_videos and completed_videos[video_key].get("status") == "success":
+                if marker_key in completed_videos and completed_videos[marker_key].get("status") == "success":
                     print(f"[skip] Already processed: {video}")
-                    folder_runs.append(completed_videos[video_key])
-                    runs.append(completed_videos[video_key])
+                    folder_runs.append(completed_videos[marker_key])
+                    runs.append(completed_videos[marker_key])
                     continue
 
                 has_work = True
@@ -83,6 +85,8 @@ def run_batch(
                 run_name = safe_path_part(video.stem)
                 run_dir = work / rel_folder / run_name
                 result_dir = results_root / rel_folder / run_name
+                if profile_name:
+                    run_dir = result_dir
 
                 print(f"[run] {video}")
                 try:
@@ -95,6 +99,7 @@ def run_batch(
                     item = {
                         "video": str(video),
                         "video_key": video_key,
+                        "profile": profile_name or None,
                         "work_dir": str(result_dir),  # 指向实际存在的目录
                         "result_dir": str(result_dir),
                         "song_count": total_count,
@@ -103,12 +108,13 @@ def run_batch(
                     }
                     folder_runs.append(item)
                     runs.append(item)
-                    completed_videos[video_key] = item
+                    completed_videos[marker_key] = item
                 except Exception as exc:
                     folder_ok = False
                     item = {
                         "video": str(video),
                         "video_key": video_key,
+                        "profile": profile_name or None,
                         "work_dir": str(run_dir),
                         "result_dir": str(result_dir),
                         "error": str(exc),
@@ -116,7 +122,7 @@ def run_batch(
                     }
                     folder_runs.append(item)
                     runs.append(item)
-                    completed_videos[video_key] = item
+                    completed_videos[marker_key] = item
                     print(f"[error] {video}: {exc}")
 
                 _write_marker(marker, completed_videos)
@@ -153,9 +159,11 @@ def _process_folder_concat(
     
     # 检查是否已经处理过这个文件夹（使用第一个视频作为 key）
     folder_key = f"concat:{','.join(str(v.resolve()) for v in folder_videos)}"
-    if folder_key in completed_videos and completed_videos[folder_key].get("status") == "success":
+    profile_name = str(config.get("_profile_name") or "")
+    marker_key = _profile_marker_key(folder_key, profile_name)
+    if marker_key in completed_videos and completed_videos[marker_key].get("status") == "success":
         print(f"[skip] Already processed concat folder: {folder}")
-        folder_runs.append(completed_videos[folder_key])
+        folder_runs.append(completed_videos[marker_key])
         return folder_runs, True, False
     
     has_work = True
@@ -163,19 +171,25 @@ def _process_folder_concat(
     run_name = safe_path_part(folder.name) + "_concat"
     run_dir = work / rel_folder / run_name
     result_dir = results_root / rel_folder / run_name
+    if profile_name:
+        run_dir = result_dir
     concat_dir = run_dir / "concat"
     
     # 基于目录状态检测是否已完成（不依赖 marker 文件编码）
     concat_output = concat_dir / "concat.mp4"
     progress_path = run_dir / "progress.json"
-    skip_reason = _check_concat_already_done(concat_output, progress_path)
+    skip_reason = (
+        None
+        if profile_name
+        else _check_concat_already_done(concat_output, progress_path)
+    )
     if skip_reason:
         print(f"[skip] {skip_reason}: {folder}")
         # 尝试加载已有结果
         existing = _load_existing_concat_result(folder, folder_key, run_dir, result_dir, len(folder_videos))
         if existing:
             folder_runs.append(existing)
-            completed_videos[folder_key] = existing
+            completed_videos[marker_key] = existing
             _write_marker(marker, completed_videos)
             return folder_runs, True, False
     
@@ -184,14 +198,17 @@ def _process_folder_concat(
     print(f"[concat] {len(folder_videos)} videos in {folder}")
     try:
         # 拼接视频
-        concat_videos(
-            folder_videos,
-            concat_output,
-            video_codec=video_codec,
-            audio_bitrate_kbps=audio_bitrate,
-            single_file_policy=single_file_policy,
-            force_normalize=force_normalize,
-        )
+        if concat_output.exists():
+            print(f"[concat] Reusing existing concatenated video: {concat_output}")
+        else:
+            concat_videos(
+                folder_videos,
+                concat_output,
+                video_codec=video_codec,
+                audio_bitrate_kbps=audio_bitrate,
+                single_file_policy=single_file_policy,
+                force_normalize=force_normalize,
+            )
 
         # 处理拼接后的视频
         print(f"[run] Processing concatenated video...")
@@ -209,6 +226,7 @@ def _process_folder_concat(
         item = {
             "video": str(folder),
             "video_key": folder_key,
+            "profile": profile_name or None,
             "work_dir": str(run_dir),
             "result_dir": str(result_dir),
             "video_count": len(folder_videos),
@@ -217,12 +235,13 @@ def _process_folder_concat(
             "status": "success",
         }
         folder_runs.append(item)
-        completed_videos[folder_key] = item
+        completed_videos[marker_key] = item
     except Exception as exc:
         folder_ok = False
         item = {
             "video": str(folder),
             "video_key": folder_key,
+            "profile": profile_name or None,
             "work_dir": str(run_dir),
             "result_dir": str(result_dir),
             "video_count": len(folder_videos),
@@ -230,7 +249,7 @@ def _process_folder_concat(
             "status": "failed",
         }
         folder_runs.append(item)
-        completed_videos[folder_key] = item
+        completed_videos[marker_key] = item
         print(f"[error] {folder}: {exc}")
     
     _write_marker(marker, completed_videos)
@@ -324,6 +343,12 @@ def _relative_folder(root: Path, folder: Path) -> Path:
     if str(rel) == ".":
         return Path("_root")
     return Path(*[safe_path_part(part) for part in rel.parts])
+
+
+def _profile_marker_key(video_key: str, profile_name: str) -> str:
+    if not profile_name:
+        return video_key
+    return f"{video_key}|profile:{profile_name}"
 
 
 def _load_marker(marker: Path) -> dict[str, dict[str, Any]]:

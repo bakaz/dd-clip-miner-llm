@@ -129,6 +129,210 @@ class TestRecognizers:
 # ============ 3. LLM 响应解析测试 ============
 
 class TestLLM:
+    def test_valid_empty_json_array_does_not_require_repair(self):
+        from dd_clip_miner_llm.llm import parse_llm_response_with_status
+
+        items, is_valid = parse_llm_response_with_status("```json\n[]\n```")
+
+        assert items == []
+        assert is_valid is True
+
+    def test_invalid_json_array_reports_parse_failure(self):
+        from dd_clip_miner_llm.llm import parse_llm_response_with_status
+
+        items, is_valid = parse_llm_response_with_status("not json")
+
+        assert items == []
+        assert is_valid is False
+
+    def test_cache_friendly_messages_share_transcript_prefix(self, sample_segments, config):
+        from dd_clip_miner_llm.llm import build_llm_messages
+
+        config["llm"]["cache_friendly_prompt_layout"] = True
+        song_messages = build_llm_messages(
+            get_recognizer("song"),
+            sample_segments,
+            0,
+            config,
+        )
+        dialogue_messages = build_llm_messages(
+            get_recognizer("dialogue"),
+            sample_segments,
+            0,
+            config,
+        )
+
+        assert song_messages[0] == dialogue_messages[0]
+        song_user = song_messages[1]["content"]
+        dialogue_user = dialogue_messages[1]["content"]
+        song_prefix = song_user.split("ASR 转写结束。", 1)[0]
+        dialogue_prefix = dialogue_user.split("ASR 转写结束。", 1)[0]
+        assert song_prefix == dialogue_prefix
+        assert song_user != dialogue_user
+        assert "[0] (0.0s-3.0s)" in song_user
+
+    def test_final_tool_round_keeps_tools_and_disables_tool_calls(self):
+        from dd_clip_miner_llm.llm import LLMProvider, run_llm_with_tools
+
+        calls = []
+
+        class Message:
+            content = "[]"
+            reasoning_content = ""
+            tool_calls = None
+
+            def model_dump(self):
+                return {
+                    "content": self.content,
+                    "reasoning_content": self.reasoning_content,
+                    "tool_calls": self.tool_calls,
+                }
+
+        class Usage:
+            def model_dump(self):
+                return {
+                    "prompt_tokens": 10,
+                    "prompt_cache_hit_tokens": 8,
+                    "prompt_cache_miss_tokens": 2,
+                }
+
+        class Completions:
+            def create(self, **kwargs):
+                calls.append(kwargs)
+                choice = type("Choice", (), {
+                    "message": Message(),
+                    "finish_reason": "stop",
+                })()
+                return type("Response", (), {
+                    "choices": [choice],
+                    "usage": Usage(),
+                    "model": "test-model",
+                })()
+
+        client = type("Client", (), {
+            "chat": type("Chat", (), {"completions": Completions()})(),
+        })()
+        tools = [{"type": "function", "function": {"name": "search", "parameters": {}}}]
+        debug = {}
+
+        result = run_llm_with_tools(
+            client,
+            LLMProvider(api_key="test"),
+            [{"role": "user", "content": "test"}],
+            tools,
+            lambda *_args: "{}",
+            debug,
+            max_tool_rounds=0,
+            final_max_tokens=32768,
+        )
+
+        assert result == "[]"
+        assert calls[0]["tools"] == tools
+        assert calls[0]["tool_choice"] == "none"
+        assert calls[0]["max_tokens"] == 32768
+        assert debug["usage"][0]["prompt_cache_hit_tokens"] == 8
+
+    def test_force_final_tool_round_retries_prose_as_json(self):
+        from dd_clip_miner_llm.llm import LLMProvider, run_llm_with_tools
+
+        calls = []
+
+        class Message:
+            reasoning_content = ""
+            tool_calls = None
+
+            def __init__(self, content):
+                self.content = content
+
+            def model_dump(self):
+                return {
+                    "content": self.content,
+                    "reasoning_content": self.reasoning_content,
+                    "tool_calls": self.tool_calls,
+                }
+
+        class Usage:
+            def model_dump(self):
+                return {
+                    "prompt_tokens": 10,
+                    "prompt_cache_hit_tokens": 8,
+                    "prompt_cache_miss_tokens": 2,
+                }
+
+        class Completions:
+            def create(self, **kwargs):
+                calls.append(kwargs)
+                content = "分析后没有漏检歌曲。" if len(calls) == 1 else "[]"
+                choice = type("Choice", (), {
+                    "message": Message(content),
+                    "finish_reason": "stop",
+                })()
+                return type("Response", (), {
+                    "choices": [choice],
+                    "usage": Usage(),
+                    "model": "test-model",
+                })()
+
+        client = type("Client", (), {
+            "chat": type("Chat", (), {"completions": Completions()})(),
+        })()
+        tools = [{"type": "function", "function": {"name": "search", "parameters": {}}}]
+        final_instruction = "重新扫描全部目标，只返回 JSON。"
+
+        result = run_llm_with_tools(
+            client,
+            LLMProvider(api_key="test"),
+            [{"role": "user", "content": "test"}],
+            tools,
+            lambda *_args: "{}",
+            {},
+            max_tool_rounds=1,
+            final_max_tokens=4096,
+            force_final_round=True,
+            final_instruction=final_instruction,
+        )
+
+        assert result == "[]"
+        assert len(calls) == 2
+        assert calls[0]["tool_choice"] == "auto"
+        assert calls[1]["tool_choice"] == "none"
+        assert not any(
+            message.get("role") == "assistant"
+            and message.get("content") == "分析后没有漏检歌曲。"
+            for message in calls[1]["messages"]
+        )
+        assert calls[1]["messages"][-1] == {
+            "role": "user",
+            "content": final_instruction,
+        }
+
+    def test_deepseek_uses_max_tokens_for_completion_limit(self):
+        from dd_clip_miner_llm.llm import LLMProvider, call_llm
+
+        calls = []
+
+        class Completions:
+            def create(self, **kwargs):
+                calls.append(kwargs)
+                return object()
+
+        client = type("Client", (), {
+            "chat": type("Chat", (), {"completions": Completions()})(),
+        })()
+        provider = LLMProvider(
+            api_key="test",
+            base_url="https://api.deepseek.com",
+            model="deepseek-v4-flash",
+            max_completion_tokens=32768,
+            thinking="disabled",
+        )
+
+        call_llm(client, provider, [{"role": "user", "content": "test"}])
+
+        assert calls[0]["max_tokens"] == 32768
+        assert calls[0]["extra_body"] == {"thinking": {"type": "disabled"}}
+        assert "max_completion_tokens" not in calls[0]
+
     def test_parse_json_array(self):
         """应能解析 JSON 数组"""
         text = '[{"title": "test"}]'

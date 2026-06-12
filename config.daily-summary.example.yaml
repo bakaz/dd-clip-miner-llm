@@ -56,6 +56,7 @@ llm:
   reasoning_followup_rounds: 5
   reasoning_followup_max_tokens: 32768
   batch_size: null
+  cache_friendly_prompt_layout: false
   use_tools: false
   verify_with_search: false
   json_fix_rounds: 3

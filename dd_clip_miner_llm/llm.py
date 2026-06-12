@@ -18,6 +18,12 @@ from .models import ContentMatch, TranscriptSegment
 from .recognizers.base import BaseRecognizer
 
 
+_CACHE_SYSTEM_PROMPT = (
+    "你将先收到一份带全局序号和时间范围的 ASR 转写，再收到具体分析任务。"
+    "必须只依据该转写完成任务，不得使用输入中不存在的 segment index。"
+)
+
+
 @dataclass
 class LLMProvider:
     api_key: str
@@ -26,6 +32,7 @@ class LLMProvider:
     temperature: float = 0.3
     max_tokens: int = 4096
     max_completion_tokens: int | None = None
+    thinking: str | None = None
 
 
 # ============ Provider 管理 ============
@@ -48,6 +55,7 @@ def build_providers(config: dict[str, Any]) -> list[LLMProvider]:
         if max_completion_tokens_value not in (None, "")
         else None
     )
+    thinking = llm_config.get("thinking")
 
     if api_keys is None:
         api_keys = []
@@ -65,6 +73,7 @@ def build_providers(config: dict[str, Any]) -> list[LLMProvider]:
             temperature=temperature,
             max_tokens=max_tokens,
             max_completion_tokens=max_completion_tokens,
+            thinking=str(thinking) if thinking not in (None, "") else None,
         ))
 
     fallbacks = llm_config.get("fallbacks", [])
@@ -85,6 +94,11 @@ def build_providers(config: dict[str, Any]) -> list[LLMProvider]:
                     if fb.get("max_completion_tokens") not in (None, "")
                     else max_completion_tokens
                 ),
+                thinking=(
+                    str(fb["thinking"])
+                    if fb.get("thinking") not in (None, "")
+                    else (str(thinking) if thinking not in (None, "") else None)
+                ),
             ))
 
     return providers
@@ -99,6 +113,7 @@ def call_llm(
     tools: list[dict[str, Any]] | None = None,
     max_tokens_override: int | None = None,
     max_retries: int = 3,
+    tool_choice: Any = None,
 ) -> Any:
     """调用 LLM，返回完整的 response 对象
     
@@ -107,19 +122,26 @@ def call_llm(
         provider: LLM provider 配置
         messages: 消息列表
         tools: 工具定义
+        tool_choice: 工具选择策略
         max_tokens_override: 最大 token 数覆盖
         max_retries: 最大重试次数（指数退避）
     """
     import time
     
-    token_args = (
-        {"max_completion_tokens": max_tokens_override}
+    token_limit = (
+        max_tokens_override
         if max_tokens_override is not None
         else (
-            {"max_completion_tokens": provider.max_completion_tokens}
+            provider.max_completion_tokens
             if provider.max_completion_tokens is not None
-            else {"max_tokens": provider.max_tokens}
+            else provider.max_tokens
         )
+    )
+    uses_deepseek_api = "deepseek.com" in str(provider.base_url or "").casefold()
+    token_args = (
+        {"max_tokens": token_limit}
+        if uses_deepseek_api or provider.max_completion_tokens is None
+        else {"max_completion_tokens": token_limit}
     )
 
     kwargs: dict[str, Any] = {
@@ -128,9 +150,13 @@ def call_llm(
         "temperature": provider.temperature,
         **token_args,
     }
+    if uses_deepseek_api and provider.thinking:
+        kwargs["extra_body"] = {"thinking": {"type": provider.thinking}}
 
     if tools:
         kwargs["tools"] = tools
+        if tool_choice is not None:
+            kwargs["tool_choice"] = tool_choice
 
     last_exc = None
     for retry in range(max_retries):
@@ -146,8 +172,6 @@ def call_llm(
             continue
     
     raise last_exc
-
-    return client.chat.completions.create(**kwargs)
 
 
 def llm_response_debug(response: Any) -> dict[str, Any]:
@@ -171,6 +195,100 @@ def llm_response_debug(response: Any) -> dict[str, Any]:
     }
 
 
+def _record_usage(
+    batch_debug: dict[str, Any],
+    phase: str,
+    debug: dict[str, Any],
+    **details: Any,
+) -> None:
+    usage = debug.get("usage")
+    if not isinstance(usage, dict):
+        return
+    batch_debug.setdefault("usage", []).append({
+        "phase": phase,
+        **details,
+        **usage,
+    })
+
+
+def _cache_usage_summary(batch_debug: dict[str, Any]) -> str | None:
+    hit_tokens = 0
+    miss_tokens = 0
+    for usage in batch_debug.get("usage", []):
+        if not isinstance(usage, dict):
+            continue
+        hit_tokens += int(usage.get("prompt_cache_hit_tokens") or 0)
+        miss_tokens += int(usage.get("prompt_cache_miss_tokens") or 0)
+    total = hit_tokens + miss_tokens
+    if total <= 0:
+        return None
+    return (
+        f"KV cache hit {hit_tokens}/{total} input tokens "
+        f"({hit_tokens / total:.1%})"
+    )
+
+
+def _format_transcript_for_cache(
+    segments: list[TranscriptSegment],
+    batch_start: int,
+    recognizer: BaseRecognizer,
+) -> str:
+    index_start = batch_start
+    resolve_start = getattr(recognizer, "transcript_index_start", None)
+    if callable(resolve_start):
+        index_start = int(resolve_start(batch_start))
+    return "\n".join(
+        f"[{index_start + i}] ({seg.start:.1f}s-{seg.end:.1f}s) {seg.text}"
+        for i, seg in enumerate(segments)
+    )
+
+
+def _extract_task_instructions(prompt: str) -> str | None:
+    for marker in ("\n完整 ASR 转写片段：\n", "\nASR 转写：\n"):
+        if marker in prompt:
+            instructions, _ = prompt.rsplit(marker, 1)
+            return instructions.strip()
+    return None
+
+
+def build_llm_messages(
+    recognizer: BaseRecognizer,
+    segments: list[TranscriptSegment],
+    batch_start: int,
+    config: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """构建请求消息；缓存友好模式把可复用 ASR 长文本放在任务指令之前。"""
+    prompt = recognizer.build_prompt(segments, batch_start, config)
+    llm_config = config.get("llm", {})
+    if not llm_config.get("cache_friendly_prompt_layout", True):
+        system_prompt = recognizer.build_system_prompt(config)
+        messages: list[dict[str, Any]] = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+        return messages
+
+    instructions = _extract_task_instructions(prompt)
+    if not instructions:
+        return [{"role": "user", "content": prompt}]
+
+    recognizer_system_prompt = recognizer.build_system_prompt(config)
+    if recognizer_system_prompt:
+        instructions = f"{recognizer_system_prompt}\n\n{instructions}"
+
+    transcript = _format_transcript_for_cache(segments, batch_start, recognizer)
+    return [
+        {"role": "system", "content": _CACHE_SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": (
+                f"ASR 转写开始：\n{transcript}\nASR 转写结束。\n\n"
+                f"{instructions}\n\n请基于上面的完整 ASR 转写执行任务。"
+            ),
+        },
+    ]
+
+
 # ============ 工具调用 ============
 
 def run_llm_with_tools(
@@ -181,6 +299,9 @@ def run_llm_with_tools(
     tool_executor: Any,
     batch_debug: dict[str, Any],
     max_tool_rounds: int = 2,
+    final_max_tokens: int | None = None,
+    force_final_round: bool = False,
+    final_instruction: str | None = None,
 ) -> str:
     """调用 LLM，处理 tool calls
     
@@ -196,22 +317,35 @@ def run_llm_with_tools(
     for tool_round in range(max_tool_rounds + 1):
         is_last = (tool_round == max_tool_rounds)
 
-        call_tools = None if is_last else tools
-        last_round_tokens = 16384 if is_last else None
+        call_tools = tools
+        tool_choice = "none" if is_last else "auto"
+        last_round_tokens = final_max_tokens if is_last else None
         if is_last and tool_round > 0:
             messages = messages + [{
                 "role": "user",
-                "content": "搜索已完成。现在请根据已有的搜索结果，直接返回识别结果的JSON数组。不要再调用任何工具。只返回JSON数组，不要其他文字。",
+                "content": final_instruction or (
+                    "搜索已完成。现在请根据已有的搜索结果，直接返回识别结果的JSON数组。"
+                    "不要再调用任何工具。只返回JSON数组，不要其他文字。"
+                ),
             }]
 
-        response = call_llm(client, provider, messages, max_tokens_override=last_round_tokens, tools=call_tools)
+        response = call_llm(
+            client,
+            provider,
+            messages,
+            max_tokens_override=last_round_tokens,
+            tools=call_tools,
+            tool_choice=tool_choice,
+        )
         debug = llm_response_debug(response)
+        _record_usage(batch_debug, "tool", debug, round=tool_round + 1)
         batch_debug.setdefault("tool_rounds", []).append({
             "round": tool_round + 1,
             "content": debug["content"][:200],
             "reasoning_content": debug["reasoning_content"][:200],
             "finish_reason": debug["finish_reason"],
             "has_tool_calls": bool(debug.get("tool_calls")),
+            "usage": debug["usage"],
         })
 
         content = debug["content"]
@@ -220,6 +354,10 @@ def run_llm_with_tools(
         if not tool_calls_data:
             if not content.strip() and debug["reasoning_content"].strip():
                 content = debug["reasoning_content"]
+            if not is_last and force_final_round:
+                _, is_valid_array = parse_llm_response_with_status(content)
+                if not is_valid_array:
+                    continue
             return content
 
         if is_last:
@@ -312,11 +450,18 @@ def run_reasoning_followups(
                 max_tokens_override=followup_tokens,
             )
             followup_debug = llm_response_debug(followup_response)
+            _record_usage(
+                batch_debug,
+                "reasoning_followup",
+                followup_debug,
+                round=len(batch_debug["reasoning_followups"]) + 1,
+            )
             content = followup_debug["content"]
             batch_debug["reasoning_followups"].append({
                 "round": len(batch_debug["reasoning_followups"]) + 1,
                 "content": content[:500],
                 "reasoning_content": followup_debug["reasoning_content"][:500],
+                "usage": followup_debug["usage"],
             })
             batch_debug["raw_response"] = content
         except Exception as exc:
@@ -326,7 +471,8 @@ def run_reasoning_followups(
             })
             return ""
 
-        if content.strip() and parse_llm_response(content):
+        _, is_valid_array = parse_llm_response_with_status(content)
+        if content.strip() and is_valid_array:
             return content
 
         material = str(followup_debug.get("reasoning_content") or "")
@@ -367,15 +513,17 @@ def fix_json_with_llm(
                 max_tokens_override=16384,
             )
             debug = llm_response_debug(response)
+            _record_usage(batch_debug, "json_fix", debug, round=round_num + 1)
             new_content = debug["content"] or debug["reasoning_content"]
             batch_debug.setdefault("json_fix_rounds", []).append({
                 "round": round_num + 1,
                 "content": new_content[:500],
                 "finish_reason": debug["finish_reason"],
+                "usage": debug["usage"],
             })
 
-            items = parse_llm_response(new_content)
-            if items:
+            items, is_valid_array = parse_llm_response_with_status(new_content)
+            if is_valid_array:
                 return items, new_content
 
             if new_content.strip():
@@ -428,11 +576,13 @@ def fix_structured_json_with_llm(
                 max_tokens_override=16384,
             )
             debug = llm_response_debug(response)
+            _record_usage(batch_debug, "json_fix", debug, round=round_num + 1)
             new_content = debug["content"] or debug["reasoning_content"]
             batch_debug.setdefault("json_fix_rounds", []).append({
                 "round": round_num + 1,
                 "content": new_content[:500],
                 "finish_reason": debug["finish_reason"],
+                "usage": debug["usage"],
             })
 
             parsed = parse_llm_json(new_content)
@@ -495,10 +645,16 @@ def parse_llm_json(text: str) -> Any:
 
 def parse_llm_response(text: str) -> list[dict[str, Any]]:
     """解析 LLM 响应为 JSON 数组"""
+    items, _ = parse_llm_response_with_status(text)
+    return items
+
+
+def parse_llm_response_with_status(text: str) -> tuple[list[dict[str, Any]], bool]:
+    """解析 JSON 数组，并区分合法空数组与解析失败。"""
     result = parse_llm_json(text)
     if isinstance(result, list):
-        return [item for item in result if isinstance(item, dict)]
-    return []
+        return [item for item in result if isinstance(item, dict)], True
+    return [], False
 
 
 # ============ 调试工具 ============
@@ -567,7 +723,6 @@ def identify_structured_content(
     if debug_path is not None:
         debug_path.mkdir(parents=True, exist_ok=True)
 
-    prompt = recognizer.build_prompt(segments, 0, config)
     batch_debug: dict[str, Any] = {
         "batch_start": 0,
         "batch_end": len(segments) - 1,
@@ -576,6 +731,7 @@ def identify_structured_content(
         "raw_response": None,
         "parsed_json": None,
         "json_fix_rounds": [],
+        "usage": [],
         "error": None,
     }
 
@@ -596,15 +752,12 @@ def identify_structured_content(
                 "model": candidate.model,
             }
             
-            # 构建 system message（如果识别器支持）
-            system_prompt = hasattr(recognizer, 'build_system_prompt') and recognizer.build_system_prompt(config)
-            messages: list[dict[str, Any]] = []
-            if system_prompt:
-                messages.append({"role": "system", "content": system_prompt})
-            messages.append({"role": "user", "content": prompt})
+            messages = build_llm_messages(recognizer, segments, 0, config)
+            batch_debug["request_messages"] = messages
             
             response = call_llm(client, candidate, messages)
             debug = llm_response_debug(response)
+            _record_usage(batch_debug, "initial", debug)
             content = debug["content"]
             if not content.strip() and debug["reasoning_content"].strip():
                 content = debug["reasoning_content"]
@@ -644,6 +797,9 @@ def identify_structured_content(
     batch_debug["raw_response"] = content
     if debug_path is not None:
         write_llm_debug(debug_path, 0, batch_debug)
+    cache_summary = _cache_usage_summary(batch_debug)
+    if cache_summary:
+        print(f"  LLM {cache_summary}")
 
     return parsed
 
@@ -702,7 +858,6 @@ def identify_content(
 
     for batch_idx, (batch_start, batch_segments) in enumerate(batches, 1):
         print(f"  LLM batch {batch_idx}/{len(batches)}: segments {batch_start}-{batch_start + len(batch_segments) - 1} (total {len(segments)})...")
-        prompt = recognizer.build_prompt(batch_segments, batch_start, config)
         batch_debug: dict[str, Any] = {
             "batch_start": batch_start,
             "batch_end": batch_start + len(batch_segments) - 1,
@@ -714,14 +869,12 @@ def identify_content(
             "tool_rounds": [],
             "reasoning_followups": [],
             "json_fix_rounds": [],
+            "usage": [],
             "error": None,
         }
 
         content = None
         last_error = None
-
-        # 构建 system message（如果识别器支持）
-        system_prompt = recognizer.get_tools and hasattr(recognizer, 'build_system_prompt') and recognizer.build_system_prompt(config)
 
         for provider in providers:
             if not provider.api_key:
@@ -729,13 +882,13 @@ def identify_content(
 
             try:
                 client = clients[provider.api_key]
-                messages: list[dict[str, Any]] = []
-                
-                # 添加 system message（如果有）
-                if system_prompt:
-                    messages.append({"role": "system", "content": system_prompt})
-                
-                messages.append({"role": "user", "content": prompt})
+                messages = build_llm_messages(
+                    recognizer,
+                    batch_segments,
+                    batch_start,
+                    config,
+                )
+                batch_debug["request_messages"] = messages
 
                 batch_debug["provider"] = {
                     "base_url": provider.base_url or "openai",
@@ -744,12 +897,37 @@ def identify_content(
 
                 if tools and content_type == "song":
                     from .search_tools import execute_tool
+                    llm_config = config.get("llm", {})
                     content = run_llm_with_tools(
-                        client, provider, messages, tools, execute_tool, batch_debug
+                        client,
+                        provider,
+                        messages,
+                        tools,
+                        execute_tool,
+                        batch_debug,
+                        max_tool_rounds=int(llm_config.get("max_tool_rounds", 2) or 0),
+                        final_max_tokens=(
+                            int(llm_config["final_tool_max_tokens"])
+                            if llm_config.get("final_tool_max_tokens") not in (None, "")
+                            else (
+                                provider.max_completion_tokens
+                                if provider.max_completion_tokens is not None
+                                else provider.max_tokens
+                            )
+                        ),
+                        force_final_round=bool(
+                            llm_config.get("force_final_tool_round", False)
+                        ),
+                        final_instruction=(
+                            str(llm_config["final_tool_instruction"])
+                            if llm_config.get("final_tool_instruction")
+                            else None
+                        ),
                     )
                 else:
                     response = call_llm(client, provider, messages)
                     debug = llm_response_debug(response)
+                    _record_usage(batch_debug, "initial", debug)
                     content = debug["content"]
                     if not content.strip() and debug["reasoning_content"].strip():
                         content = debug["reasoning_content"]
@@ -787,18 +965,18 @@ def identify_content(
                 continue
 
         # 尝试解析 JSON
-        items = parse_llm_response(content)
-        if not items:
+        items, is_valid_array = parse_llm_response_with_status(content)
+        if not is_valid_array:
             # 从 reasoning 中提取
             if batch_debug.get("tool_rounds"):
                 for tr in batch_debug["tool_rounds"]:
                     rc = tr.get("reasoning_content", "")
                     if rc.strip():
-                        items = parse_llm_response(rc)
-                        if items:
+                        items, is_valid_array = parse_llm_response_with_status(rc)
+                        if is_valid_array:
                             break
             # reasoning followup 兜底
-            if not items:
+            if not is_valid_array:
                 reasoning_content = ""
                 if batch_debug.get("tool_rounds"):
                     for tr in batch_debug["tool_rounds"]:
@@ -811,15 +989,17 @@ def identify_content(
                     )
                     if followup_content.strip():
                         content = followup_content
-                        items = parse_llm_response(content)
+                        items, is_valid_array = parse_llm_response_with_status(content)
 
         # JSON 修复
-        if not items and content.strip():
+        if not is_valid_array and content.strip():
             items, content = fix_json_with_llm(
                 client, provider, config, content, content_type, batch_debug
             )
+            _, is_valid_array = parse_llm_response_with_status(content)
 
         batch_debug["parsed_items"] = items
+        batch_debug["parse_valid"] = is_valid_array
         batch_debug["raw_response"] = content
         if debug_path is not None:
             write_llm_debug(debug_path, batch_start, batch_debug)
@@ -827,6 +1007,11 @@ def identify_content(
         # 使用识别器解析响应
         matches = recognizer.parse_response(items, config)
         all_matches.extend(matches)
-        print(f"  LLM batch {batch_idx}/{len(batches)}: done, found {len(matches)} match(es)")
+        cache_summary = _cache_usage_summary(batch_debug)
+        cache_suffix = f", {cache_summary}" if cache_summary else ""
+        print(
+            f"  LLM batch {batch_idx}/{len(batches)}: done, "
+            f"found {len(matches)} match(es){cache_suffix}"
+        )
 
     return all_matches

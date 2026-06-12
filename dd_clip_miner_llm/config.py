@@ -44,6 +44,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "reasoning_followup_rounds": 5,
         "reasoning_followup_max_tokens": 32768,
         "batch_size": None,
+        "cache_friendly_prompt_layout": False,
+        "compact_segment_ranges": False,
+        "max_tool_rounds": 2,
+        "final_tool_max_tokens": None,
         "use_tools": True,
         "verify_with_search": True,
         "json_fix_rounds": 3,
@@ -90,9 +94,21 @@ DEFAULT_CONFIG: dict[str, Any] = {
         },
         "missed_recheck": {
             "enabled": True,
+            "strategy": "windowed",
+            "fallback_strategy": "windowed_on_structural_failure",
             "batch_size": 500,
             "min_gap_segments": 1,
             "context_segments": 10,
+            "max_completion_tokens": 4096,
+            "max_tool_rounds": 1,
+        },
+        "review": {
+            "enabled": False,
+            "context_segments": 10,
+            "max_window_segments": 500,
+            "max_completion_tokens": 4096,
+            "max_tool_rounds": 1,
+            "fallback": "local_best",
         },
     },
     # 对话识别配置
@@ -189,8 +205,13 @@ def _migrate_padding_config(config: dict[str, Any]) -> dict[str, Any]:
     return config
 
 
-def load_config(path: str | Path | None = None) -> dict[str, Any]:
+def load_config(
+    path: str | Path | None = None,
+    profile: str | None = None,
+) -> dict[str, Any]:
     if path is None:
+        if profile:
+            raise ValueError("A profile can only be selected from a YAML config with a profiles mapping.")
         return _migrate_padding_config(deepcopy(DEFAULT_CONFIG))
 
     try:
@@ -203,7 +224,39 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
         loaded = yaml.safe_load(handle) or {}
     if not isinstance(loaded, dict):
         raise ValueError(f"Config file must contain a mapping: {config_path}")
-    config = deep_merge(DEFAULT_CONFIG, loaded)
+
+    profiles = loaded.get("profiles")
+    if profiles is None:
+        if profile:
+            raise ValueError(f"Config does not define profiles; cannot select profile: {profile}")
+        config = deep_merge(DEFAULT_CONFIG, loaded)
+        return _migrate_padding_config(config)
+
+    if not isinstance(profiles, dict) or not profiles:
+        raise ValueError("Config profiles must be a non-empty mapping.")
+
+    selected_profile = profile or loaded.get("default_profile")
+    if not selected_profile:
+        selected_profile = next(iter(profiles))
+    selected_profile = str(selected_profile)
+    if selected_profile not in profiles:
+        available = ", ".join(sorted(str(name) for name in profiles))
+        raise ValueError(
+            f"Unknown config profile {selected_profile!r}. Available profiles: {available}"
+        )
+    profile_override = profiles[selected_profile]
+    if not isinstance(profile_override, dict):
+        raise ValueError(f"Config profile {selected_profile!r} must be a mapping.")
+
+    common = {
+        key: value
+        for key, value in loaded.items()
+        if key not in {"profiles", "default_profile"}
+    }
+    config = deep_merge(DEFAULT_CONFIG, common)
+    config = deep_merge(config, profile_override)
+    config["_profile_name"] = selected_profile
+    config["_profile_enabled"] = True
     return _migrate_padding_config(config)
 
 

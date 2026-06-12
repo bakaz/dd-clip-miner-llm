@@ -129,6 +129,8 @@ asr:
 python -m dd_clip_miner_llm run "D:\videos\live.mp4" --config config.yaml
 python -m dd_clip_miner_llm run "D:\videos\live.mp4" --config config.yaml --content-types song,dialogue
 python -m dd_clip_miner_llm run "D:\videos\live.mp4" --config config.yaml --video-codec auto --no-video-clips
+python -m dd_clip_miner_llm run "D:\videos\live.mp4" --config config.yaml --profile accuracy
+python -m dd_clip_miner_llm run "D:\videos\live.mp4" --config config.yaml --profile kv_optimized
 ```
 
 ### 批量
@@ -136,7 +138,21 @@ python -m dd_clip_miner_llm run "D:\videos\live.mp4" --config config.yaml --vide
 ```powershell
 python -m dd_clip_miner_llm batch-run "D:\input" --config config.yaml --work-root "D:\work" --result-root "D:\results"
 python -m dd_clip_miner_llm batch-run "D:\input" --config config.yaml --work-root "D:\work" --result-root "D:\results" --concat
+python -m dd_clip_miner_llm batch-run "D:\input" --config config.yaml --profile kv_optimized --work-root "D:\work" --result-root "D:\results"
 ```
+
+配置包含 `profiles` 时，音频和 ASR 由两个 profile 共享，LLM、切片和报告分别写入
+`02_asr/llm/<profile>`、`03_clips/<profile>`、`04_reports/<profile>`。
+`accuracy` 保留 task-first 和 `segment_indices`；`kv_optimized` 使用缓存友好布局和
+紧凑区间。两套 profile 都启用局部冲突复核。`accuracy` 的漏检复核继续使用局部
+窗口；`kv_optimized` 使用一次完整 ASR 覆盖审计，复用主轮 ASR 前缀缓存，仅在
+API 错误、截断、无效 JSON 或 JSON 修复时回退到局部窗口。合法空数组不会触发回退。
+两个 profile 都完成后会生成
+`02_asr/llm/profile_comparison.json` 和 `profile_comparison.md`。
+
+`song.missed_recheck.strategy` 可设为 `windowed` 或 `full_transcript`。
+全量审计会写入 `missed_recheck/audit.json`，其中包含输入指纹、目标区间、
+结构失败原因、fallback 状态和当前有效的 LLM 调试文件。
 
 `--concat` 或 `output.concat_videos: true` 时，同目录多段录像先合并再处理。合并失败时查看 `runs/<name>_concat/concat/concat_attempts/*.log`。
 
@@ -153,6 +169,7 @@ python -m dd_clip_miner_llm manual-cut "D:\runs\某次运行" --config config.ya
 | 参数 | 说明 |
 |------|------|
 | `--content-types` | `song,dialogue,highlight,funny,cringe,daily_summary` |
+| `--profile` | 选择 YAML 中的 `accuracy` 或 `kv_optimized` profile |
 | `--asr-model` / `--asr-language` | 覆盖 ASR |
 | `--llm-model` / `--llm-api-key` / `--llm-base-url` | 覆盖 LLM |
 | `--padding-before` / `--padding-after` | 歌曲 padding（兼容 dd-song-miner-llm） |
