@@ -33,6 +33,7 @@ from .risk import (
     load_supported_search_titles,
     score_song_match_risks,
 )
+from ..config import is_risk_routed_v3
 
 
 class _OffsetRecognizer:
@@ -612,26 +613,6 @@ def _resolve_review_context(
     normalized, normalization_events, suspicious = _normalize_song_matches(
         segments, config, matches,
     )
-    if False:
-        risk_records, risk_suspicious = score_song_match_risks(
-            segments,
-            config,
-            normalized,
-            source="main" if phase == "before_missed_recheck" else "missed_recheck",
-        )
-        suspicious.update(risk_suspicious)
-        if phase == "after_missed_recheck":
-            previously_reviewed = _load_previously_reviewed_keys(llm_dir)
-            suspicious.difference_update(previously_reviewed)
-        normalization_events.append({
-            "type": "risk_routing",
-            "review_candidates": len(risk_suspicious),
-            "previously_reviewed_skipped": (
-                len(risk_suspicious - suspicious)
-                if phase == "after_missed_recheck" else 0
-            ),
-            "records": [record.to_dict() for record in risk_records],
-        })
     if phase == "before_missed_recheck" and _llm_debug_has_structural_issue(llm_dir):
         suspicious.update(_match_key(match) for match in normalized)
         normalization_events.append({"type": "main_output_truncated_or_repaired"})
@@ -681,20 +662,8 @@ def _resolve_review_context(
             full_audit_candidate_keys = {
                 _match_key(match) for match in full_audit_candidates
             }
-    if False:
-        full_audit_candidate_keys = None
 
-    searched_titles = (
-        load_supported_search_titles(llm_dir, normalized)
-        if False
-        else _load_searched_titles(llm_dir)
-    )
-    if False:
-        clusters = _batch_risk_review_clusters(
-            clusters,
-            max_span_segments=max_cluster_span,
-            max_candidates=int(review_config.get("max_candidates_per_request", 6) or 6),
-        )
+    searched_titles = _load_searched_titles(llm_dir)
     transcript_scope_requested = str(
         review_config.get("transcript_scope", "local")
     ).strip().lower()
@@ -718,9 +687,7 @@ def _resolve_review_context(
     else:
         adaptive_resolution = load_adaptive_strategies_cache(llm_dir) or {}
 
-    if False:
-        pass
-    elif adaptive_resolution.get("review_scope_resolved"):
+    if adaptive_resolution.get("review_scope_resolved"):
         transcript_scope = str(adaptive_resolution["review_scope_resolved"])
         transcript_scope_reason = str(adaptive_resolution.get("reason", "cached_joint"))
         scope_cost_details = dict(adaptive_resolution.get("review_details") or {})
@@ -814,8 +781,6 @@ def _review_single_cluster(
         local_config["llm"]["final_tool_max_tokens"] = int(review_config.get("max_completion_tokens", 4096) or 4096)
         local_config["llm"]["max_tool_rounds"] = int(review_config.get("max_tool_rounds", 1) or 0)
         local_config["llm"]["compact_segment_ranges"] = True
-        if False:
-            local_config["llm"]["song_tools_enabled"] = True
         cluster_debug_dir = review_root / f"cluster_{cluster_index:03d}"
         from ..llm import identify_content
         if transcript_scope == "full":
@@ -836,16 +801,12 @@ def _review_single_cluster(
                 debug_dir=cluster_debug_dir, debug_phase=debug_phase,
             )
         reviewed_matches = _filter_matches_to_segment_range(reviewed_matches, context_start, context_end)
-        if False:
-            searched_titles = searched_titles | load_supported_search_titles(
-                cluster_debug_dir, [*cluster, *reviewed_matches],
-            )
         # Fused C: if this LLM review "merged" what was a disjoint same-title cluster (e.g. 囚鸟),
         # pass the key to force_merge_same_title so the normalize call here skips re-split.
         # This respects the LLM's decision to treat as one continuous performance.
         force = set()
         if (
-            True
+            not is_risk_routed_v3(config)
             and reviewed_matches
             and len(reviewed_matches) < len(cluster)
         ):

@@ -635,10 +635,6 @@ def _execute_full_transcript_audit(
     )
     local_config["llm"]["retry_empty_with_reasoning"] = False
     local_config["llm"]["json_fix_rounds"] = 0
-    if False:
-        local_config["llm"]["song_tools_enabled"] = False
-        local_config["llm"]["max_tool_rounds"] = 0
-        local_config["llm"]["force_final_tool_round"] = False
     raw_matches = identify_content(
         segments, local_config, audit_recognizer,
         debug_dir=audit_debug_dir, debug_phase="missed_recheck",
