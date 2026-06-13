@@ -94,20 +94,20 @@ def build_content_results(
     type_config = config.get(content_type, {})
     padding_config = get_padding_config(config, content_type)
 
-    if content_type == "song":
-        before_pad = float(padding_config.get("before_seconds", 15.0))
-        after_pad = float(padding_config.get("after_seconds", 15.0))
-        after_guard = float(padding_config.get("after_next_asr_end_guard_seconds", 2.0))
-        min_duration = float(padding_config.get("min_song_seconds", 75.0))
-        max_duration = float(padding_config.get("max_song_seconds", 360.0))
-        merge_gap = float(padding_config.get("merge_gap_seconds", 20.0))
-    else:
-        before_pad = float(padding_config.get("before_seconds", 1.0))
-        after_pad = float(padding_config.get("after_seconds", 2.0))
-        after_guard = 0.0
-        min_duration = float(type_config.get("min_duration", padding_config.get("min_duration", 10.0)))
-        max_duration = None
-        merge_gap = float(type_config.get("merge_gap_seconds", padding_config.get("merge_gap_seconds", 10.0)))
+    before_pad = float(padding_config.get("before_seconds", 1.0))
+    after_pad = float(padding_config.get("after_seconds", 2.0))
+    after_guard = float(padding_config.get("after_next_asr_end_guard_seconds", 0.0))
+    min_duration = float(
+        padding_config.get("min_song_seconds")
+        or type_config.get("min_duration")
+        or padding_config.get("min_duration", 10.0)
+    )
+    max_duration_raw = padding_config.get("max_song_seconds") or type_config.get("max_duration")
+    max_duration = float(max_duration_raw) if max_duration_raw is not None else None
+    merge_gap = float(
+        padding_config.get("merge_gap_seconds")
+        or type_config.get("merge_gap_seconds", 10.0)
+    )
 
     raw_matches: list[dict[str, Any]] = []
 

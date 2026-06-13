@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any
 
+from .config import get_llm_config, get_song_recheck_config, get_song_review_config
 from .models import ContentMatch, TranscriptSegment
 
 DEFAULT_PRICING: dict[str, float] = {
@@ -154,7 +155,7 @@ def _default_recognizer(recognizer: Any | None) -> Any:
 
 def _pipeline_cost_settings(config: dict[str, Any]) -> dict[str, Any]:
     """Pricing/token defaults shared across song pipeline phases."""
-    review_config = config.get("song", {}).get("review", {})
+    review_config = get_song_review_config(config)
     return _adaptive_cost_settings(review_config)
 
 
@@ -162,7 +163,7 @@ def _main_batches(
     segments: list[TranscriptSegment],
     config: dict[str, Any],
 ) -> list[tuple[int, list[TranscriptSegment]]]:
-    batch_size_value = config.get("llm", {}).get("batch_size")
+    batch_size_value = get_llm_config(config).get("batch_size")
     if batch_size_value in (None, "", 0, "0"):
         return [(0, segments)]
     batch_size = int(batch_size_value)
@@ -193,8 +194,8 @@ def estimate_main_cost(
     ratio = settings["token_chars_ratio"]
     pricing = settings["pricing"]
     completion_tokens = settings["estimated_completion_tokens"]["main"]
-    kv_layout = bool(config.get("llm", {}).get("cache_friendly_prompt_layout", False))
-    api_rounds = _api_rounds({}, config.get("llm", {}))
+    kv_layout = bool(get_llm_config(config).get("cache_friendly_prompt_layout", False))
+    api_rounds = _api_rounds({}, get_llm_config(config))
     base_recognizer = _default_recognizer(recognizer)
 
     miss_tokens = 0
@@ -231,7 +232,7 @@ def _iter_overlong_recheck_windows(
     matches: list[ContentMatch],
     config: dict[str, Any],
 ) -> list[tuple[int, int]]:
-    from .config import get_padding_config
+    from .config import get_llm_config, get_padding_config, get_song_recheck_config, get_song_review_config
     from .song_postprocess import (
         _segment_range_duration_seconds,
         _split_indices_by_time_gap_for_recheck,
@@ -240,13 +241,13 @@ def _iter_overlong_recheck_windows(
     if not segments or not matches:
         return []
 
-    recheck_config = config.get("song", {}).get("missed_recheck", {})
+    recheck_config = get_song_recheck_config(config)
     if recheck_config.get("enabled", True) is False:
         return []
 
     padding_config = get_padding_config(config, "song")
     max_song_seconds = float(padding_config.get("max_song_seconds", 360.0))
-    merge_gap_seconds = float(padding_config.get("merge_gap_seconds", 20.0))
+    merge_gap_seconds = float(padding_config.get("merge_gap_seconds", 40.0))
     if max_song_seconds <= 0:
         return []
 
@@ -285,9 +286,9 @@ def estimate_overlong_cost(
     ratio = settings["token_chars_ratio"]
     pricing = settings["pricing"]
     completion_tokens = settings["estimated_completion_tokens"]["overlong"]
-    recheck_config = config.get("song", {}).get("missed_recheck", {})
+    recheck_config = get_song_recheck_config(config)
     context_segments = int(recheck_config.get("context_segments", 10) or 0)
-    api_rounds = _api_rounds(recheck_config, config.get("llm", {}))
+    api_rounds = _api_rounds(recheck_config, get_llm_config(config))
     base_recognizer = _default_recognizer(recognizer)
 
     windows = _iter_overlong_recheck_windows(segments, matches, config)
@@ -394,7 +395,7 @@ def estimate_review_after_cost(
     target_ranges: list[tuple[int, int]] | None = None,
     recognizer: Any | None = None,
 ) -> CostBreakdown:
-    review_config = config.get("song", {}).get("review", {})
+    review_config = get_song_review_config(config)
     if review_config.get("enabled", False) is False:
         return estimate_review_cost(
             config,
@@ -435,14 +436,14 @@ def estimate_review_cost(
         _expand_segment_range,
     )
 
-    review_config = config.get("song", {}).get("review", {})
+    review_config = get_song_review_config(config)
     settings = _adaptive_cost_settings(review_config)
     ratio = settings["token_chars_ratio"]
     pricing = settings["pricing"]
     completion_tokens = settings["estimated_completion_tokens"]["review"]
     context_segments = int(review_config.get("context_segments", 10) or 0)
     max_window_segments = int(review_config.get("max_window_segments", 500) or 500)
-    kv_layout = bool(config.get("llm", {}).get("cache_friendly_prompt_layout", False))
+    kv_layout = bool(get_llm_config(config).get("cache_friendly_prompt_layout", False))
     base_recognizer = _default_recognizer(recognizer)
 
     reviewable_clusters: list[tuple[list[ContentMatch], int, int, int, int]] = []
@@ -472,7 +473,7 @@ def estimate_review_cost(
 
     miss_tokens = 0
     hit_tokens = 0
-    api_rounds = _api_rounds(review_config, config.get("llm", {}))
+    api_rounds = _api_rounds(review_config, get_llm_config(config))
 
     for cluster, target_start, target_end, context_start, context_end in reviewable_clusters:
         if scope == "full":
@@ -537,7 +538,7 @@ def estimate_missed_cost(
         _group_segment_ranges,
     )
 
-    recheck_config = config.get("song", {}).get("missed_recheck", {})
+    recheck_config = get_song_recheck_config(config)
     settings = _adaptive_cost_settings(recheck_config)
     ratio = settings["token_chars_ratio"]
     pricing = settings["pricing"]
@@ -545,7 +546,7 @@ def estimate_missed_cost(
     context_segments = int(recheck_config.get("context_segments", 10) or 0)
     batch_size_value = recheck_config.get(
         "batch_size",
-        config.get("llm", {}).get("batch_size") or 500,
+        get_llm_config(config).get("batch_size") or 500,
     )
     batch_size = int(batch_size_value or 500)
     base_recognizer = _default_recognizer(recognizer)
@@ -559,8 +560,8 @@ def estimate_missed_cost(
             pricing=pricing,
         )
 
-    kv_layout = bool(config.get("llm", {}).get("cache_friendly_prompt_layout", False))
-    api_rounds = _api_rounds(recheck_config, config.get("llm", {}))
+    kv_layout = bool(get_llm_config(config).get("cache_friendly_prompt_layout", False))
+    api_rounds = _api_rounds(recheck_config, get_llm_config(config))
     miss_tokens = 0
     hit_tokens = 0
     call_count = 0

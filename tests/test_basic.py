@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -297,10 +298,30 @@ profiles:
         }
         assert list_profile_names(loaded) == ["kv_optimized", "accuracy"]
 
-    def test_accuracy_profile_forces_local_review_scope(self):
+    def test_accuracy_profile_declares_local_review_scope(self):
         config = load_config("config.example.yaml", profile="accuracy")
 
         assert config["song"]["review"]["transcript_scope"] == "local"
+
+    def test_profile_name_does_not_apply_hidden_song_overrides(self, tmp_path):
+        config_file = tmp_path / "profiles.yaml"
+        config_file.write_text(
+            """
+profiles:
+  accuracy:
+    song:
+      review:
+        transcript_scope: full
+      missed_recheck:
+        strategy: full_transcript
+""",
+            encoding="utf-8",
+        )
+
+        config = load_config(config_file, profile="accuracy")
+
+        assert config["song"]["review"]["transcript_scope"] == "full"
+        assert config["song"]["missed_recheck"]["strategy"] == "full_transcript"
 
     def test_migrate_padding_config(self):
         """测试旧项目 padding 配置迁移到 song.padding"""
@@ -370,10 +391,113 @@ class TestASRBackends:
             TranscriptSegment(start=1.2, end=2.5, text="world"),
         ]
 
+    def test_resolve_hardware_gpu_section(self, monkeypatch):
+        from dd_clip_miner_llm.asr_backends import _resolve_hardware_local_config
+        monkeypatch.setattr("dd_clip_miner_llm.asr_backends._is_gpu_available", lambda: True)
+        cfg = {
+            "faster_whisper": {"model": "small", "device": "auto"},
+            "gpu": {"faster_whisper": {"device": "cuda", "compute_type": "float16"}},
+            "cpu": {"faster_whisper": {"device": "cpu", "compute_type": "int8"}},
+        }
+        resolved = _resolve_hardware_local_config(cfg)
+        assert resolved["faster_whisper"]["device"] == "cuda"
+        assert resolved["faster_whisper"]["compute_type"] == "float16"
+
+    def test_resolve_hardware_cpu_section_fallback(self, monkeypatch):
+        from dd_clip_miner_llm.asr_backends import _resolve_hardware_local_config
+        monkeypatch.setattr("dd_clip_miner_llm.asr_backends._is_gpu_available", lambda: False)
+        cfg = {
+            "faster_whisper": {"model": "small"},
+            "cpu": {"faster_whisper": {"device": "cpu", "compute_type": "int8", "cpu_threads": 4}},
+        }
+        resolved = _resolve_hardware_local_config(cfg)
+        assert resolved["faster_whisper"]["device"] == "cpu"
+        assert resolved["faster_whisper"]["compute_type"] == "int8"
+
+    def test_resolve_nested_hardware_section(self, monkeypatch):
+        from dd_clip_miner_llm.asr_backends import _resolve_hardware_local_config
+
+        monkeypatch.setattr("dd_clip_miner_llm.asr_backends._is_gpu_available", lambda: False)
+        cfg = {
+            "backend": "faster_whisper",
+            "faster_whisper": {
+                "model": "small",
+                "device": "auto",
+                "cpu": {"device": "cpu", "compute_type": "int8"},
+            },
+        }
+
+        resolved = _resolve_hardware_local_config(cfg)
+
+        assert resolved["faster_whisper"]["device"] == "cpu"
+        assert resolved["faster_whisper"]["compute_type"] == "int8"
+
+    def test_explicit_device_is_not_overridden(self, monkeypatch):
+        from dd_clip_miner_llm.asr_backends import _resolve_hardware_local_config
+
+        monkeypatch.setattr("dd_clip_miner_llm.asr_backends._is_gpu_available", lambda: True)
+        cfg = {
+            "backend": "faster_whisper",
+            "faster_whisper": {"device": "cpu"},
+            "gpu": {"faster_whisper": {"device": "cuda"}},
+        }
+
+        resolved = _resolve_hardware_local_config(cfg)
+
+        assert resolved["faster_whisper"]["device"] == "cpu"
+
+    def test_build_with_hardware_sections(self, monkeypatch):
+        from dd_clip_miner_llm.asr_backends import build_asr_backend, _resolve_hardware_local_config
+        monkeypatch.setattr("dd_clip_miner_llm.asr_backends._is_gpu_available", lambda: False)
+        cfg = {
+            "mode": "local",
+            "local": {
+                "backend": "faster_whisper",
+                "faster_whisper": {"model": "small", "device": "auto"},
+                "cpu": {"faster_whisper": {"device": "cpu", "compute_type": "int8"}},
+            }
+        }
+        backend = build_asr_backend(cfg["local"])
+        assert isinstance(backend, FasterWhisperBackend)
+        # after resolution in build, settings should have cpu values
+        assert backend.settings.get("device") == "cpu"
+        assert backend.settings.get("compute_type") == "int8"
+
+    def test_batched_transcription_requests_timestamps_and_splits_word_gaps(self):
+        backend = FasterWhisperBackend({
+            "batch_size": 8,
+            "word_gap_seconds": 2.0,
+            "max_segment_seconds": 15.0,
+        })
+        calls = {}
+        words = [
+            SimpleNamespace(start=1.0, end=1.5, word="你"),
+            SimpleNamespace(start=1.5, end=2.0, word="好"),
+            SimpleNamespace(start=10.0, end=10.5, word="下"),
+            SimpleNamespace(start=10.5, end=11.0, word="句"),
+        ]
+        segment = SimpleNamespace(start=1.0, end=11.0, text="你好下句", words=words)
+
+        class BatchedModel:
+            def transcribe(self, _audio_path, **kwargs):
+                calls.update(kwargs)
+                return [segment], object()
+
+        backend._get_batched_model = lambda: BatchedModel()
+
+        result = backend.transcribe("audio.wav")
+
+        assert calls["without_timestamps"] is False
+        assert calls["word_timestamps"] is True
+        assert result == [
+            TranscriptSegment(start=1.0, end=2.0, text="你好"),
+            TranscriptSegment(start=10.0, end=11.0, text="下句"),
+        ]
+
 
 class TestSongMissedRecheck:
     def test_uncovered_segment_ranges(self):
-        from dd_clip_miner_llm.pipeline import _uncovered_segment_ranges
+        from dd_clip_miner_llm.song_postprocess import _uncovered_segment_ranges
 
         matches = [
             ContentMatch(content_type="song", title="A", segment_indices=[1, 2], confidence=0.9),
@@ -383,7 +507,7 @@ class TestSongMissedRecheck:
         assert _uncovered_segment_ranges(6, matches) == [(0, 0), (3, 3), (5, 5)]
 
     def test_split_segment_ranges(self):
-        from dd_clip_miner_llm.pipeline import _split_segment_ranges
+        from dd_clip_miner_llm.song_postprocess import _split_segment_ranges
 
         assert _split_segment_ranges([(0, 4), (8, 9)], 2) == [
             (0, 1),
@@ -393,7 +517,7 @@ class TestSongMissedRecheck:
         ]
 
     def test_windowed_finalize_dedupes_splits_and_merges_same_title(self):
-        from dd_clip_miner_llm.pipeline import _finalize_windowed_missed_recheck_matches
+        from dd_clip_miner_llm.song_postprocess import _finalize_windowed_missed_recheck_matches
 
         segments = [
             TranscriptSegment(start=0.0, end=10.0, text="a"),
@@ -428,7 +552,7 @@ class TestSongMissedRecheck:
         assert any(event["type"] == "exact_duplicate" for event in summary["normalization_events"])
 
     def test_group_segment_ranges_combines_targets_within_request_span(self):
-        from dd_clip_miner_llm.pipeline import _group_segment_ranges
+        from dd_clip_miner_llm.song_postprocess import _group_segment_ranges
 
         assert _group_segment_ranges(
             [(0, 20), (40, 60), (490, 499), (500, 520)],
@@ -446,22 +570,40 @@ class TestSongMissedRecheck:
         assert recheck["fallback_strategy"] == "windowed_on_structural_failure"
         assert recheck["batch_size"] == 500
         assert recheck["context_segments"] == 10
-        assert recheck["max_completion_tokens"] == 4096
+        assert recheck["max_completion_tokens"] == 32768
         assert recheck["max_tool_rounds"] == 1
         assert DEFAULT_CONFIG["song"]["padding"]["max_song_seconds"] == 360.0
 
-    def test_shipped_kv_profile_uses_adaptive_missed_recheck(self):
+    def test_shipped_kv_profile_uses_fixed_risk_routed_pipeline(self):
         config = load_config("config.example.yaml", profile="kv_optimized")
 
-        assert config["song"]["missed_recheck"]["strategy"] == "adaptive"
-        assert (
-            config["song"]["missed_recheck"]["fallback_strategy"]
-            == "windowed_on_structural_failure"
-        )
-        assert config["song"]["review"]["transcript_scope"] == "adaptive"
+        assert config["song"]["pipeline"]["strategy"] == "risk_routed_v3"
+        assert config["song"]["pipeline"]["runtime_adaptive"] == "fixed_three_stage"
+        assert config["song"]["pipeline"]["stages"] == {
+            "discovery": "precision",
+            "recall_audit": "uncovered_evidence",
+            "adjudication": "full_transcript",
+        }
+        assert config["song"]["pipeline"]["continuation_overlap_segments"] == 50
+        assert config["song"]["pipeline"]["anchor_boundary_expansion"] is False
+        assert config["song"]["search"]["enabled"] is False
+        assert config["song"]["missed_recheck"]["enabled"] is True
+        assert config["song"]["review"]["enabled"] is False
+        assert config["song"]["review"]["transcript_scope"] == "local"
+        assert config["song"]["padding"]["merge_gap_seconds"] == 40.0
+
+    def test_accuracy_profile_keeps_legacy_song_pipeline(self):
+        config = load_config("config.example.yaml", profile="accuracy")
+
+        assert config["song"]["pipeline"]["strategy"] == "legacy"
+        assert config["song"]["review"]["transcript_scope"] == "local"
+        assert config["song"]["review"]["enabled"] is True
+        assert config["song"]["missed_recheck"]["strategy"] == "windowed"
+        assert config["song"]["missed_recheck"]["enabled"] is True
+        assert config["song"]["padding"]["merge_gap_seconds"] == 40.0
 
     def test_song_normalization_splits_disjoint_ranges_and_deduplicates(self):
-        from dd_clip_miner_llm.pipeline import _normalize_song_matches
+        from dd_clip_miner_llm.song_postprocess import _normalize_song_matches
 
         segments = [
             TranscriptSegment(start=float(i * 10), end=float(i * 10 + 5), text=str(i))
@@ -502,7 +644,7 @@ class TestSongMissedRecheck:
         assert len(suspicious) == 2
 
     def test_review_clusters_connect_different_title_overlaps(self):
-        from dd_clip_miner_llm.pipeline import _build_song_review_clusters
+        from dd_clip_miner_llm.song_postprocess import _build_song_review_clusters
 
         matches = [
             ContentMatch(content_type="song", title="七月七日晴", segment_indices=[1, 2], confidence=0.9),
@@ -516,7 +658,7 @@ class TestSongMissedRecheck:
         assert {match.title for match in clusters[0]} == {"七月七日晴", "说了再见"}
 
     def test_review_clusters_group_nearby_suspicious_ranges_from_same_title(self):
-        from dd_clip_miner_llm.pipeline import _build_song_review_clusters, _match_key
+        from dd_clip_miner_llm.song_postprocess import _build_song_review_clusters, _match_key
 
         matches = [
             ContentMatch(content_type="song", title="天后", segment_indices=[10, 11], confidence=0.9),
@@ -537,7 +679,7 @@ class TestSongMissedRecheck:
         ]
 
     def test_review_clusters_connect_adjacent_different_titles_when_enabled(self):
-        from dd_clip_miner_llm.pipeline import _build_song_review_clusters
+        from dd_clip_miner_llm.song_postprocess import _build_song_review_clusters
 
         matches = [
             ContentMatch(content_type="song", title="七月七日晴", segment_indices=[999, 1002], confidence=0.85),
@@ -555,7 +697,7 @@ class TestSongMissedRecheck:
         assert {match.title for match in clusters[0]} == {"七月七日晴", "说了再见"}
 
     def test_review_clusters_leave_adjacent_different_titles_disabled_by_default(self):
-        from dd_clip_miner_llm.pipeline import _build_song_review_clusters
+        from dd_clip_miner_llm.song_postprocess import _build_song_review_clusters
 
         matches = [
             ContentMatch(content_type="song", title="七月七日晴", segment_indices=[1, 2], confidence=0.9),
@@ -565,7 +707,7 @@ class TestSongMissedRecheck:
         assert _build_song_review_clusters(matches, set()) == []
 
     def test_local_best_prefers_known_higher_confidence_candidate(self):
-        from dd_clip_miner_llm.pipeline import _local_best_song_cluster
+        from dd_clip_miner_llm.song_postprocess import _local_best_song_cluster
 
         segments = [
             TranscriptSegment(start=0.0, end=30.0, text="a"),
@@ -591,7 +733,7 @@ class TestSongMissedRecheck:
         tmp_path,
         monkeypatch,
     ):
-        from dd_clip_miner_llm.pipeline import _review_song_matches
+        from dd_clip_miner_llm.song_postprocess import _review_song_matches
         from dd_clip_miner_llm.recognizers import get_recognizer
 
         segments = [
@@ -662,7 +804,7 @@ class TestSongMissedRecheck:
         assert [match.title for match in result] == ["A"]
 
     def test_profile_state_requires_matching_fingerprints(self, tmp_path):
-        from dd_clip_miner_llm.pipeline import _profile_state_matches, _write_profile_state
+        from dd_clip_miner_llm.profile_state import _profile_state_matches, _write_profile_state
 
         state_path = tmp_path / "profile.json"
         config = deep_merge(DEFAULT_CONFIG, {
@@ -693,7 +835,7 @@ class TestSongMissedRecheck:
         )
 
     def test_profile_comparison_report_is_written_for_two_profiles(self, tmp_path):
-        from dd_clip_miner_llm.pipeline import _write_profile_comparison
+        from dd_clip_miner_llm.profile_state import _write_profile_comparison
 
         for name, title, hit, miss in [
             ("accuracy", "七月七日晴", 10, 90),
@@ -734,7 +876,7 @@ class TestSongMissedRecheck:
         assert (tmp_path / "profile_comparison.md").exists()
 
     def test_short_recheck_ranges_are_filtered_by_min_song_seconds(self):
-        from dd_clip_miner_llm.pipeline import _filter_short_segment_ranges
+        from dd_clip_miner_llm.song_postprocess import _filter_short_segment_ranges
 
         segments = [
             TranscriptSegment(start=0.0, end=10.0, text="短空隙"),
@@ -752,7 +894,7 @@ class TestSongMissedRecheck:
         assert skipped == 1
 
     def test_recheck_ranges_include_context_but_keep_core_matches(self, tmp_path, monkeypatch):
-        from dd_clip_miner_llm.pipeline import _recheck_uncovered_song_segments
+        from dd_clip_miner_llm.song_postprocess import _recheck_uncovered_song_segments
         from dd_clip_miner_llm.recognizers import get_recognizer
 
         segments = [
@@ -824,7 +966,7 @@ class TestSongMissedRecheck:
 
     def test_full_transcript_audit_keeps_main_asr_prefix_and_tools(self, sample_segments, sample_config):
         from dd_clip_miner_llm.llm import build_llm_messages
-        from dd_clip_miner_llm.pipeline import _SongCoverageAuditRecognizer
+        from dd_clip_miner_llm.song_postprocess import _SongCoverageAuditRecognizer
         from dd_clip_miner_llm.recognizers import get_recognizer
 
         sample_config["llm"]["cache_friendly_prompt_layout"] = True
@@ -846,7 +988,7 @@ class TestSongMissedRecheck:
 
     def test_full_review_shares_main_asr_prefix_and_tools(self, sample_segments, sample_config):
         from dd_clip_miner_llm.llm import build_llm_messages
-        from dd_clip_miner_llm.pipeline import _SongFullReviewRecognizer
+        from dd_clip_miner_llm.song_postprocess import _SongFullReviewRecognizer
         from dd_clip_miner_llm.recognizers import get_recognizer
 
         sample_config["llm"]["cache_friendly_prompt_layout"] = True
@@ -874,7 +1016,7 @@ class TestSongMissedRecheck:
         assert "[[0,2]]" in review_messages[1]["content"]
 
     def test_filter_matches_to_segment_ranges_rejects_covered_indices(self):
-        from dd_clip_miner_llm.pipeline import _filter_matches_to_segment_ranges
+        from dd_clip_miner_llm.song_postprocess import _filter_matches_to_segment_ranges
 
         matches = [
             ContentMatch(
@@ -891,7 +1033,7 @@ class TestSongMissedRecheck:
         assert filtered[0].segment_indices == [2, 3, 9]
 
     def test_full_transcript_merges_adjacent_same_title_results(self):
-        from dd_clip_miner_llm.pipeline import _merge_adjacent_same_title_matches
+        from dd_clip_miner_llm.song_postprocess import _merge_adjacent_same_title_matches
 
         segments = [
             TranscriptSegment(start=0.0, end=10.0, text="a"),
@@ -915,7 +1057,7 @@ class TestSongMissedRecheck:
         assert len(events) == 1
 
     def test_full_transcript_sanitizes_review_output(self):
-        from dd_clip_miner_llm.pipeline import (
+        from dd_clip_miner_llm.song_postprocess import (
             _sanitize_full_transcript_review_results,
         )
 
@@ -951,7 +1093,7 @@ class TestSongMissedRecheck:
         }
 
     def test_full_transcript_empty_array_does_not_fallback(self, tmp_path, monkeypatch):
-        from dd_clip_miner_llm.pipeline import _recheck_uncovered_song_segments
+        from dd_clip_miner_llm.song_postprocess import _recheck_uncovered_song_segments
         from dd_clip_miner_llm.recognizers import get_recognizer
 
         segments = [
@@ -1001,7 +1143,7 @@ class TestSongMissedRecheck:
 
         monkeypatch.setattr("dd_clip_miner_llm.llm.identify_content", fake_identify_content)
         monkeypatch.setattr(
-            "dd_clip_miner_llm.song_postprocess._run_windowed_missed_recheck",
+            "dd_clip_miner_llm.song_postprocess.recheck._run_windowed_missed_recheck",
             fail_windowed,
         )
 
@@ -1045,7 +1187,7 @@ class TestSongMissedRecheck:
         payload,
         expected_reason,
     ):
-        from dd_clip_miner_llm.pipeline import _recheck_uncovered_song_segments
+        from dd_clip_miner_llm.song_postprocess import _recheck_uncovered_song_segments
         from dd_clip_miner_llm.recognizers import get_recognizer
 
         segments = [
@@ -1102,7 +1244,7 @@ class TestSongMissedRecheck:
 
         monkeypatch.setattr("dd_clip_miner_llm.llm.identify_content", fake_identify_content)
         monkeypatch.setattr(
-            "dd_clip_miner_llm.song_postprocess._run_windowed_missed_recheck",
+            "dd_clip_miner_llm.song_postprocess.recheck._run_windowed_missed_recheck",
             fake_windowed,
         )
 
@@ -1123,7 +1265,7 @@ class TestSongMissedRecheck:
         assert expected_reason in audit["structural_failures"]
 
     def test_missed_recheck_fingerprint_changes_for_each_input(self):
-        from dd_clip_miner_llm.pipeline import _missed_recheck_fingerprint
+        from dd_clip_miner_llm.song_postprocess import _missed_recheck_fingerprint
 
         segments = [TranscriptSegment(start=0.0, end=10.0, text="a")]
         matches = [
@@ -1178,7 +1320,7 @@ class TestSongMissedRecheck:
         assert base["config"] != changed_config["config"]
 
     def test_usage_summary_counts_only_valid_debug_files(self, tmp_path):
-        from dd_clip_miner_llm.pipeline import _write_usage_summary, _write_valid_debug_manifest
+        from dd_clip_miner_llm.profile_state import _write_usage_summary, _write_valid_debug_manifest
 
         profile_dir = tmp_path / "accuracy"
         song_dir = profile_dir / "song"
@@ -1247,7 +1389,7 @@ class TestSongMissedRecheck:
         assert summary["totals"]["prompt_cache_hit_tokens"] == 100
 
     def test_profile_usage_totals_respects_valid_debug_manifest(self, tmp_path):
-        from dd_clip_miner_llm.pipeline import _profile_usage_totals
+        from dd_clip_miner_llm.profile_state import _profile_usage_totals
 
         song_dir = tmp_path / "song"
         song_dir.mkdir()
@@ -1276,7 +1418,7 @@ class TestSongMissedRecheck:
         }
 
     def test_valid_debug_manifest_skips_unchanged_review_clusters(self, tmp_path):
-        from dd_clip_miner_llm.pipeline import _write_valid_debug_manifest
+        from dd_clip_miner_llm.profile_state import _write_valid_debug_manifest
 
         review_dir = tmp_path / "review" / "after_missed_recheck"
         for index in (1, 2):
@@ -1314,7 +1456,7 @@ class TestSongMissedRecheck:
         ]
 
     def test_offset_recognizer_forwards_system_prompt(self):
-        from dd_clip_miner_llm.pipeline import _OffsetRecognizer
+        from dd_clip_miner_llm.song_postprocess import _OffsetRecognizer
 
         class Recognizer:
             name = "song"
@@ -1333,7 +1475,7 @@ class TestSongMissedRecheck:
             build_providers,
             build_request_debug_metadata,
         )
-        from dd_clip_miner_llm.pipeline import _load_cached_identify_matches
+        from dd_clip_miner_llm.song_postprocess import _load_cached_identify_matches
         from dd_clip_miner_llm.recognizers import get_recognizer
 
         segments = [
@@ -1403,7 +1545,7 @@ class TestSongMissedRecheck:
         ) is None
 
     def test_usage_summary_includes_multiple_content_types(self, tmp_path):
-        from dd_clip_miner_llm.pipeline import _write_usage_summary
+        from dd_clip_miner_llm.profile_state import _write_usage_summary
 
         for content_type, miss in (("song", 10), ("dialogue", 20)):
             content_dir = tmp_path / content_type
@@ -1429,6 +1571,28 @@ class TestSongMissedRecheck:
         assert summary["totals"]["calls"] == 2
         assert summary["totals"]["prompt_cache_miss_tokens"] == 30
         assert set(summary["content_types"]) == {"song", "dialogue"}
+
+    def test_valid_debug_manifest_includes_anchor_recheck(self, tmp_path):
+        from dd_clip_miner_llm.profile_state import _write_valid_debug_manifest
+
+        anchor_dir = tmp_path / "anchor_recheck"
+        anchor_dir.mkdir(parents=True)
+        debug_file = anchor_dir / "llm_batch_000000.json"
+        debug_file.write_text(
+            json.dumps({"parse_valid": True, "usage": []}),
+            encoding="utf-8",
+        )
+        (anchor_dir / "active_debug_files.json").write_text(
+            json.dumps([debug_file.name]),
+            encoding="utf-8",
+        )
+
+        _write_valid_debug_manifest(tmp_path)
+
+        manifest = json.loads(
+            (tmp_path / "valid_debug_files.json").read_text(encoding="utf-8")
+        )
+        assert manifest == ["anchor_recheck/llm_batch_000000.json"]
 
     def test_review_scope_gate_requires_each_named_song(self):
         from scripts.review_scope_ab import _required_title_checks
@@ -1464,7 +1628,7 @@ class TestSongMissedRecheck:
 # ============ ffmpeg.py 测试 ============
 
     def test_overlong_song_recheck_replaces_when_second_pass_splits(self, tmp_path, monkeypatch):
-        from dd_clip_miner_llm.pipeline import _recheck_overlong_song_matches
+        from dd_clip_miner_llm.song_postprocess import _recheck_overlong_song_matches
         from dd_clip_miner_llm.recognizers import get_recognizer
 
         segments = [
@@ -1521,7 +1685,7 @@ class TestSongMissedRecheck:
         assert [match.segment_indices for match in result] == [[0, 1], [2, 3]]
 
     def test_overlong_song_recheck_keeps_first_pass_when_second_pass_still_overlong(self, tmp_path, monkeypatch):
-        from dd_clip_miner_llm.pipeline import _recheck_overlong_song_matches
+        from dd_clip_miner_llm.song_postprocess import _recheck_overlong_song_matches
 
         segments = [
             TranscriptSegment(start=0.0, end=100.0, text="a"),
@@ -2507,7 +2671,7 @@ class TestCLI:
         assert run_args.profile == "kv_optimized"
         assert batch_args.profile == "accuracy"
 
-    def test_generated_config_enables_adaptive_strategies_for_kv_profile(self):
+    def test_generated_config_enables_fixed_risk_strategy_for_kv_profile(self):
         import yaml
 
         from dd_clip_miner_llm.cli import _generate_config_yaml
@@ -2516,9 +2680,58 @@ class TestCLI:
 
         missed = config["profiles"]["kv_optimized"]["song"]["missed_recheck"]
         review = config["profiles"]["kv_optimized"]["song"]["review"]
-        assert missed["strategy"] == "adaptive"
-        assert missed["fallback_strategy"] == "windowed_on_structural_failure"
-        assert review["transcript_scope"] == "adaptive"
+        pipeline = config["profiles"]["kv_optimized"]["song"]["pipeline"]
+        assert pipeline["strategy"] == "risk_routed_v3"
+        assert pipeline["stages"]["discovery"] == "precision"
+        assert pipeline["stages"]["recall_audit"] == "uncovered_evidence"
+        assert pipeline["stages"]["adjudication"] == "full_transcript"
+        assert pipeline["continuation_overlap_segments"] == 50
+        assert pipeline["anchor_boundary_expansion"] is False
+        assert missed["enabled"] is True
+        assert missed["min_uncovered_seconds"] == 10.0
+        assert review["enabled"] is False
+        assert config["llm"]["max_completion_tokens"] == 32768
+        assert config["llm"]["final_tool_max_tokens"] == 32768
+        assert config["llm"]["continuation_on_length"] is True
+        assert config["llm"]["max_continuation_rounds"] == 8
+        assert config["song"]["review"]["max_completion_tokens"] == 32768
+        assert config["song"]["missed_recheck"]["max_completion_tokens"] == 32768
+        assert config["song"]["padding"]["merge_gap_seconds"] == 40.0
+
+    @pytest.mark.parametrize(
+        "path",
+        ["config.yaml", "config.example.yaml", "config.deepseek.example.yaml"],
+    )
+    def test_shipped_profile_configs_keep_only_shared_values_common(self, path):
+        import yaml
+
+        raw = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+        common_llm = raw["llm"]
+        common_song = raw["song"]
+
+        for key in (
+            "cache_friendly_prompt_layout",
+            "compact_segment_ranges",
+        ):
+            assert key not in common_llm
+        assert common_llm["max_completion_tokens"] == 32768
+        assert common_llm["final_tool_max_tokens"] == 32768
+        assert common_llm["continuation_on_length"] is True
+        assert common_llm["max_continuation_rounds"] == 8
+        assert "pipeline" not in common_song
+        assert "naming" not in common_song
+        assert "enabled" not in common_song["review"]
+        assert "enabled" not in common_song["missed_recheck"]
+        assert "strategy" not in common_song["missed_recheck"]
+
+        accuracy = load_config(path, profile="accuracy")
+        optimized = load_config(path, profile="kv_optimized")
+        assert accuracy["llm"]["max_completion_tokens"] == 32768
+        assert optimized["llm"]["max_completion_tokens"] == 32768
+        assert accuracy["song"]["review"]["max_completion_tokens"] == 32768
+        assert optimized["song"]["missed_recheck"]["max_completion_tokens"] == 32768
+        assert accuracy["song"]["padding"]["merge_gap_seconds"] == 40.0
+        assert optimized["song"]["padding"]["merge_gap_seconds"] == 40.0
 
     def test_adaptive_review_scope_prefers_local_for_few_clusters(self):
         from dd_clip_miner_llm.song_adaptive import resolve_review_transcript_scope
@@ -2923,6 +3136,654 @@ class TestRecognizers:
         assert len(matches) == 1
         assert matches[0].segment_indices == [12, 13, 14, 18]
 
+    def test_song_risk_v2_prompt_scans_all_windows(self, sample_segments, sample_config):
+        from dd_clip_miner_llm.recognizers import get_recognizer
+
+        sample_config["llm"]["cache_friendly_prompt_layout"] = True
+        sample_config["song"]["pipeline"] = {"strategy": "risk_routed_v2"}
+        prompt = get_recognizer("song").build_prompt(sample_segments, 0, sample_config)
+
+        assert "必须按 scan_windows 的顺序检查全部窗口" in prompt
+        assert "连续两句歌词，或连续演唱约 10 秒" in prompt
+        assert '"content_type":"scan_checkpoint"' in prompt
+        assert "分段阶段不识别歌名" in prompt
+
+    def test_song_risk_v2_disables_tools_for_large_calls(self, sample_config):
+        from dd_clip_miner_llm.recognizers import get_recognizer
+
+        sample_config["song"]["pipeline"] = {"strategy": "risk_routed_v2"}
+        recognizer = get_recognizer("song")
+        assert recognizer.get_tools(sample_config) is None
+
+        sample_config["llm"]["song_tools_enabled"] = True
+        assert recognizer.get_tools(sample_config)
+
+    def test_song_risk_duration_is_soft_review_signal(self):
+        from dd_clip_miner_llm.song_postprocess import score_song_match_risks
+
+        segments = [
+            TranscriptSegment(start=float(i * 10), end=float(i * 10 + 8), text="lyric")
+            for i in range(10)
+        ]
+        config = deep_merge(DEFAULT_CONFIG, {
+            "song": {"pipeline": {"strategy": "risk_routed_v2"}}
+        })
+        match = ContentMatch("song", "Known", list(range(10)), 0.9)
+
+        records, suspicious = score_song_match_risks(
+            segments, config, [match], source="main",
+        )
+
+        assert records[0].action.startswith("review")
+        assert "duration_below_soft_range" in records[0].reasons
+        assert len(suspicious) == 1
+        assert match.segment_indices == list(range(10))
+
+    def test_unknown_song_does_not_trigger_review_by_title_alone(self):
+        from dd_clip_miner_llm.song_postprocess import score_song_match_risks
+
+        segments = [
+            TranscriptSegment(float(i * 10), float(i * 10 + 9), "lyric")
+            for i in range(20)
+        ]
+        config = deep_merge(DEFAULT_CONFIG, {
+            "song": {"pipeline": {"strategy": "risk_routed_v2"}}
+        })
+        match = ContentMatch("song", "未知歌曲：代表歌词", list(range(20)), 0.9)
+
+        records, suspicious = score_song_match_risks(
+            segments, config, [match], source="main",
+        )
+
+        assert records[0].action == "accept"
+        assert "unknown_title" in records[0].reasons
+        assert len(suspicious) == 0
+
+    def test_previous_review_keys_are_loaded_from_audit(self, tmp_path):
+        from dd_clip_miner_llm.song_postprocess.review import _load_previously_reviewed_keys
+
+        root = tmp_path / "review" / "before_missed_recheck"
+        root.mkdir(parents=True)
+        match = ContentMatch("song", "Song", [1, 2], 0.8)
+        (root / "cluster_001.json").write_text(
+            json.dumps({"after": [match.to_dict()]}), encoding="utf-8",
+        )
+
+        assert _load_previously_reviewed_keys(tmp_path) == {("song", (1, 2))}
+
+    def test_song_risk_boundary_repair_splits_time_gap(self):
+        from dd_clip_miner_llm.song_postprocess import repair_song_boundaries
+
+        segments = [
+            TranscriptSegment(0.0, 5.0, "a"),
+            TranscriptSegment(6.0, 10.0, "b"),
+            TranscriptSegment(60.0, 65.0, "c"),
+        ]
+        config = deep_merge(DEFAULT_CONFIG, {
+            "song": {
+                "pipeline": {"strategy": "risk_routed_v2"},
+                "normalization": {
+                    "chorus_aware_split": True,
+                    "chorus_gap_seconds": 120.0,
+                    "chorus_similarity_threshold": 0.3,
+                    "chorus_context_segments": 1,
+                },
+            }
+        })
+        repaired, events = repair_song_boundaries(
+            segments, config, [ContentMatch("song", "Song", [0, 1, 2], 0.8)],
+        )
+
+        # 50s gap > merge_gap_seconds (40s) and different lyrics → split
+        assert [match.segment_indices for match in repaired] == [[0, 1], [2]]
+        assert events[0]["type"] == "risk_boundary_split"
+
+    def test_temporal_adjudicated_range_survives_asr_time_gap(self):
+        """v2: temporal_adjudicated with 35s gap stays together (≤ merge_gap_seconds)."""
+        from dd_clip_miner_llm.song_postprocess import (
+            _normalize_song_matches,
+            repair_song_boundaries,
+        )
+
+        segments = [
+            TranscriptSegment(0.0, 5.0, "世界突然安静你也一样吗"),
+            TranscriptSegment(40.0, 45.0, "今天天气真好出去走走吧"),
+        ]
+        config = deep_merge(DEFAULT_CONFIG, {
+            "song": {
+                "pipeline": {"strategy": "risk_routed_v2"},
+                "normalization": {
+                    "chorus_aware_split": True,
+                    "chorus_gap_seconds": 120.0,
+                    "chorus_similarity_threshold": 0.3,
+                    "chorus_context_segments": 1,
+                },
+            }
+        })
+        match = ContentMatch(
+            "song", "Song", [0, 1], 0.9, tags=["temporal_adjudicated"]
+        )
+
+        repaired, boundary_events = repair_song_boundaries(
+            segments, config, [match],
+        )
+        normalized, normalization_events, suspicious = _normalize_song_matches(
+            segments, config, repaired,
+        )
+
+        # 35s gap ≤ merge_gap_seconds (40s) → stays together
+        assert [item.segment_indices for item in normalized] == [[0, 1]]
+
+    def test_temporal_adjudicated_chorus_keeps_together(self):
+        """v2: temporal_adjudicated with similar lyrics and 65s gap stays together."""
+        from dd_clip_miner_llm.song_postprocess import (
+            _normalize_song_matches,
+            repair_song_boundaries,
+        )
+
+        segments = [
+            TranscriptSegment(0.0, 5.0, "世界突然安静 你也一样吗"),
+            TranscriptSegment(70.0, 75.0, "世界突然安静 你也一样吗"),
+        ]
+        config = deep_merge(DEFAULT_CONFIG, {
+            "song": {
+                "pipeline": {"strategy": "risk_routed_v2"},
+                "normalization": {
+                    "chorus_aware_split": True,
+                    "chorus_gap_seconds": 120.0,
+                    "chorus_similarity_threshold": 0.3,
+                    "chorus_context_segments": 1,
+                },
+            }
+        })
+        match = ContentMatch(
+            "song", "昨日青空", [0, 1], 0.9, tags=["temporal_adjudicated"]
+        )
+
+        repaired, boundary_events = repair_song_boundaries(
+            segments, config, [match],
+        )
+        normalized, normalization_events, suspicious = _normalize_song_matches(
+            segments, config, repaired,
+        )
+
+        # Similar lyrics + 65s gap (40-120s range) → chorus detected, stays together
+        assert [item.segment_indices for item in normalized] == [[0, 1]]
+
+    def test_temporal_adjudicated_different_lyrics_splits_in_40_120_range(self):
+        """v2: temporal_adjudicated with different lyrics and 65s gap gets split."""
+        from dd_clip_miner_llm.song_postprocess import (
+            _normalize_song_matches,
+            repair_song_boundaries,
+        )
+
+        segments = [
+            TranscriptSegment(0.0, 5.0, "世界突然安静你也一样吗"),
+            TranscriptSegment(70.0, 75.0, "今天天气真好出去走走吧"),
+        ]
+        config = deep_merge(DEFAULT_CONFIG, {
+            "song": {
+                "pipeline": {"strategy": "risk_routed_v2"},
+                "normalization": {
+                    "chorus_aware_split": True,
+                    "chorus_gap_seconds": 120.0,
+                    "chorus_similarity_threshold": 0.3,
+                    "chorus_context_segments": 1,
+                },
+            }
+        })
+        match = ContentMatch(
+            "song", "Song", [0, 1], 0.9, tags=["temporal_adjudicated"]
+        )
+
+        repaired, boundary_events = repair_song_boundaries(
+            segments, config, [match],
+        )
+        normalized, normalization_events, suspicious = _normalize_song_matches(
+            segments, config, repaired,
+        )
+
+        # Different lyrics + 65s gap (40-120s range) → no chorus, split
+        assert [item.segment_indices for item in normalized] == [[0], [1]]
+
+    def test_search_rejects_title_only_echo(self):
+        """搜索标题仅回显查询、摘要无歌词时必须拒绝。"""
+        from dd_clip_miner_llm.song_postprocess.pipeline import (
+            _parse_search_result_per_item,
+            _verify_search_evidence,
+        )
+
+        query = "有些日子就得自己过"
+        result = {
+            "query": query,
+            "results": [{"title": "有些日子就得自己过 lyrics", "snippet": "", "url": ""}],
+            "lyrics_hints": [],
+        }
+        items = _parse_search_result_per_item(result)
+        assert len(items) == 1
+        # lyrics 后缀应被清理
+        assert items[0]["title"] == "有些日子就得自己过"
+        accepted, score, reason = _verify_search_evidence(query, items[0])
+        assert not accepted
+        assert reason == "no_evidence_text"
+
+    def test_search_accepts_snippet_lyrics_evidence(self):
+        """摘要或 lyrics_hints 与歌词锚点匹配时允许更新歌名。"""
+        from dd_clip_miner_llm.song_postprocess.pipeline import (
+            _parse_search_result_per_item,
+            _verify_search_evidence,
+        )
+
+        query = "世界突然安静你也一样吗"
+        result = {
+            "query": query,
+            "results": [{
+                "title": "昨日青空 - 尤长靖 lyrics",
+                "snippet": "世界突然安静 你也一样吗 青春有你初心",
+                "url": "",
+            }],
+            "lyrics_hints": ["世界突然安静 你也一样吗"],
+        }
+        items = _parse_search_result_per_item(result)
+        assert len(items) == 1
+        # lyrics 后缀应被清理
+        assert items[0]["title"] == "昨日青空 - 尤长靖"
+        assert "artist" not in items[0]  # 无结构化字段
+        accepted, score, reason = _verify_search_evidence(query, items[0])
+        assert accepted
+        assert score >= 0.15
+        assert reason == "lyrics_evidence_found"
+
+    def test_search_per_result_evidence_binding(self):
+        """第二条含歌词不能证明第一条标题。"""
+        from dd_clip_miner_llm.song_postprocess.pipeline import (
+            _parse_search_result_per_item,
+            _verify_search_evidence,
+        )
+
+        query = "世界突然安静你也一样吗"
+        result = {
+            "query": query,
+            "results": [
+                {"title": "无关歌曲 lyrics", "snippet": "随便什么内容", "url": ""},
+                {"title": "昨日青空 - 尤长靖", "snippet": "世界突然安静 你也一样吗", "url": ""},
+            ],
+            "lyrics_hints": [],
+        }
+        items = _parse_search_result_per_item(result)
+        assert len(items) == 2
+        # 第一条：摘要与查询不匹配 → 拒绝
+        accepted0, _, _ = _verify_search_evidence(query, items[0])
+        assert not accepted0
+        # 第二条：摘要与查询匹配 → 接受
+        accepted1, score1, _ = _verify_search_evidence(query, items[1])
+        assert accepted1
+        assert score1 >= 0.15
+
+    def test_search_lyrics_suffix_cleanup(self):
+        """lyrics 后缀在各种格式下都能清理。"""
+        from dd_clip_miner_llm.song_postprocess.pipeline import _parse_search_result_per_item
+
+        cases = [
+            ("昨日青空 lyrics", "昨日青空"),
+            ("昨日青空 - 尤长靖 lyrics", "昨日青空 - 尤长靖"),
+            ("昨日青空 (lyrics)", "昨日青空"),
+            ("昨日青空 - 歌词", "昨日青空"),
+            ("昨日青空 | Official Audio", "昨日青空"),
+            ("昨日青空 MV", "昨日青空"),
+        ]
+        for raw, expected in cases:
+            result = {"results": [{"title": raw, "snippet": "", "url": ""}]}
+            items = _parse_search_result_per_item(result)
+            assert len(items) == 1, f"Failed for: {raw}"
+            assert items[0]["title"] == expected, f"Expected '{expected}', got '{items[0]['title']}' for input '{raw}'"
+
+    def test_search_no_artist_guessing_from_hyphen(self):
+        """无结构化字段时不得猜测歌手位置。"""
+        from dd_clip_miner_llm.song_postprocess.pipeline import _parse_search_result_per_item
+
+        # "歌名 - 歌手" 格式 → 不猜测，完整标题作为歌名
+        result = {"results": [{"title": "昨日青空 - 尤长靖", "snippet": "", "url": ""}]}
+        items = _parse_search_result_per_item(result)
+        assert items[0]["title"] == "昨日青空 - 尤长靖"
+        assert "artist" not in items[0]
+
+        # "歌手 - 歌名" 格式 → 同样不猜测
+        result2 = {"results": [{"title": "尤长靖 - 昨日青空", "snippet": "", "url": ""}]}
+        items2 = _parse_search_result_per_item(result2)
+        assert items2[0]["title"] == "尤长靖 - 昨日青空"
+        assert "artist" not in items2[0]
+
+    def test_search_preserves_segment_indices(self, tmp_path):
+        """搜索阶段只修改 title/artist，不修改 segment_indices。"""
+        from dd_clip_miner_llm.song_postprocess.pipeline import (
+            SearchVerificationStage,
+            SongPipelineContext,
+        )
+
+        segments = [
+            TranscriptSegment(0.0, 5.0, "世界突然安静你也一样吗"),
+            TranscriptSegment(5.0, 10.0, "青春有你初心"),
+        ]
+        original_indices = [0, 1]
+        config = deep_merge(DEFAULT_CONFIG, {
+            "song": {
+                "pipeline": {"strategy": "risk_routed_v2"},
+                "search": {"enabled": False},
+            }
+        })
+        match = ContentMatch("song", "未知歌曲：测试", original_indices, 0.7)
+        ctx = SongPipelineContext(segments, config, None, tmp_path, [match])
+
+        stage = SearchVerificationStage()
+        stage.run(ctx)
+
+        # 搜索关闭时不做任何修改
+        assert ctx.matches[0].segment_indices == original_indices
+
+    def test_risk_audit_records_both_thresholds(self):
+        """风险审计记录实际 40 秒拆分阈值和独立的 20 秒风险阈值。"""
+        from dd_clip_miner_llm.song_postprocess import repair_song_boundaries
+
+        segments = [
+            TranscriptSegment(0.0, 5.0, "a"),
+            TranscriptSegment(6.0, 10.0, "b"),
+            TranscriptSegment(60.0, 65.0, "c"),
+        ]
+        config = deep_merge(DEFAULT_CONFIG, {
+            "song": {
+                "pipeline": {"strategy": "risk_routed_v2"},
+                "normalization": {
+                    "chorus_aware_split": True,
+                    "chorus_gap_seconds": 120.0,
+                    "chorus_similarity_threshold": 0.3,
+                    "chorus_context_segments": 1,
+                },
+            }
+        })
+        _, events = repair_song_boundaries(
+            segments, config, [ContentMatch("song", "Song", [0, 1, 2], 0.8)],
+        )
+        assert len(events) == 1
+        assert events[0]["gap_threshold_seconds"] == 40.0
+        assert events[0]["risk_boundary_gap_seconds"] == 20.0
+
+    def test_anchor_recheck_forces_single_batch(self, tmp_path):
+        """Anchor 补查默认关闭，不修改结果。"""
+        from dd_clip_miner_llm.song_postprocess.pipeline import (
+            AnchorMissedRecheckStage,
+            SongPipelineContext,
+        )
+
+        segments = [
+            TranscriptSegment(0.0, 5.0, "歌词第一句"),
+            TranscriptSegment(5.0, 10.0, "歌词第二句"),
+            TranscriptSegment(100.0, 105.0, "聊天内容"),
+            TranscriptSegment(200.0, 205.0, "歌词第三句"),
+        ]
+        config = deep_merge(DEFAULT_CONFIG, {
+            "song": {
+                "pipeline": {"strategy": "risk_routed_v2"},
+                "missed_recheck": {"enabled": False},
+            }
+        })
+        match = ContentMatch("song", "歌曲A", [0, 1], 0.9)
+        ctx = SongPipelineContext(segments, config, None, tmp_path, [match])
+
+        stage = AnchorMissedRecheckStage()
+        stage.run(ctx)
+
+        # 默认关闭，不做任何修改，stage_history 为空（直接 return）
+        assert len(ctx.matches) == 1
+        assert ctx.matches[0].title == "歌曲A"
+        assert len(ctx.stage_history) == 0
+
+    def test_v2_anchor_minimum_keeps_two_lines_or_ten_seconds(self):
+        from dd_clip_miner_llm.song_postprocess.pipeline import (
+            _anchor_has_minimum_evidence,
+        )
+
+        segments = [
+            TranscriptSegment(0.0, 4.0, "第一句"),
+            TranscriptSegment(4.0, 8.0, "第二句"),
+            TranscriptSegment(10.0, 21.0, "合并的长歌词"),
+            TranscriptSegment(22.0, 25.0, "单句感叹"),
+        ]
+
+        assert _anchor_has_minimum_evidence(
+            segments, ContentMatch("song", "未知", [0, 1], 0.7)
+        )
+        assert _anchor_has_minimum_evidence(
+            segments, ContentMatch("song", "未知", [2], 0.7)
+        )
+        assert not _anchor_has_minimum_evidence(
+            segments, ContentMatch("song", "未知", [3], 0.7)
+        )
+
+    def test_v2_initial_stage_preserves_main_candidate_range(self, tmp_path):
+        from dd_clip_miner_llm.song_postprocess.pipeline import (
+            BoundaryRiskStage,
+            SongPipelineContext,
+        )
+
+        segments = [
+            TranscriptSegment(0.0, 5.0, "lyric before instrumental"),
+            TranscriptSegment(40.0, 45.0, "lyric after instrumental"),
+        ]
+        config = deep_merge(DEFAULT_CONFIG, {
+            "song": {
+                "pipeline": {"strategy": "risk_routed_v2"},
+                "risk": {"boundary_gap_seconds": 8.0},
+            }
+        })
+        context = SongPipelineContext(
+            segments=segments,
+            config=config,
+            recognizer=None,
+            llm_dir=tmp_path,
+            matches=[ContentMatch("song", "Candidate", [0, 1], 0.8)],
+        )
+
+        BoundaryRiskStage(
+            "initial", "main", preserve_candidate_ranges=True,
+        ).run(context)
+
+        assert [match.segment_indices for match in context.matches] == [[0, 1]]
+        assert context.stage_history[0]["input_count"] == 1
+        assert context.stage_history[0]["output_count"] == 1
+
+    def test_search_query_alone_is_not_evidence(self, tmp_path):
+        from dd_clip_miner_llm.song_postprocess import load_supported_search_titles
+
+        payload = {
+            "tool_calls_log": [{
+                "arguments": {"title": "Guessed Song"},
+                "result_preview": "{'query': 'Guessed Song lyrics', 'results': []}",
+            }]
+        }
+        (tmp_path / "llm_batch_000000.json").write_text(
+            json.dumps(payload), encoding="utf-8",
+        )
+        candidate = ContentMatch("song", "Guessed Song", [0], 0.8)
+
+        assert load_supported_search_titles(tmp_path, [candidate]) == set()
+
+    def test_search_result_text_supports_title(self, tmp_path):
+        from dd_clip_miner_llm.song_postprocess import load_supported_search_titles
+
+        payload = {
+            "tool_calls_log": [{
+                "arguments": {"title": "distinctive lyric"},
+                "result_preview": "{'results': [{'title': 'Kingyo Hanabi lyrics', 'snippet': 'lyrics'}]}",
+            }]
+        }
+        (tmp_path / "llm_batch_000000.json").write_text(
+            json.dumps(payload), encoding="utf-8",
+        )
+        candidate = ContentMatch("song", "Kingyo Hanabi", [0], 0.8)
+
+        assert load_supported_search_titles(tmp_path, [candidate]) == {"kingyo hanabi"}
+
+    def test_missed_anchor_output_cannot_keep_large_range(self):
+        from dd_clip_miner_llm.song_postprocess.recheck import _constrain_missed_anchor_matches
+
+        match = ContentMatch("song", "Song", list(range(100)), 0.8)
+        constrained = _constrain_missed_anchor_matches([match], max_anchor_segments=12)
+
+        assert len(constrained[0].segment_indices) <= 12
+        assert constrained[0].segment_indices != list(range(100))
+
+    def test_missed_anchor_expands_only_within_contiguous_target(self):
+        from dd_clip_miner_llm.song_postprocess import expand_song_anchors
+
+        segments = [
+            TranscriptSegment(0.0, 5.0, "a"),
+            TranscriptSegment(6.0, 10.0, "b"),
+            TranscriptSegment(11.0, 15.0, "c"),
+            TranscriptSegment(30.0, 35.0, "chat after gap"),
+        ]
+        config = deep_merge(DEFAULT_CONFIG, {
+            "song": {
+                "pipeline": {"strategy": "risk_routed_v2"},
+                "risk": {"boundary_gap_seconds": 8.0},
+                "missed_recheck": {"anchor_max_expansion_seconds": 420.0},
+            }
+        })
+        anchors = [ContentMatch("song", "Song", [1], 0.8)]
+
+        expanded, events = expand_song_anchors(
+            segments, config, anchors, [(0, 3)], [],
+        )
+
+        assert expanded[0].segment_indices == [0, 1, 2]
+        assert events[0]["expanded_ranges"] == [[0, 2]]
+
+    def test_missed_anchor_does_not_expand_into_existing_coverage(self):
+        from dd_clip_miner_llm.song_postprocess import expand_song_anchors
+
+        segments = [
+            TranscriptSegment(float(i * 6), float(i * 6 + 5), str(i))
+            for i in range(5)
+        ]
+        config = deep_merge(DEFAULT_CONFIG, {
+            "song": {"pipeline": {"strategy": "risk_routed_v2"}}
+        })
+        anchors = [ContentMatch("song", "New", [3], 0.8)]
+        existing = [ContentMatch("song", "Existing", [0, 1, 2], 0.9)]
+
+        expanded, _ = expand_song_anchors(
+            segments, config, anchors, [(0, 4)], existing,
+        )
+
+        assert expanded[0].segment_indices == [3, 4]
+
+    def test_risk_review_clusters_are_batched_with_bounded_span(self):
+        from dd_clip_miner_llm.song_postprocess import _batch_risk_review_clusters
+
+        clusters = [
+            [ContentMatch("song", "A", [0], 0.8)],
+            [ContentMatch("song", "B", [10], 0.8)],
+            [ContentMatch("song", "C", [700], 0.8)],
+        ]
+        batched = _batch_risk_review_clusters(
+            clusters, max_span_segments=500, max_candidates=6,
+        )
+
+        assert [[match.title for match in cluster] for cluster in batched] == [
+            ["A", "B"],
+            ["C"],
+        ]
+
+    def test_risk_pipeline_final_adjudication_removes_title_overlap(self, tmp_path):
+        from dd_clip_miner_llm.recognizers import get_recognizer
+        from dd_clip_miner_llm.song_postprocess.pipeline import run_risk_routed_v2_pipeline
+
+        segments = [
+            TranscriptSegment(float(i * 10), float(i * 10 + 8), "lyric")
+            for i in range(20)
+        ]
+        config = deep_merge(DEFAULT_CONFIG, {
+            "song": {
+                "pipeline": {"strategy": "risk_routed_v2"},
+                "review": {"enabled": False},
+                "missed_recheck": {"enabled": False},
+            }
+        })
+        matches = [
+            ContentMatch("song", "A", list(range(12)), 0.9),
+            ContentMatch("song", "B", list(range(8, 20)), 0.7),
+        ]
+        result = run_risk_routed_v2_pipeline(
+            segments, config, get_recognizer("song"), matches, tmp_path,
+        )
+
+        assert len(result) == 1
+        assert result[0].title == "A"
+
+    def test_temporal_adjudication_restores_title_by_overlap(self):
+        from dd_clip_miner_llm.song_postprocess import _restore_temporal_titles
+
+        source = ContentMatch("song", "Original title", [10, 11, 12], 0.7)
+        temporal = ContentMatch(
+            "song", "未知歌曲：时序裁决", [9, 10, 11, 12, 13], 0.9
+        )
+
+        restored, events = _restore_temporal_titles([temporal], [source])
+
+        assert restored[0].title == "Original title"
+        assert restored[0].segment_indices == [9, 10, 11, 12, 13]
+        assert "temporal_adjudicated" in restored[0].tags
+        assert events[0]["type"] == "temporal_boundary_replacement"
+
+    def test_temporal_adjudication_recovers_distinct_source_boundary(self):
+        from dd_clip_miner_llm.song_postprocess import (
+            _split_temporal_at_source_boundaries,
+        )
+
+        temporal = ContentMatch("song", "Unknown", list(range(10, 30)), 0.8)
+        sources = [
+            ContentMatch("song", "First anchor", list(range(10, 20)), 0.7),
+            ContentMatch("song", "Second anchor", list(range(20, 30)), 0.7),
+        ]
+
+        refined, events = _split_temporal_at_source_boundaries(
+            [temporal], sources,
+        )
+
+        assert [match.segment_indices for match in refined] == [
+            list(range(10, 20)),
+            list(range(20, 30)),
+        ]
+        assert events[0]["type"] == "temporal_source_boundary_split"
+
+    def test_temporal_adjudication_does_not_split_same_source_identity(self):
+        from dd_clip_miner_llm.song_postprocess import (
+            _split_temporal_at_source_boundaries,
+        )
+
+        temporal = ContentMatch("song", "Unknown", list(range(10, 30)), 0.8)
+        sources = [
+            ContentMatch("song", "Same anchor", list(range(10, 20)), 0.7),
+            ContentMatch("song", "Same anchor", list(range(20, 30)), 0.7),
+        ]
+
+        refined, events = _split_temporal_at_source_boundaries(
+            [temporal], sources,
+        )
+
+        assert refined == [temporal]
+        assert events == []
+
+    def test_temporal_adjudication_preserves_unmatched_confident_source(self):
+        from dd_clip_miner_llm.song_postprocess import _restore_temporal_titles
+
+        source = ContentMatch("song", "Source", [20, 21], 0.8)
+
+        restored, events = _restore_temporal_titles([], [source])
+
+        assert restored == [source]
+        assert events[0]["type"] == "temporal_source_preserved"
+
     def test_song_cache_friendly_prompt_requests_compact_ranges(self, sample_segments, sample_config):
         from dd_clip_miner_llm.recognizers import get_recognizer
 
@@ -2963,6 +3824,99 @@ class TestRecognizers:
         assert len(matches) == 1
         assert matches[0].content_type == "cringe"
         assert len(matches[0].title) < 20
+
+
+# ============ song_evaluation.py tests ============
+
+class TestSongEvaluation:
+    def test_profile_evaluation_treats_duration_as_fixture_risk(self, tmp_path):
+        from dd_clip_miner_llm.song_evaluation import evaluate_song_profile
+
+        profile = tmp_path / "kv_optimized"
+        (profile / "song").mkdir(parents=True)
+        matches = [{
+            "title": "Song",
+            "artist": "",
+            "confidence": 0.9,
+            "segment_indices": [0, 1],
+        }]
+        (profile / "song" / "matches.json").write_text(
+            json.dumps(matches), encoding="utf-8",
+        )
+        (profile / "usage_summary.json").write_text(
+            json.dumps({"totals": {
+                "prompt_cache_hit_tokens": 900,
+                "prompt_cache_miss_tokens": 100,
+                "completion_tokens": 10,
+            }}),
+            encoding="utf-8",
+        )
+        transcript = [
+            {"start": 0.0, "end": 10.0, "text": "a"},
+            {"start": 11.0, "end": 20.0, "text": "b"},
+        ]
+
+        metrics = evaluate_song_profile(profile, transcript, matches)
+
+        assert metrics["weak_anchor_recall"] == 1.0
+        assert metrics["fixture_duration_risk_examples"][0]["classification"] == (
+            "fixture_risk_example_not_global_rule"
+        )
+        assert metrics["cache_hit_ratio"] == 0.9
+
+    def test_cost_estimator_is_invalid_above_15_percent_error(self, tmp_path):
+        from dd_clip_miner_llm.song_evaluation import evaluate_song_profile
+
+        profile = tmp_path / "kv_optimized"
+        (profile / "song").mkdir(parents=True)
+        (profile / "song" / "matches.json").write_text("[]", encoding="utf-8")
+        (profile / "song" / "adaptive_strategies.json").write_text(
+            json.dumps({"chosen_total_usd": 0.01}), encoding="utf-8",
+        )
+        (profile / "usage_summary.json").write_text(
+            json.dumps({"totals": {"completion_tokens": 100000}}),
+            encoding="utf-8",
+        )
+
+        metrics = evaluate_song_profile(profile, [], [])
+
+        assert metrics["cost_estimator"]["valid_for_runtime_selection"] is False
+
+    def test_profile_evaluation_counts_same_title_overlap(self, tmp_path):
+        from dd_clip_miner_llm.song_evaluation import evaluate_song_profile
+
+        profile = tmp_path / "kv_optimized"
+        (profile / "song").mkdir(parents=True)
+        (profile / "song" / "matches.json").write_text(json.dumps([
+            {"title": "Song", "segment_indices": [1, 2, 3]},
+            {"title": "Song", "segment_indices": [2, 3, 4]},
+        ]), encoding="utf-8")
+
+        metrics = evaluate_song_profile(profile, [], [])
+
+        assert metrics["same_title_overlap_pairs"] == 1
+
+    def test_profile_evaluation_reports_boundary_fragmentation_and_coalescing(self, tmp_path):
+        from dd_clip_miner_llm.song_evaluation import evaluate_song_profile
+
+        profile = tmp_path / "kv_optimized"
+        (profile / "song").mkdir(parents=True)
+        (profile / "song" / "matches.json").write_text(json.dumps([
+            {"title": "Combined", "segment_indices": [0, 1, 2, 3]},
+            {"title": "Fragment", "segment_indices": [10]},
+            {"title": "Fragment", "segment_indices": [11]},
+        ]), encoding="utf-8")
+        weak = [
+            {"title": "A", "segment_indices": [0, 1]},
+            {"title": "B", "segment_indices": [2, 3]},
+            {"title": "C", "segment_indices": [10, 11]},
+        ]
+
+        metrics = evaluate_song_profile(profile, [], weak)
+
+        assert metrics["fragmented_weak_anchor_count"] == 1
+        assert metrics["coalesced_weak_anchor_count"] == 1
+        assert metrics["mixed_title_coalesced_count"] == 1
 
 
 # ============ clip_naming.py 测试 ============

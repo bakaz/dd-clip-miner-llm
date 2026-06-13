@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .config import get_llm_config, get_song_recheck_config, get_song_review_config
 from .models import ContentMatch, TranscriptSegment
 
 ADAPTIVE_STRATEGIES_FILENAME = "adaptive_strategies.json"
@@ -29,7 +30,7 @@ DEFAULT_COST_MARGIN_RATIO = 0.05
 
 
 def _kv_cache_friendly_enabled(config: dict[str, Any]) -> bool:
-    return bool(config.get("llm", {}).get("cache_friendly_prompt_layout", False))
+    return bool(get_llm_config(config).get("cache_friendly_prompt_layout", False))
 
 
 def _adaptive_enabled(config: dict[str, Any]) -> bool:
@@ -133,8 +134,8 @@ def save_adaptive_strategies_cache(llm_dir: Path, payload: dict[str, Any]) -> Pa
 
 
 def _joint_cost_margin(config: dict[str, Any]) -> float:
-    review_config = config.get("song", {}).get("review", {})
-    recheck_config = config.get("song", {}).get("missed_recheck", {})
+    review_config = get_song_review_config(config)
+    recheck_config = get_song_recheck_config(config)
     return max(
         _cost_margin_ratio(review_config),
         _cost_margin_ratio(recheck_config),
@@ -143,7 +144,7 @@ def _joint_cost_margin(config: dict[str, Any]) -> float:
 
 def _review_options(config: dict[str, Any]) -> list[str]:
     requested = str(
-        config.get("song", {}).get("review", {}).get("transcript_scope", "local")
+        get_song_review_config(config).get("transcript_scope", "local")
     ).strip().lower()
     if requested == "adaptive" and _adaptive_enabled(config):
         return ["local", "full"]
@@ -154,7 +155,7 @@ def _review_options(config: dict[str, Any]) -> list[str]:
 
 def _missed_options(config: dict[str, Any]) -> list[str]:
     requested = str(
-        config.get("song", {}).get("missed_recheck", {}).get("strategy", "windowed")
+        get_song_recheck_config(config).get("strategy", "windowed")
     ).strip().lower()
     if requested == "adaptive" and _adaptive_enabled(config):
         return ["windowed", "full_transcript"]
@@ -166,8 +167,8 @@ def _missed_options(config: dict[str, Any]) -> list[str]:
 def _uses_joint_cost_estimate(config: dict[str, Any]) -> bool:
     if not _adaptive_enabled(config):
         return False
-    review_config = config.get("song", {}).get("review", {})
-    recheck_config = config.get("song", {}).get("missed_recheck", {})
+    review_config = get_song_review_config(config)
+    recheck_config = get_song_recheck_config(config)
     review_adaptive = (
         str(review_config.get("transcript_scope", "local")).strip().lower() == "adaptive"
     )
@@ -212,8 +213,8 @@ def resolve_song_adaptive_strategies(
         estimate_review_cost,
     )
 
-    review_config = config.get("song", {}).get("review", {})
-    recheck_config = config.get("song", {}).get("missed_recheck", {})
+    review_config = get_song_review_config(config)
+    recheck_config = get_song_recheck_config(config)
     review_requested = str(review_config.get("transcript_scope", "local")).strip().lower()
     missed_requested = str(recheck_config.get("strategy", "windowed")).strip().lower()
 
@@ -433,7 +434,7 @@ def _resolve_review_heuristic(
     cluster_count: int,
     segment_count: int,
 ) -> tuple[str, str]:
-    review_config = config.get("song", {}).get("review", {})
+    review_config = get_song_review_config(config)
     adaptive = _adaptive_settings(review_config, DEFAULT_REVIEW_ADAPTIVE)
     if cluster_count <= adaptive["local_max_clusters"]:
         return "local", f"adaptive_clusters_le_{adaptive['local_max_clusters']}"
@@ -459,7 +460,7 @@ def _resolve_review_cost_estimate(
 ) -> tuple[str, str, dict[str, Any]]:
     from .song_adaptive_cost import estimate_review_cost
 
-    review_config = config.get("song", {}).get("review", {})
+    review_config = get_song_review_config(config)
     margin = _cost_margin_ratio(review_config)
     local_cost = estimate_review_cost(
         config,
@@ -516,7 +517,7 @@ def resolve_review_transcript_scope(
     segments: list[TranscriptSegment] | None = None,
     recognizer: Any | None = None,
 ) -> tuple[str, str, dict[str, Any]]:
-    review_config = config.get("song", {}).get("review", {})
+    review_config = get_song_review_config(config)
     requested = str(review_config.get("transcript_scope", "local")).strip().lower()
     if requested not in REVIEW_SCOPES:
         requested = "local"
@@ -568,7 +569,7 @@ def _resolve_missed_heuristic(
     segment_count: int,
     target_range_count: int,
 ) -> tuple[str, str]:
-    recheck_config = config.get("song", {}).get("missed_recheck", {})
+    recheck_config = get_song_recheck_config(config)
     adaptive = _adaptive_settings(recheck_config, DEFAULT_MISSED_ADAPTIVE)
     if segment_count > adaptive["full_transcript_max_segments"]:
         return (
@@ -595,7 +596,7 @@ def _resolve_missed_cost_estimate(
 ) -> tuple[str, str, dict[str, Any]]:
     from .song_adaptive_cost import estimate_missed_cost
 
-    recheck_config = config.get("song", {}).get("missed_recheck", {})
+    recheck_config = get_song_recheck_config(config)
     margin = _cost_margin_ratio(recheck_config)
     windowed_cost = estimate_missed_cost(
         config,
@@ -657,7 +658,7 @@ def resolve_missed_recheck_strategy(
     target_ranges: list[tuple[int, int]] | None = None,
     recognizer: Any | None = None,
 ) -> tuple[str, str, dict[str, Any]]:
-    recheck_config = config.get("song", {}).get("missed_recheck", {})
+    recheck_config = get_song_recheck_config(config)
     requested = str(recheck_config.get("strategy", "windowed")).strip().lower()
     if requested not in MISSED_STRATEGIES:
         requested = "windowed"

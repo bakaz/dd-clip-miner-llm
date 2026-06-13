@@ -5,7 +5,11 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+import logging
 
+logger = logging.getLogger(__name__)
+
+from .config import get_output_config
 from .ffmpeg import concat_videos
 from .paths import VIDEO_EXTENSIONS, iter_video_files, safe_path_part
 from .pipeline import run_pipeline
@@ -40,11 +44,12 @@ def run_batch(
         by_folder.setdefault(video.parent, []).append(video)
 
     # 检查是否启用视频拼接
-    concat_enabled = config.get("output", {}).get("concat_videos", False)
-    video_codec = config.get("output", {}).get("video_codec", "copy")
-    audio_bitrate = int(config.get("output", {}).get("audio_bitrate_kbps", 320))
-    single_file_policy = str(config.get("output", {}).get("single_file_policy", "copy"))
-    force_normalize = bool(config.get("output", {}).get("concat_force_normalize", False))
+    output_config = get_output_config(config)
+    concat_enabled = output_config.get("concat_videos", False)
+    video_codec = output_config.get("video_codec", "copy")
+    audio_bitrate = int(output_config.get("audio_bitrate_kbps", 320))
+    single_file_policy = str(output_config.get("single_file_policy", "copy"))
+    force_normalize = bool(output_config.get("concat_force_normalize", False))
 
     runs: list[dict[str, Any]] = []
     profile_name = str(config.get("_profile_name") or "")
@@ -186,7 +191,7 @@ def _process_folder_concat(
     if skip_reason:
         print(f"[skip] {skip_reason}: {folder}")
         # 尝试加载已有结果
-        existing = _load_existing_concat_result(folder, folder_key, run_dir, result_dir, len(folder_videos))
+        existing = _load_existing_concat_result(folder, folder_key, run_dir, result_dir, len(folder_videos), profile_name)
         if existing:
             folder_runs.append(existing)
             completed_videos[marker_key] = existing
@@ -287,30 +292,32 @@ def _load_existing_concat_result(
     run_dir: Path,
     result_dir: Path,
     video_count: int,
+    profile_name: str = "",
 ) -> dict[str, Any] | None:
     """加载已有的 concat 结果"""
     progress_path = run_dir / "progress.json"
     last_step = ""
     content_counts: dict[str, int] = {}
-    
+
     if progress_path.exists():
         try:
             progress = json.loads(progress_path.read_text(encoding="utf-8"))
             last_step = progress.get("last_completed_step", "")
-        except (json.JSONDecodeError, OSError):
-            pass
-    
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.debug("Failed to read progress.json: %s", exc)
+
     # 尝试从 manifest.json 获取更多信息
-    manifest_path = run_dir / "manifest.json"
+    manifest_name = f"manifest.{profile_name}.json" if profile_name else "manifest.json"
+    manifest_path = run_dir / manifest_name
     if manifest_path.exists():
         try:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             content_counts = manifest.get("content_types", {})
-        except (json.JSONDecodeError, OSError):
-            pass
-    
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.debug("Failed to read manifest: %s", exc)
+
     total_count = sum(content_counts.values()) if content_counts else 0
-    
+
     return {
         "video": str(folder),
         "video_key": folder_key,
@@ -321,6 +328,7 @@ def _load_existing_concat_result(
         "content_counts": content_counts,
         "status": "success",
         "last_step": last_step,
+        "profile": profile_name or None,
     }
 
 
@@ -331,8 +339,8 @@ def _cleanup_concat_source(concat_dir: Path) -> None:
         for path in concat_dir.iterdir():
             if path.is_file() and path.name not in preserve:
                 path.unlink(missing_ok=True)
-    except OSError:
-        pass
+    except OSError as exc:
+        logger.debug("OS error: %s", exc)
 
 
 def _relative_folder(root: Path, folder: Path) -> Path:
@@ -368,4 +376,10 @@ def _write_marker(marker: Path, completed_videos: dict[str, dict[str, Any]]) -> 
         "updated_at": datetime.now().isoformat(timespec="seconds"),
         "videos": completed_videos,
     }
-    marker.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    try:
+        marker.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError as exc:
+        # Non-fatal: common when input_root is a read-only network share (UNC).
+        # The run still succeeds; only resume/skip markers are lost for next batch-run.
+        print(f"[warn] Could not write marker {marker}: {exc} (results are still complete in --result-root)")
+        logger.warning("Failed to write marker %s: %s", marker, exc)

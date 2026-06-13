@@ -13,6 +13,7 @@ asr:
   local:
     backend: funasr
 
+    # faster_whisper 配置（支持 gpu/cpu 自动分流，详见 config.example.yaml）
     faster_whisper:
       model: small
       device: auto
@@ -21,6 +22,11 @@ asr:
       beam_size: 5
       vad_filter: true
       initial_prompt: null
+      inference_mode: batched   # batched | standard
+      word_timestamps: true
+      split_on_word_gaps: true
+      word_gap_seconds: 2.0
+      max_segment_seconds: 15.0
 
     funasr:
       model: iic/SenseVoiceSmall
@@ -47,26 +53,36 @@ asr:
 
 # ─── LLM 配置 ─────────────────────────────────
 llm:
-  api_key: null
-  api_key_env: DEEPSEEK_API_KEY
-  base_url: https://api.deepseek.com
-  model: deepseek-v4-flash
-  thinking: disabled
-  temperature: 0.1
-  max_tokens: 8192
-  max_completion_tokens: null
+  active_provider: deepseek
+  providers:
+    deepseek:
+      api_key: null
+      api_key_env: DEEPSEEK_API_KEY
+      base_url: https://api.deepseek.com
+      model: deepseek-v4-flash
+      thinking: disabled
+      temperature: 0.1
+      max_tokens: 8192
+      timeout: 300
+    mimo:
+      api_key_env: MIMO_API_KEY
+      base_url: https://token-plan-cn.xiaomimimo.com/v1
+      model: mimo-v2.5-pro
+      temperature: 0.1
+      max_tokens: 8192
+      timeout: 300
   retry_empty_with_reasoning: true
   reasoning_followup_rounds: 5
   reasoning_followup_max_tokens: 32768
+  max_completion_tokens: 32768
   batch_size: null
-  cache_friendly_prompt_layout: false
-  compact_segment_ranges: false
   max_tool_rounds: 2
-  final_tool_max_tokens: null
+  final_tool_max_tokens: 32768
+  continuation_on_length: true
+  max_continuation_rounds: 8
   use_tools: true
   verify_with_search: true
   json_fix_rounds: 3
-  fallbacks: []
 
 default_profile: accuracy
 
@@ -75,66 +91,55 @@ profiles:
     llm:
       cache_friendly_prompt_layout: false
       compact_segment_ranges: false
-      max_tokens: 8192
-      max_completion_tokens: null
-      final_tool_max_tokens: 16384
     song:
+      pipeline:
+        strategy: legacy
+        runtime_adaptive: disabled
+        temporal_adjudication:
+          enabled: false
       review:
         enabled: true
+        transcript_scope: local
+      missed_recheck:
+        enabled: true
+        strategy: windowed
+        output_mode: matches
   kv_optimized:
     llm:
       cache_friendly_prompt_layout: true
       compact_segment_ranges: true
-      max_completion_tokens: 32768
-      final_tool_max_tokens: 32768
     song:
+      normalization:
+        force_merge_same_title: true
+        chorus_aware_split: true
+        chorus_gap_seconds: 120.0
+        chorus_similarity_threshold: 0.3
+        chorus_context_segments: 3
+      pipeline:
+        strategy: risk_routed_v3
+        runtime_adaptive: fixed_three_stage
+        stages:
+          discovery: precision
+          recall_audit: uncovered_evidence
+          adjudication: full_transcript
+        continuation_overlap_segments: 50
+        allow_final_discovery: true
+        anchor_boundary_expansion: false
+      naming:
+        search_query_source: lyric_anchors
+        preserve_unknown_on_weak_evidence: true
+      search:
+        enabled: false
+        search_unknown_only: true
+        max_searches: 25
       missed_recheck:
-        strategy: adaptive
-        fallback_strategy: windowed_on_structural_failure
-        max_completion_tokens: 4096
-        max_tool_rounds: 1
-        adaptive:
-          mode: cost_estimate
-          cost_margin_ratio: 0.05
-          fallback_penalty: 1.0
-          full_transcript_max_segments: 3500
-          windowed_min_target_ranges: 19
-          pricing:
-            input_cache_hit_per_1m: 0.0028
-            input_cache_miss_per_1m: 0.14
-            output_per_1m: 0.28
-          token_chars_ratio: 0.62
-          estimated_completion_tokens:
-            main: 720
-            review: 420
-            overlong: 360
-            missed_full: 1100
-            missed_window: 360
-      review:
         enabled: true
-        transcript_scope: adaptive
-        context_segments: 10
-        max_window_segments: 500
-        max_completion_tokens: 4096
-        max_tool_rounds: 1
-        fallback: local_best
-        adaptive:
-          mode: cost_estimate
-          cost_margin_ratio: 0.05
-          local_max_clusters: 3
-          full_min_clusters: 6
-          full_min_segments: 2000
-          pricing:
-            input_cache_hit_per_1m: 0.0028
-            input_cache_miss_per_1m: 0.14
-            output_per_1m: 0.28
-          token_chars_ratio: 0.62
-          estimated_completion_tokens:
-            main: 720
-            review: 420
-            overlong: 360
-            missed_full: 1100
-            missed_window: 360
+        output_mode: anchors
+        min_uncovered_seconds: 10.0
+        check_all_uncovered: true
+        max_tool_rounds: 0
+      review:
+        enabled: false
 
 # ─── 时间 padding ─────────────────────────────
 padding:
@@ -146,8 +151,9 @@ padding:
   adaptive_silence_gap_ratio: 0.95
   adaptive_max_before_seconds: 45.0
   adaptive_max_after_seconds: 45.0
-  min_song_seconds: 30.0
-  merge_gap_seconds: 35.0
+  min_song_seconds: 75.0
+  max_song_seconds: 360.0
+  merge_gap_seconds: 40.0
 
 # ─── 要识别的内容类型（true/false 控制启用/禁用）──
 content_types:
@@ -161,6 +167,27 @@ content_types:
 # ─── 歌曲识别配置 ─────────────────────────────
 song:
   enabled: true
+  normalization:
+    force_merge_same_title: false
+    chorus_aware_split: false
+    chorus_gap_seconds: 120.0
+    chorus_similarity_threshold: 0.3
+    chorus_context_segments: 3
+  search:
+    enabled: false
+    search_unknown_only: true
+    max_searches: 25
+  risk:
+    duration_weight: 1.0
+    boundary_expansion_weight: 2.0
+    overlap_weight: 2.0
+    evidence_weight: 2.0
+    review_threshold: 0.55
+    reject_threshold: 0.90
+    soft_min_seconds: 150
+    soft_max_seconds: 360
+    boundary_gap_seconds: 20
+    low_confidence: 0.65
   padding:
     before_seconds: 15.0
     after_seconds: 15.0
@@ -170,23 +197,23 @@ song:
     adaptive_silence_gap_ratio: 0.95
     adaptive_max_before_seconds: 45.0
     adaptive_max_after_seconds: 45.0
-    min_song_seconds: 30.0
-    merge_gap_seconds: 35.0
+    min_song_seconds: 75.0
+    merge_gap_seconds: 40.0
   missed_recheck:
-    enabled: true
-    strategy: windowed
     fallback_strategy: windowed_on_structural_failure
     batch_size: 500
     min_gap_segments: 1
     context_segments: 10
-    max_completion_tokens: 4096
+    max_completion_tokens: 32768
     max_tool_rounds: 1
+    max_anchor_segments: 12
+    anchor_max_expansion_seconds: 420
   review:
-    enabled: false
+    transcript_scope: local
     context_segments: 10
     max_window_segments: 500
     nearby_title_conflict_gap_segments: 2
-    max_completion_tokens: 4096
+    max_completion_tokens: 32768
     max_tool_rounds: 1
     fallback: local_best
 
@@ -251,4 +278,5 @@ output:
   video_extension: mp4
   video_codec: copy
   match_context_segments: 10
+  max_export_workers: 4
   concat_videos: false

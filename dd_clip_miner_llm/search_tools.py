@@ -2,19 +2,49 @@
 
 from __future__ import annotations
 
+import logging
+import json
 import re
 from typing import Any
 from urllib.parse import quote_plus
 
 import httpx
 
+logger = logging.getLogger(__name__)
+
+
+def _detect_language(text: str) -> str:
+    """检测文本的主要语言：zh/ja/en/other"""
+    if not text:
+        return "en"
+    
+    cjk_count = sum(1 for c in text if '\u4e00' <= c <= '\u9fff')
+    ja_specific = sum(1 for c in text if '\u3040' <= c <= '\u30ff')  # 平假名/片假名
+    total_alpha = sum(1 for c in text if c.isalpha())
+    
+    if ja_specific > 2:
+        return "ja"
+    if cjk_count > len(text) * 0.2:
+        return "zh"
+    if total_alpha > len(text) * 0.3:
+        return "en"
+    return "en"
+
 
 def _clean_lyrics_query(title: str, artist: str = "") -> str:
-    """构建歌词搜索查询"""
-    query = f"{title} lyrics"
+    """构建歌词搜索查询，根据语言使用对应的搜索词"""
+    lang = _detect_language(title)
+    
+    if lang == "zh":
+        suffix = "歌词"
+    elif lang == "ja":
+        suffix = "歌詞"
+    else:
+        suffix = "lyrics"
+    
     if artist:
-        query = f"{artist} {title} lyrics"
-    return query
+        return f"{artist} {title} {suffix}"
+    return f"{title} {suffix}"
 
 
 def search_duckduckgo(query: str, max_results: int = 5) -> list[dict[str, str]]:
@@ -32,9 +62,9 @@ def search_duckduckgo(query: str, max_results: int = 5) -> list[dict[str, str]]:
                     "title": r.get("title", ""),
                     "snippet": r.get("body", ""),
                     "url": r.get("href", ""),
-                })
-    except Exception:
-        return _search_duckduckgo_html(query, max_results)
+                    })
+    except Exception as exc:
+        logger.debug("DuckDuckGo search failed: %s", exc)
     return results
 
 
@@ -90,8 +120,8 @@ def search_searxng(query: str, instance: str = "https://searx.be", max_results: 
                         "snippet": r.get("content", ""),
                         "url": r.get("url", ""),
                     })
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("SearxNG search failed: %s", exc)
     return results
 
 
@@ -181,5 +211,5 @@ def execute_tool(name: str, arguments: dict[str, Any]) -> str:
             title=arguments.get("title", ""),
             artist=arguments.get("artist", ""),
         )
-        return str(result)
+        return json.dumps(result, ensure_ascii=False)
     return f"Unknown tool: {name}"

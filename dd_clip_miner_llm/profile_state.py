@@ -5,7 +5,11 @@ import hashlib
 import json
 from pathlib import Path
 from typing import Any
+import logging
 
+logger = logging.getLogger(__name__)
+
+from .config import get_llm_config
 from .models import TranscriptSegment
 
 def _fingerprint_payload(value: Any) -> str:
@@ -43,7 +47,8 @@ def _profile_state_matches(
         return False
     try:
         state = json.loads(state_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.debug("Failed to read profile state: %s", exc)
         return False
     return (
         state.get("input_video") == str(input_path)
@@ -70,13 +75,19 @@ def _write_profile_state(
                 "input_video": str(input_path),
                 "config_fingerprint": config_fingerprint,
                 "transcript_fingerprint": transcript_fingerprint,
-                "model": config.get("llm", {}).get("model"),
+                "model": get_llm_config(config).get("model"),
                 "cache_friendly_prompt_layout": bool(
-                    config.get("llm", {}).get("cache_friendly_prompt_layout", False)
+                    get_llm_config(config).get("cache_friendly_prompt_layout", False)
                 ),
                 "compact_segment_ranges": bool(
-                    config.get("llm", {}).get("compact_segment_ranges", False)
+                    get_llm_config(config).get("compact_segment_ranges", False)
                 ),
+                "song_pipeline_strategy": config.get("song", {}).get(
+                    "pipeline", {}
+                ).get("strategy", "legacy"),
+                "song_runtime_adaptive": config.get("song", {}).get(
+                    "pipeline", {}
+                ).get("runtime_adaptive", "disabled"),
                 "status": status,
             },
             ensure_ascii=False,
@@ -88,6 +99,10 @@ def _write_profile_state(
 
 _USAGE_PHASES = (
     "main",
+    "v3_discovery",
+    "v3_recall_audit",
+    "v3_adjudication",
+    "temporal_adjudication",
     "review_before",
     "overlong",
     "missed_recheck",
@@ -97,6 +112,14 @@ _USAGE_PHASES = (
 
 def _infer_debug_phase(relative_path: str) -> str:
     normalized = relative_path.replace("\\", "/")
+    if normalized.startswith("v3/discovery/"):
+        return "v3_discovery"
+    if normalized.startswith("v3/recall_audit/"):
+        return "v3_recall_audit"
+    if normalized.startswith("v3/adjudication/"):
+        return "v3_adjudication"
+    if normalized.startswith("temporal_adjudication/"):
+        return "temporal_adjudication"
     if normalized.startswith("review/before_missed_recheck/"):
         return "review_before"
     if normalized.startswith("review/after_missed_recheck/"):
@@ -166,7 +189,8 @@ def _write_usage_summary(profile_llm_dir: Path) -> dict[str, Any]:
                 continue
             try:
                 payload = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
+            except (OSError, json.JSONDecodeError) as exc:
+                logger.debug("Skipping item: %s", exc)
                 continue
             phase = str(payload.get("phase") or _infer_debug_phase(relative_path))
             if phase not in phase_usage:
@@ -230,8 +254,8 @@ def _profile_usage_totals(profile_dir: Path) -> dict[str, int]:
                 for key in totals:
                     totals[key] = int(summary_totals.get(key) or 0)
                 return totals
-        except (OSError, json.JSONDecodeError):
-            pass
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.debug("Skipping: %s", exc)
 
     manifests = list(profile_dir.rglob("valid_debug_files.json"))
     if manifests:
@@ -239,7 +263,8 @@ def _profile_usage_totals(profile_dir: Path) -> dict[str, int]:
         for manifest_path in manifests:
             try:
                 values = json.loads(manifest_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
+            except (OSError, json.JSONDecodeError) as exc:
+                logger.debug("Skipping item: %s", exc)
                 continue
             if not isinstance(values, list):
                 continue
@@ -253,7 +278,8 @@ def _profile_usage_totals(profile_dir: Path) -> dict[str, int]:
     for path in sorted(paths):
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.debug("Skipping item: %s", exc)
             continue
         for usage in payload.get("usage", []):
             if not isinstance(usage, dict):
@@ -281,7 +307,8 @@ def _read_active_debug_paths(
         if path.is_file():
             try:
                 path.relative_to(relative_to)
-            except ValueError:
+            except ValueError as exc:
+                logger.debug("Path outside tree: %s", exc)
                 continue
             paths.add(path)
     return paths
@@ -301,16 +328,17 @@ def _write_valid_debug_manifest(llm_dir: Path) -> None:
             try:
                 summary = json.loads(summary_path.read_text(encoding="utf-8"))
                 cluster_count = int(summary.get("cluster_count") or 0)
-            except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+                logger.debug("Skipping item: %s", exc)
                 continue
             cluster_records = summary.get("clusters")
             if isinstance(cluster_records, list):
                 active_indices = [
-                    int(item.get("cluster"))
+                    int(item["cluster"])
                     for item in cluster_records
                     if (
                         isinstance(item, dict)
-                        and item.get("cluster") is not None
+                        and isinstance(item.get("cluster"), (int, float))
                         and item.get("resolution")
                         != "unchanged_pre_audit_cluster"
                     )
@@ -348,6 +376,28 @@ def _write_valid_debug_manifest(llm_dir: Path) -> None:
             path = missed_root / str(value)
             if path.is_file():
                 paths.add(path)
+
+    temporal_root = llm_dir / "temporal_adjudication"
+    if temporal_root.exists():
+        paths.update(
+            _read_active_debug_paths(temporal_root, relative_to=llm_dir)
+        )
+
+    anchor_root = llm_dir / "anchor_recheck"
+    if anchor_root.exists():
+        paths.update(
+            _read_active_debug_paths(anchor_root, relative_to=llm_dir)
+        )
+
+    v3_root = llm_dir / "v3"
+    if v3_root.exists():
+        for stage_name in ("discovery", "recall_audit", "adjudication"):
+            paths.update(
+                _read_active_debug_paths(
+                    v3_root / stage_name,
+                    relative_to=llm_dir,
+                )
+            )
 
     relative_paths = sorted(
         str(path.relative_to(llm_dir)).replace("\\", "/")
@@ -388,7 +438,8 @@ def _write_profile_comparison(profiles_root: Path) -> None:
         try:
             state = json.loads(state_path.read_text(encoding="utf-8"))
             matches = json.loads(matches_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.debug("Skipping item: %s", exc)
             continue
         if state.get("status") != "complete" or not isinstance(matches, list):
             continue

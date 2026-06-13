@@ -317,6 +317,64 @@ class TestLLM:
             {**base, "tool_rounds": [{"finish_reason": "length"}]},
             expected_metadata=metadata,
         )
+        assert not batch_debug_is_reusable(
+            {**base, "scan_incomplete": True},
+            expected_metadata=metadata,
+        )
+
+    def test_truncated_json_array_continues_without_repeating_items(self):
+        from dd_clip_miner_llm.llm import (
+            LLMProvider,
+            _continue_truncated_json_array,
+            parse_llm_response,
+        )
+
+        calls = []
+
+        class Message:
+            content = '[{"content_type":"song","title":"B","segment_ranges":[[3,4]]}]'
+            reasoning_content = ""
+            tool_calls = None
+
+            def model_dump(self):
+                return {"content": self.content, "reasoning_content": "", "tool_calls": None}
+
+        class Usage:
+            def model_dump(self):
+                return {"prompt_tokens": 10, "completion_tokens": 5}
+
+        class Completions:
+            def create(self, **kwargs):
+                calls.append(kwargs)
+                choice = type("Choice", (), {"message": Message(), "finish_reason": "stop"})()
+                return type("Response", (), {"choices": [choice], "usage": Usage(), "model": "test"})()
+
+        client = type("Client", (), {
+            "chat": type("Chat", (), {"completions": Completions()})(),
+        })()
+        config = {
+            "llm": {"continuation_on_length": True, "max_continuation_rounds": 2},
+        }
+        debug = {"usage": []}
+        content = _continue_truncated_json_array(
+            client,
+            LLMProvider(
+                api_key="test",
+                base_url="https://api.deepseek.com",
+                max_completion_tokens=32768,
+            ),
+            config,
+            [{"role": "user", "content": "full transcript and task"}],
+            '[{"content_type":"song","title":"A","segment_ranges":[[1,2]]},',
+            "length",
+            debug,
+            max_tokens=32768,
+        )
+
+        assert [item["title"] for item in parse_llm_response(content)] == ["A", "B"]
+        assert debug["continuation_complete"] is True
+        assert calls[0]["messages"][0]["content"] == "full transcript and task"
+        assert calls[0]["max_tokens"] == 32768
 
     def test_cache_friendly_messages_share_transcript_prefix(self, sample_segments, config):
         from dd_clip_miner_llm.llm import build_llm_messages

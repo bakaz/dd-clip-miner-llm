@@ -191,11 +191,14 @@ def build_clip_export_stem(
     streamer = _clean_name_part(profile.streamer)
     date_text = profile.date
 
-    if artist:
+    if artist and artist != "untitled":
         raw = f"【{streamer}】{title}-{artist}-{date_text}"
     else:
         raw = f"【{streamer}】{title}-{date_text}"
-    return safe_path_part(raw, fallback=f"clip_{result.index:03d}")
+    stem = safe_path_part(raw, fallback=f"clip_{result.index:03d}")
+    # Final guard: never emit replacement char in a filename
+    stem = stem.replace("\ufffd", "")
+    return stem or f"clip_{result.index:03d}"
 
 
 def should_apply_clip_naming(content_type: str, config: dict[str, Any]) -> bool:
@@ -285,6 +288,10 @@ def _split_aliases(value: Any) -> list[str]:
 
 
 def _clean_name_part(value: str) -> str:
+    if not value:
+        return "untitled"
+    # Strip mojibake replacement chars early (seen in artist fields from LLM+search in some runs)
+    value = value.replace("\ufffd", "").strip()
     cleaned = "".join("_" if ch in '<>:"/\\|?*' else ch for ch in value)
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" .-_")
     return cleaned or "untitled"

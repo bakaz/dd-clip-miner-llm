@@ -5,6 +5,7 @@ import shutil
 import subprocess
 from os import devnull
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 from .command import require_binary
@@ -14,55 +15,55 @@ from .fsutil import safe_rmtree, safe_unlink
 from .validation import get_min_video_size
 
 
-def run_command(*args, **kwargs):
+def run_command(*args: Any, **kwargs: Any) -> Any:
     return pkg_attr("run_command")(*args, **kwargs)
 
 
-def get_duration(path):
+def get_duration(path: str | Path) -> float | None:
     return pkg_attr("get_duration")(path)
 
 
-def get_video_fps(path):
+def get_video_fps(path: str | Path) -> float:
     return pkg_attr("get_video_fps")(path)
 
 
-def find_bad_h264_segments(*args, **kwargs):
+def find_bad_h264_segments(*args: Any, **kwargs: Any) -> list[int]:
     return pkg_attr("_find_bad_h264_segments")(*args, **kwargs)
 
 
-def repair_video_filter_args(*args, **kwargs):
+def repair_video_filter_args(*args: Any, **kwargs: Any) -> list[str]:
     return pkg_attr("_repair_video_filter_args")(*args, **kwargs)
 
 
-def targeted_repair_encode_candidates(*args, **kwargs):
+def targeted_repair_encode_candidates(*args: Any, **kwargs: Any) -> list[list[str]]:
     return pkg_attr("_targeted_repair_encode_candidates")(*args, **kwargs)
 
 
-def concat_reencode_arg_candidates(*args, **kwargs):
+def concat_reencode_arg_candidates(*args: Any, **kwargs: Any) -> list[list[str]]:
     return pkg_attr("_concat_reencode_arg_candidates")(*args, **kwargs)
 
 
-def video_reencode_arg_candidates(*args, **kwargs):
+def video_reencode_arg_candidates(*args: Any, **kwargs: Any) -> list[list[str]]:
     return pkg_attr("_video_reencode_arg_candidates")(*args, **kwargs)
 
 
-def validate_concat_duration(*args, **kwargs):
+def validate_concat_duration(*args: Any, **kwargs: Any) -> None:
     return pkg_attr("_validate_concat_duration")(*args, **kwargs)
 
 
-def validate_audio_decodable(*args, **kwargs):
+def validate_audio_decodable(*args: Any, **kwargs: Any) -> None:
     return pkg_attr("_validate_audio_decodable")(*args, **kwargs)
 
 
-def has_audio_stream(path):
+def has_audio_stream(path: str | Path) -> bool:
     return pkg_attr("_has_audio_stream")(path)
 
 
-def concat_filter_complex(*args, **kwargs):
+def concat_filter_complex(*args: Any, **kwargs: Any) -> str:
     return pkg_attr("_concat_filter_complex")(*args, **kwargs)
 
 
-def concat_scale_args(*args, **kwargs):
+def concat_scale_args(*args: Any, **kwargs: Any) -> list[str]:
     return pkg_attr("_concat_scale_args")(*args, **kwargs)
 
 def concat_reencoded_bad_segments_copy(

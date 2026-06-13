@@ -61,14 +61,39 @@ def safe_path_part(value: str, fallback: str = "item", max_length: int = 120) ->
     import re
     import unicodedata
 
+    if not value:
+        return fallback
+    # Remove replacement chars (mojibake artifacts) and control / invalid fs chars
+    value = value.replace("\ufffd", "")
     normalized = unicodedata.normalize("NFKC", value).strip()
-    normalized = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", normalized)
+    normalized = re.sub(r'[<>:"/\\|?*\x00-\x1f\ufffd]', "_", normalized)
     normalized = re.sub(r"\s+", " ", normalized).strip(" .")
+    # Keep CJK, letters, digits, common safe punctuation; the above already protects fs
     return (normalized[:max_length] or fallback).strip(" .") or fallback
 
 
 def _staged_name(path: Path) -> str:
-    digest = hashlib.sha1(str(path.resolve()).encode("utf-8", errors="surrogatepass")).hexdigest()[:12]
+    """Generate a stable staged filename for a video.
+
+    Uses content-based hash (file size + head bytes) instead of path string.
+    This ensures that *the same video content* always resolves to the same
+    target name in 00_input/, even when the caller passes:
+      - the original UNC path,
+      - a previous staged copy,
+      - or a different absolute path string for the identical file.
+
+    This greatly improves reliability of ASR/audio reuse across
+    re-runs, AB对照 (different profiles on same video), and cases where
+    stage_input_for_ffmpeg is called with different input representations.
+    """
+    if not path.exists():
+        # fallback to path hash if file not readable yet
+        digest = hashlib.sha1(str(path.resolve()).encode("utf-8", errors="surrogatepass")).hexdigest()[:12]
+    else:
+        size = path.stat().st_size
+        with path.open("rb") as f:
+            head = f.read(1024 * 1024)  # 1 MiB head is plenty for stable ID
+        digest = hashlib.sha1(head + str(size).encode("ascii")).hexdigest()[:12]
     suffix = path.suffix if path.suffix.isascii() else ".mp4"
     return f"input_{digest}{suffix.lower()}"
 

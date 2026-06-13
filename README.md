@@ -14,9 +14,15 @@
 ## 特性
 
 - **可插拔识别器**：每种内容类型独立实现（`recognizers/`）
-- **多 ASR 后端**：faster-whisper（默认示例配置）、FunASR / Qwen3-ASR、远程 MiMo ASR
+- **多 ASR 后端**：faster-whisper（批量推理 `BatchedInferencePipeline`）、FunASR / Qwen3-ASR、远程 MiMo ASR
 - **智能 LLM**：reasoning followup、工具调用、JSON 修复、歌词搜索
-- **歌曲遗漏复查**：首轮后对未覆盖 ASR 区间二次检查
+- **KV 缓存优化**：`cache_friendly_prompt_layout` 复用 ASR 前缀，`compact_segment_ranges` 减少输出 token
+- **V3 三轮分段流水线**：高精度发现 → 未覆盖召回审计 → 全量时序裁决
+- **时序裁决**：全量 ASR 二次审视，修正首轮边界，支持名称保留
+- **副歌感知拆分**：40–120 秒间隔根据文本相似度判断是否为副歌重现
+- **同名相邻合并**：排序后字面相邻、标题相同且间隔 ≤ 40 秒的候选自动合并
+- **搜索验证命名**：对未知歌曲用歌词锚点搜索，需歌词证据才更新名称
+- **锚点漏检审计**：可选的 anchor-based 补查，单次 LLM 调用，默认关闭
 - **断点续传**：复用 `01_audio`、`02_asr`、LLM 结果（`progress.json`）
 - **批量 + 多段合并**：`ConcatPipeline` 处理直播分段 H.264 损坏（mkvmerge 优先 + 6 策略 fallback）
 - **切片命名**：主播词典 + 路径日期 → `【主播】歌名-歌手-YYMMDD`
@@ -143,16 +149,33 @@ python -m dd_clip_miner_llm batch-run "D:\input" --config config.yaml --profile 
 
 配置包含 `profiles` 时，音频和 ASR 由两个 profile 共享，LLM、切片和报告分别写入
 `02_asr/llm/<profile>`、`03_clips/<profile>`、`04_reports/<profile>`。
-`accuracy` 保留 task-first 和 `segment_indices`；`kv_optimized` 使用缓存友好布局和
-紧凑区间。两套 profile 都启用局部冲突复核。`accuracy` 的漏检复核继续使用局部
-窗口；`kv_optimized` 使用一次完整 ASR 覆盖审计，复用主轮 ASR 前缀缓存，仅在
-API 错误、截断、无效 JSON 或 JSON 修复时回退到局部窗口。合法空数组不会触发回退。
+`accuracy` 保留 task-first 和 `segment_indices`；`kv_optimized` 使用
+`risk_routed_v3`、缓存友好布局和三轮对象协议。时长、边界膨胀和重叠只作为复核风险，
+不会被当作全局硬过滤条件。两套 profile 共享歌曲 padding，默认
+`merge_gap_seconds: 40`。`accuracy` 显式使用本地 review 和 windowed missed-recheck；
+`kv_optimized` 固定执行 Precision Discovery、Recall Audit 和 Segmentation Adjudication。
+第一轮只保留明确演唱，第二轮只输出未覆盖区间的短证据，第三轮统一修边界并可有限补漏。
+三轮都不搜索歌词，也不执行 V2 的逐窗口 checkpoint 或 anchor 自动扩张；分段稳定后才可独立命名。
 两个 profile 都完成后会生成
 `02_asr/llm/profile_comparison.json` 和 `profile_comparison.md`。
+
+两套 profile 共用 `max_completion_tokens: 32768` 和 `final_tool_max_tokens: 32768`。
+任何普通请求、最终工具轮、review 或 missed-recheck 返回 `finish_reason: length` 时，
+会在保留原 ASR 请求前缀的情况下续写剩余 JSON，最多 8 轮。仍未完成的结果会标记
+`scan_incomplete`，不会作为可复用缓存。
 
 `song.missed_recheck.strategy` 可设为 `windowed` 或 `full_transcript`。
 全量审计会写入 `missed_recheck/audit.json`，其中包含输入指纹、目标区间、
 结构失败原因、fallback 状态和当前有效的 LLM 调试文件。
+
+V2 离线比较不会调用 API：
+
+```powershell
+python scripts/evaluate_song_pipeline_v2.py "results\<date>\<run>" --output ".tmp\song-v2-evaluation.json"
+```
+
+报告使用 accuracy 的高置信已命名区间作为弱时间参考，并单独标记当前固定样本中的
+150-360 秒外风险结果；该范围不会进入运行时硬约束。加 `--enforce` 可让质量或费用门槛失败时返回非零。
 
 `--concat` 或 `output.concat_videos: true` 时，同目录多段录像先合并再处理。合并失败时查看 `runs/<name>_concat/concat/concat_attempts/*.log`。
 
@@ -206,6 +229,9 @@ dd-clip-miner-llm/
 ├── rename_drag_drop.bat
 ├── scripts/
 │   ├── rename_drag_drop.py
+│   ├── evaluate_song_pipeline_v2.py
+│   ├── adaptive_cost_probe.py
+│   ├── review_scope_ab.py
 │   └── probe_concat_strategies.ps1
 ├── tests/                      # 单元测试
 ├── .github/workflows/tests.yml
@@ -213,7 +239,12 @@ dd-clip-miner-llm/
     ├── cli.py / __main__.py    # python -m dd_clip_miner_llm
     ├── pipeline.py             # 主流水线
     ├── batch.py / manual.py
-    ├── config.py / models.py / llm.py / report.py / merger.py
+    ├── config.py               # 配置加载、profile 管理、歌曲 pipeline 选择
+    ├── models.py / llm.py / report.py / merger.py
+    ├── profile_state.py        # profile 指纹、usage 汇总、对比报告
+    ├── song_adaptive.py        # 自适应策略选择（review scope / missed strategy）
+    ├── song_adaptive_cost.py   # 自适应成本估算
+    ├── song_evaluation.py      # 离线评估工具
     ├── clip_naming.py / search_tools.py / paths.py
     ├── asr.py
     ├── asr_backends/
@@ -221,6 +252,16 @@ dd-clip-miner-llm/
     │   ├── funasr_backend.py
     │   └── mimo_asr_backend.py
     ├── recognizers/            # song / dialogue / highlight / funny / cringe / daily_summary
+    │   ├── base.py             # BaseRecognizer + post_process 钩子
+    │   └── song.py             # SongRecognizer（legacy / V2 兼容）
+    ├── song_postprocess/       # 歌曲后处理流水线
+    │   ├── normalize.py        # 同名合并、副歌感知拆分、通用规范化
+    │   ├── review.py           # LLM 复核（local / full scope）
+    │   ├── recheck.py          # 遗漏复查（windowed / full_transcript / anchor）
+    │   ├── temporal.py         # 时序裁决（全量 ASR 边界修正）
+    │   ├── risk.py             # 风险评分、边界修复、anchor 扩展
+    │   ├── pipeline.py         # V2 风险路由流水线编排
+    │   └── v3.py               # V3 三轮对象协议与降级处理
     ├── concat/                 # 多段录像合并流水线
     │   ├── models.py           # VideoMeta, ProblemProfile, ConcatContext
     │   ├── probe.py / planner.py

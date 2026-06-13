@@ -146,6 +146,29 @@ class BaseRecognizer(ABC):
             return 0.5
         return max(0.0, min(1.0, confidence))
     
+    def post_process(
+        self,
+        segments: list[TranscriptSegment],
+        config: dict[str, Any],
+        matches: list[ContentMatch],
+        llm_dir: Path,
+    ) -> list[ContentMatch]:
+        """LLM 识别完成后的后处理钩子（review、recheck 等）。
+
+        默认实现直接返回原 matches。子类可覆盖以实现自定义后处理逻辑，
+        例如歌曲识别器的冲突复核、过长片段重查、遗漏复查等。
+
+        Args:
+            segments: ASR 转写片段列表
+            config: 完整配置字典
+            matches: LLM 识别出的匹配结果
+            llm_dir: LLM 调试信息输出目录
+
+        Returns:
+            处理后的匹配结果列表
+        """
+        return matches
+
     def get_merge_gap(self, config: dict[str, Any]) -> float:
         """获取合并间隔"""
         type_config = config.get(self.name, {})

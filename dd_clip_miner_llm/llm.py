@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .config import get_llm_config
 from .models import ContentMatch, TranscriptSegment
 from .profile_state import _fingerprint_payload
 from .recognizers.base import BaseRecognizer
@@ -116,6 +117,7 @@ def call_llm(
     max_tokens_override: int | None = None,
     max_retries: int = 3,
     tool_choice: Any = None,
+    timeout: float = 300.0,
 ) -> Any:
     """调用 LLM，返回完整的 response 对象
     
@@ -127,6 +129,7 @@ def call_llm(
         tool_choice: 工具选择策略
         max_tokens_override: 最大 token 数覆盖
         max_retries: 最大重试次数（指数退避）
+        timeout: API 调用超时时间（秒）
     """
     import time
     
@@ -160,6 +163,8 @@ def call_llm(
         if tool_choice is not None:
             kwargs["tool_choice"] = tool_choice
 
+    kwargs["timeout"] = timeout
+
     last_exc = None
     for retry in range(max_retries):
         try:
@@ -172,7 +177,9 @@ def call_llm(
                 print(f"  [llm] API call failed (retry {retry + 1}/{max_retries}, wait {wait_time}s): {exc}")
                 time.sleep(wait_time)
             continue
-    
+
+    if last_exc is None:
+        raise RuntimeError("call_llm was invoked with max_retries=0; no attempt was made")
     raise last_exc
 
 
@@ -253,7 +260,7 @@ def _tools_schema_fingerprint(tools: list[dict[str, Any]] | None) -> str | None:
 
 
 def _provider_request_fingerprint(provider: LLMProvider, config: dict[str, Any]) -> str:
-    llm_config = config.get("llm", {})
+    llm_config = get_llm_config(config)
     return _fingerprint_payload({
         "base_url": provider.base_url or "openai",
         "model": provider.model,
@@ -267,6 +274,8 @@ def _provider_request_fingerprint(provider: LLMProvider, config: dict[str, Any])
         "final_tool_instruction": llm_config.get("final_tool_instruction"),
         "json_fix_rounds": llm_config.get("json_fix_rounds"),
         "retry_empty_with_reasoning": llm_config.get("retry_empty_with_reasoning"),
+        "continuation_on_length": llm_config.get("continuation_on_length"),
+        "max_continuation_rounds": llm_config.get("max_continuation_rounds"),
     })
 
 
@@ -288,7 +297,7 @@ def build_request_debug_metadata(
     tools: list[dict[str, Any]] | None,
     debug_phase: str | None,
 ) -> dict[str, Any]:
-    llm_config = config.get("llm", {})
+    llm_config = get_llm_config(config)
     metadata: dict[str, Any] = {
         "request_fingerprint": _fingerprint_payload(messages),
         "message_count": len(messages),
@@ -337,6 +346,8 @@ def batch_debug_is_reusable(
     if payload.get("json_fix_rounds"):
         return False
     if payload.get("reasoning_followups"):
+        return False
+    if payload.get("scan_incomplete"):
         return False
     if payload.get("finish_reason") == "length":
         return False
@@ -454,7 +465,7 @@ def build_llm_messages(
 ) -> list[dict[str, Any]]:
     """构建请求消息；缓存友好模式把可复用 ASR 长文本放在任务指令之前。"""
     prompt = recognizer.build_prompt(segments, batch_start, config)
-    llm_config = config.get("llm", {})
+    llm_config = get_llm_config(config)
     if not llm_config.get("cache_friendly_prompt_layout", False):
         system_prompt = recognizer.build_system_prompt(config)
         messages: list[dict[str, Any]] = []
@@ -484,6 +495,152 @@ def build_llm_messages(
     ]
 
 
+def _extract_complete_json_objects(text: str) -> list[dict[str, Any]]:
+    """Extract complete top-level objects from a possibly truncated JSON array."""
+    objects: list[dict[str, Any]] = []
+    start: int | None = None
+    depth = 0
+    in_string = False
+    escaped = False
+    for index, char in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+            continue
+        if char == "{":
+            if depth == 0:
+                start = index
+            depth += 1
+        elif char == "}" and depth:
+            depth -= 1
+            if depth == 0 and start is not None:
+                try:
+                    value = json.loads(text[start:index + 1])
+                except json.JSONDecodeError:
+                    value = None
+                if isinstance(value, dict):
+                    objects.append(value)
+                start = None
+    return objects
+
+
+def _continuation_item_key(item: dict[str, Any]) -> str:
+    if item.get("content_type") == "scan_checkpoint":
+        return f"checkpoint:{item.get('scan_id', '')}"
+    ranges = item.get("segment_ranges")
+    if not isinstance(ranges, list):
+        ranges = item.get("segment_indices")
+    return _fingerprint_payload({
+        "content_type": item.get("content_type"),
+        "scan_id": item.get("scan_id"),
+        "title": item.get("title"),
+        "ranges": ranges,
+    })
+
+
+def _merge_continuation_items(
+    target: list[dict[str, Any]],
+    seen: set[str],
+    content: str,
+) -> bool:
+    items, valid = parse_llm_response_with_status(content)
+    if not valid:
+        items = _extract_complete_json_objects(content)
+    for item in items:
+        key = _continuation_item_key(item)
+        if key in seen:
+            continue
+        seen.add(key)
+        target.append(item)
+    return valid
+
+
+def _continue_truncated_json_array(
+    client: Any,
+    provider: LLMProvider,
+    config: dict[str, Any],
+    messages: list[dict[str, Any]],
+    content: str,
+    finish_reason: str | None,
+    batch_debug: dict[str, Any],
+    *,
+    tools: list[dict[str, Any]] | None = None,
+    max_tokens: int | None = None,
+) -> str:
+    """Continue a truncated JSON array while preserving the original request prefix."""
+    llm_config = get_llm_config(config)
+    if finish_reason != "length" or not llm_config.get("continuation_on_length", False):
+        return content
+
+    max_rounds = max(0, int(llm_config.get("max_continuation_rounds", 0) or 0))
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    _merge_continuation_items(merged, seen, content)
+    current_reason = finish_reason
+    continuation_debug = batch_debug.setdefault("continuation_rounds", [])
+
+    for round_index in range(max_rounds):
+        checkpoints = [
+            str(item.get("scan_id"))
+            for item in merged
+            if item.get("content_type") == "scan_checkpoint" and item.get("scan_id")
+        ]
+        completed = [
+            {
+                "scan_id": item.get("scan_id"),
+                "title": item.get("title"),
+                "segment_ranges": item.get("segment_ranges"),
+                "segment_indices": item.get("segment_indices"),
+            }
+            for item in merged
+            if item.get("content_type") != "scan_checkpoint"
+        ]
+        continuation_prompt = (
+            "上一轮 JSON 数组因为输出长度限制而截断。请继续完成同一个任务，只返回尚未输出的对象，"
+            "不要重复下列已完成对象。仍然只返回纯 JSON 数组。"
+            f"\n已完成 scan checkpoint: {json.dumps(checkpoints, ensure_ascii=False, separators=(',', ':'))}"
+            f"\n已完成对象: {json.dumps(completed[-200:], ensure_ascii=False, separators=(',', ':'))}"
+        )
+        response = call_llm(
+            client,
+            provider,
+            [*messages, {"role": "user", "content": continuation_prompt}],
+            tools=tools,
+            tool_choice="none" if tools else None,
+            max_tokens_override=max_tokens,
+        )
+        debug = llm_response_debug(response)
+        _record_usage(batch_debug, "continuation", debug, round=round_index + 1)
+        continuation_content = debug["content"] or debug["reasoning_content"]
+        valid = _merge_continuation_items(merged, seen, continuation_content)
+        current_reason = debug["finish_reason"]
+        continuation_debug.append({
+            "round": round_index + 1,
+            "finish_reason": current_reason,
+            "parse_valid": valid,
+            "content": continuation_content,
+            "usage": debug["usage"],
+        })
+        if current_reason != "length" and valid:
+            batch_debug["continuation_complete"] = True
+            batch_debug["finish_reason"] = current_reason
+            return json.dumps(merged, ensure_ascii=False, separators=(",", ":"))
+
+    batch_debug["scan_incomplete"] = True
+    batch_debug["continuation_complete"] = False
+    batch_debug["finish_reason"] = current_reason
+    if merged:
+        return json.dumps(merged, ensure_ascii=False, separators=(",", ":"))
+    return content
+
+
 # ============ 工具调用 ============
 
 def run_llm_with_tools(
@@ -497,6 +654,7 @@ def run_llm_with_tools(
     final_max_tokens: int | None = None,
     force_final_round: bool = False,
     final_instruction: str | None = None,
+    config: dict[str, Any] | None = None,
 ) -> str:
     """调用 LLM，处理 tool calls
     
@@ -554,11 +712,23 @@ def run_llm_with_tools(
                 _, is_valid_array = parse_llm_response_with_status(content)
                 if not is_valid_array:
                     continue
+            if config is not None:
+                content = _continue_truncated_json_array(
+                    client, provider, config, messages, content,
+                    debug["finish_reason"], batch_debug, tools=tools,
+                    max_tokens=final_max_tokens,
+                )
             return content
 
         if is_last:
             if not content.strip() and debug["reasoning_content"].strip():
                 content = debug["reasoning_content"]
+            if config is not None:
+                content = _continue_truncated_json_array(
+                    client, provider, config, messages, content,
+                    debug["finish_reason"], batch_debug, tools=tools,
+                    max_tokens=final_max_tokens,
+                )
             return content
 
         choice = response.choices[0] if response.choices else None
@@ -573,12 +743,36 @@ def run_llm_with_tools(
             except json.JSONDecodeError:
                 args = {}
             result = tool_executor(tc.function.name, args)
-            batch_debug.setdefault("tool_calls_log", []).append({
+            tool_log: dict[str, Any] = {
                 "round": tool_round + 1,
                 "function": tc.function.name,
                 "arguments": args,
-                "result_preview": result[:200],
-            })
+                "result_preview": result[:1000],
+                "result_length": len(result),
+            }
+            if tc.function.name == "search_lyrics":
+                try:
+                    search_payload = json.loads(result)
+                except (TypeError, json.JSONDecodeError):
+                    search_payload = None
+                if isinstance(search_payload, dict):
+                    tool_log["result_summary"] = {
+                        "query": search_payload.get("query", ""),
+                        "results": [
+                            {
+                                "title": item.get("title", ""),
+                                "snippet": str(item.get("snippet", ""))[:240],
+                                "url": item.get("url", ""),
+                            }
+                            for item in search_payload.get("results", [])[:3]
+                            if isinstance(item, dict)
+                        ],
+                        "lyrics_hints": [
+                            str(item)[:240]
+                            for item in search_payload.get("lyrics_hints", [])[:2]
+                        ],
+                    }
+            batch_debug.setdefault("tool_calls_log", []).append(tool_log)
             messages.append({
                 "role": "tool",
                 "tool_call_id": tc.id,
@@ -653,6 +847,16 @@ def run_reasoning_followups(
                 round=len(batch_debug["reasoning_followups"]) + 1,
             )
             content = followup_debug["content"]
+            content = _continue_truncated_json_array(
+                client,
+                provider,
+                config,
+                [{"role": "user", "content": followup_prompt}],
+                content or followup_debug["reasoning_content"],
+                followup_debug["finish_reason"],
+                batch_debug,
+                max_tokens=followup_tokens,
+            )
             batch_debug["reasoning_followups"].append({
                 "round": len(batch_debug["reasoning_followups"]) + 1,
                 "content": content[:500],
@@ -706,11 +910,29 @@ def fix_json_with_llm(
             response = call_llm(
                 client, provider,
                 [{"role": "user", "content": fix_prompt}],
-                max_tokens_override=16384,
+                max_tokens_override=(
+                    provider.max_completion_tokens
+                    if provider.max_completion_tokens is not None
+                    else provider.max_tokens
+                ),
             )
             debug = llm_response_debug(response)
             _record_usage(batch_debug, "json_fix", debug, round=round_num + 1)
             new_content = debug["content"] or debug["reasoning_content"]
+            new_content = _continue_truncated_json_array(
+                client,
+                provider,
+                config,
+                [{"role": "user", "content": fix_prompt}],
+                new_content,
+                debug["finish_reason"],
+                batch_debug,
+                max_tokens=(
+                    provider.max_completion_tokens
+                    if provider.max_completion_tokens is not None
+                    else provider.max_tokens
+                ),
+            )
             batch_debug.setdefault("json_fix_rounds", []).append({
                 "round": round_num + 1,
                 "content": new_content[:500],
@@ -769,7 +991,11 @@ def fix_structured_json_with_llm(
             response = call_llm(
                 client, provider,
                 [{"role": "user", "content": fix_prompt}],
-                max_tokens_override=16384,
+                max_tokens_override=(
+                    provider.max_completion_tokens
+                    if provider.max_completion_tokens is not None
+                    else provider.max_tokens
+                ),
             )
             debug = llm_response_debug(response)
             _record_usage(batch_debug, "json_fix", debug, round=round_num + 1)
@@ -962,7 +1188,7 @@ def identify_structured_content(
             _attach_request_debug(
                 batch_debug,
                 messages,
-                store_requests=bool(config.get("llm", {}).get("debug_store_requests", False)),
+                store_requests=bool(get_llm_config(config).get("debug_store_requests", False)),
                 metadata=request_metadata,
             )
 
@@ -1020,6 +1246,186 @@ def identify_structured_content(
 
 # ============ 核心识别逻辑 ============
 
+def _build_openai_clients(providers: list[LLMProvider]) -> dict[str, Any]:
+    """Pre-create OpenAI clients keyed by api_key to reuse TCP connections."""
+    from openai import OpenAI
+
+    clients: dict[str, Any] = {}
+    for provider in providers:
+        if not provider.api_key:
+            continue
+        if provider.api_key not in clients:
+            client_kwargs: dict[str, Any] = {"api_key": provider.api_key}
+            if provider.base_url:
+                client_kwargs["base_url"] = provider.base_url
+            clients[provider.api_key] = OpenAI(**client_kwargs)
+    return clients
+
+
+def _process_single_batch(
+    *,
+    batch_idx: int,
+    batch_count: int,
+    batch_start: int,
+    batch_segments: list[TranscriptSegment],
+    segments: list[TranscriptSegment],
+    config: dict[str, Any],
+    recognizer: BaseRecognizer,
+    providers: list[LLMProvider],
+    clients: dict[str, Any],
+    tools: list[dict[str, Any]] | None,
+    debug_path: Path | None,
+    debug_phase: str | None,
+    store_requests: bool,
+    reuse_valid_batches: bool,
+    content_type: str,
+) -> list[ContentMatch] | None:
+    """Process a single LLM batch. Returns matches or None on failure."""
+    print(f"  LLM batch {batch_idx}/{batch_count}: segments {batch_start}-{batch_start + len(batch_segments) - 1} (total {len(segments)})...")
+    batch_debug: dict[str, Any] = {
+        "batch_start": batch_start,
+        "batch_end": batch_start + len(batch_segments) - 1,
+        "segment_count": len(batch_segments),
+        "provider": None,
+        "raw_response": None,
+        "parsed_items": [],
+        "tool_calls_log": [],
+        "tool_rounds": [],
+        "reasoning_followups": [],
+        "json_fix_rounds": [],
+        "usage": [],
+        "error": None,
+    }
+    if debug_phase:
+        batch_debug["phase"] = debug_phase
+
+    content = None
+    last_error = None
+    llm_config = get_llm_config(config)
+
+    for provider in providers:
+        if not provider.api_key:
+            continue
+        try:
+            client = clients[provider.api_key]
+            messages = build_llm_messages(recognizer, batch_segments, batch_start, config)
+            request_metadata = build_request_debug_metadata(
+                messages, config=config, provider=provider, recognizer=recognizer,
+                segments=batch_segments, batch_start=batch_start, tools=tools,
+                debug_phase=debug_phase,
+            )
+            if reuse_valid_batches and debug_path is not None and request_metadata is not None:
+                cached_batch = _try_load_cached_batch(debug_path, batch_start, expected_metadata=request_metadata)
+                if cached_batch is not None:
+                    cached_payload, cached_items = cached_batch
+                    _record_cache_reuse(debug_path, batch_start, cached_payload)
+                    matches = recognizer.parse_response(cached_items, config)
+                    print(f"  LLM batch {batch_idx}/{batch_count}: reused cached result, found {len(matches)} match(es)")
+                    return matches
+
+            _attach_request_debug(batch_debug, messages, store_requests=store_requests, metadata=request_metadata)
+            batch_debug["provider"] = {"base_url": provider.base_url or "openai", "model": provider.model}
+
+            if tools and content_type == "song":
+                from .search_tools import execute_tool
+                content = run_llm_with_tools(
+                    client, provider, messages, tools, execute_tool, batch_debug,
+                    max_tool_rounds=int(llm_config.get("max_tool_rounds", 2) or 0),
+                    final_max_tokens=(
+                        int(llm_config["final_tool_max_tokens"])
+                        if llm_config.get("final_tool_max_tokens") not in (None, "")
+                        else (provider.max_completion_tokens if provider.max_completion_tokens is not None else provider.max_tokens)
+                    ),
+                    force_final_round=bool(llm_config.get("force_final_tool_round", False)),
+                    final_instruction=(str(llm_config["final_tool_instruction"]) if llm_config.get("final_tool_instruction") else None),
+                    config=config,
+                )
+            else:
+                response = call_llm(client, provider, messages)
+                debug = llm_response_debug(response)
+                _record_usage(batch_debug, "initial", debug)
+                batch_debug["finish_reason"] = debug["finish_reason"]
+                content = debug["content"]
+                if not content.strip() and debug["reasoning_content"].strip():
+                    content = debug["reasoning_content"]
+                content = _continue_truncated_json_array(
+                    client, provider, config, messages, content,
+                    debug["finish_reason"], batch_debug,
+                    max_tokens=(
+                        provider.max_completion_tokens
+                        if provider.max_completion_tokens is not None
+                        else provider.max_tokens
+                    ),
+                )
+
+            batch_debug["raw_response"] = content
+            break
+        except Exception as exc:
+            last_error = exc
+            print(f"  [warn] Provider {provider.model} failed: {exc}")
+            continue
+
+    if content is None:
+        batch_debug["error"] = str(last_error)
+        if debug_path is not None:
+            write_llm_debug(debug_path, batch_start, batch_debug)
+        print(f"  [error] All LLM providers failed for batch {batch_start}. Last error: {last_error}")
+        return None
+
+    if not content.strip():
+        reasoning_content = ""
+        if batch_debug.get("tool_rounds"):
+            for tr in batch_debug["tool_rounds"]:
+                if tr.get("reasoning_content"):
+                    reasoning_content = tr["reasoning_content"]
+                    break
+        content = run_reasoning_followups(client, provider, config, reasoning_content, "", batch_debug)
+        if not content.strip():
+            batch_debug["error"] = "LLM returned empty content"
+            if debug_path is not None:
+                write_llm_debug(debug_path, batch_start, batch_debug)
+            print(f"  [warn] LLM returned empty response for batch {batch_start}.")
+            return None
+
+    items, is_valid_array = parse_llm_response_with_status(content)
+    if not is_valid_array:
+        if batch_debug.get("tool_rounds"):
+            for tr in batch_debug["tool_rounds"]:
+                rc = tr.get("reasoning_content", "")
+                if rc.strip():
+                    items, is_valid_array = parse_llm_response_with_status(rc)
+                    if is_valid_array:
+                        break
+        if not is_valid_array:
+            reasoning_content = ""
+            if batch_debug.get("tool_rounds"):
+                for tr in batch_debug["tool_rounds"]:
+                    if tr.get("reasoning_content"):
+                        reasoning_content = tr["reasoning_content"]
+                        break
+            if reasoning_content.strip():
+                followup_content = run_reasoning_followups(client, provider, config, reasoning_content, content, batch_debug)
+                if followup_content.strip():
+                    content = followup_content
+                    items, is_valid_array = parse_llm_response_with_status(content)
+
+    if not is_valid_array and content.strip():
+        items, content = fix_json_with_llm(client, provider, config, content, content_type, batch_debug)
+        _, is_valid_array = parse_llm_response_with_status(content)
+
+    batch_debug["parsed_items"] = items
+    batch_debug["parse_valid"] = is_valid_array
+    batch_debug["raw_response"] = content
+    if debug_path is not None:
+        write_llm_debug(debug_path, batch_start, batch_debug)
+
+    matches = recognizer.parse_response(items, config)
+    cache_summary = _cache_usage_summary(batch_debug)
+    cache_suffix = f", {cache_summary}" if cache_summary else ""
+    print(f"  LLM batch {batch_idx}/{batch_count}: done, found {len(matches)} match(es){cache_suffix}")
+    return matches
+
+
 def identify_content(
     segments: list[TranscriptSegment],
     config: dict[str, Any],
@@ -1036,24 +1442,13 @@ def identify_content(
         recognizer: 识别器实例
         debug_dir: 调试信息输出目录
     """
-    from openai import OpenAI
-    
     content_type = recognizer.name
 
     providers = build_providers(config)
     if not providers:
         raise RuntimeError("LLM API key not configured. Set llm.api_key in config.")
 
-    # 预创建客户端（复用连接，减少 TCP 握手开销）
-    clients: dict[str, Any] = {}
-    for provider in providers:
-        if not provider.api_key:
-            continue
-        if provider.api_key not in clients:
-            client_kwargs: dict[str, Any] = {"api_key": provider.api_key}
-            if provider.base_url:
-                client_kwargs["base_url"] = provider.base_url
-            clients[provider.api_key] = OpenAI(**client_kwargs)
+    clients = _build_openai_clients(providers)
 
     batch_size = config["llm"].get("batch_size")
     if batch_size in (None, "", 0, "0"):
@@ -1071,218 +1466,22 @@ def identify_content(
         debug_path.mkdir(parents=True, exist_ok=True)
 
     tools = recognizer.get_tools(config)
-    llm_config = config.get("llm", {})
+    llm_config = get_llm_config(config)
     store_requests = bool(llm_config.get("debug_store_requests", False))
     reuse_valid_batches = bool(llm_config.get("reuse_valid_batches", True))
 
     for batch_idx, (batch_start, batch_segments) in enumerate(batches, 1):
-        print(f"  LLM batch {batch_idx}/{len(batches)}: segments {batch_start}-{batch_start + len(batch_segments) - 1} (total {len(segments)})...")
-        batch_debug: dict[str, Any] = {
-            "batch_start": batch_start,
-            "batch_end": batch_start + len(batch_segments) - 1,
-            "segment_count": len(batch_segments),
-            "provider": None,
-            "raw_response": None,
-            "parsed_items": [],
-            "tool_calls_log": [],
-            "tool_rounds": [],
-            "reasoning_followups": [],
-            "json_fix_rounds": [],
-            "usage": [],
-            "error": None,
-        }
-        if debug_phase:
-            batch_debug["phase"] = debug_phase
-
-        content = None
-        last_error = None
-        request_metadata: dict[str, Any] | None = None
-
-        for provider in providers:
-            if not provider.api_key:
-                continue
-
-            try:
-                client = clients[provider.api_key]
-                messages = build_llm_messages(
-                    recognizer,
-                    batch_segments,
-                    batch_start,
-                    config,
-                )
-                request_metadata = build_request_debug_metadata(
-                    messages,
-                    config=config,
-                    provider=provider,
-                    recognizer=recognizer,
-                    segments=batch_segments,
-                    batch_start=batch_start,
-                    tools=tools,
-                    debug_phase=debug_phase,
-                )
-                if (
-                    reuse_valid_batches
-                    and debug_path is not None
-                    and request_metadata is not None
-                ):
-                    cached_batch = _try_load_cached_batch(
-                        debug_path,
-                        batch_start,
-                        expected_metadata=request_metadata,
-                    )
-                    if cached_batch is not None:
-                        cached_payload, cached_items = cached_batch
-                        _record_cache_reuse(
-                            debug_path,
-                            batch_start,
-                            cached_payload,
-                        )
-                        matches = recognizer.parse_response(cached_items, config)
-                        all_matches.extend(matches)
-                        print(
-                            f"  LLM batch {batch_idx}/{len(batches)}: reused cached result, "
-                            f"found {len(matches)} match(es)"
-                        )
-                        content = "__cache_reused__"
-                        break
-
-                _attach_request_debug(
-                    batch_debug,
-                    messages,
-                    store_requests=store_requests,
-                    metadata=request_metadata,
-                )
-
-                batch_debug["provider"] = {
-                    "base_url": provider.base_url or "openai",
-                    "model": provider.model,
-                }
-
-                if tools and content_type == "song":
-                    from .search_tools import execute_tool
-                    llm_config = config.get("llm", {})
-                    content = run_llm_with_tools(
-                        client,
-                        provider,
-                        messages,
-                        tools,
-                        execute_tool,
-                        batch_debug,
-                        max_tool_rounds=int(llm_config.get("max_tool_rounds", 2) or 0),
-                        final_max_tokens=(
-                            int(llm_config["final_tool_max_tokens"])
-                            if llm_config.get("final_tool_max_tokens") not in (None, "")
-                            else (
-                                provider.max_completion_tokens
-                                if provider.max_completion_tokens is not None
-                                else provider.max_tokens
-                            )
-                        ),
-                        force_final_round=bool(
-                            llm_config.get("force_final_tool_round", False)
-                        ),
-                        final_instruction=(
-                            str(llm_config["final_tool_instruction"])
-                            if llm_config.get("final_tool_instruction")
-                            else None
-                        ),
-                    )
-                else:
-                    response = call_llm(client, provider, messages)
-                    debug = llm_response_debug(response)
-                    _record_usage(batch_debug, "initial", debug)
-                    batch_debug["finish_reason"] = debug["finish_reason"]
-                    content = debug["content"]
-                    if not content.strip() and debug["reasoning_content"].strip():
-                        content = debug["reasoning_content"]
-
-                batch_debug["raw_response"] = content
-                break
-            except Exception as exc:
-                last_error = exc
-                print(f"  [warn] Provider {provider.model} failed: {exc}")
-                continue
-
-        if content == "__cache_reused__":
-            continue
-
-        if content is None:
-            batch_debug["error"] = str(last_error)
-            if debug_path is not None:
-                write_llm_debug(debug_path, batch_start, batch_debug)
-            print(f"  [error] All LLM providers failed for batch {batch_start}. Last error: {last_error}")
-            continue
-
-        # content 为空时尝试 reasoning followup
-        if not content.strip():
-            reasoning_content = ""
-            if batch_debug.get("tool_rounds"):
-                for tr in batch_debug["tool_rounds"]:
-                    if tr.get("reasoning_content"):
-                        reasoning_content = tr["reasoning_content"]
-                        break
-            content = run_reasoning_followups(
-                client, provider, config, reasoning_content, "", batch_debug
-            )
-            if not content.strip():
-                batch_debug["error"] = "LLM returned empty content"
-                if debug_path is not None:
-                    write_llm_debug(debug_path, batch_start, batch_debug)
-                print(f"  [warn] LLM returned empty response for batch {batch_start}.")
-                continue
-
-        # 尝试解析 JSON
-        items, is_valid_array = parse_llm_response_with_status(content)
-        if not is_valid_array:
-            # 从 reasoning 中提取
-            if batch_debug.get("tool_rounds"):
-                for tr in batch_debug["tool_rounds"]:
-                    rc = tr.get("reasoning_content", "")
-                    if rc.strip():
-                        items, is_valid_array = parse_llm_response_with_status(rc)
-                        if is_valid_array:
-                            break
-            # reasoning followup 兜底
-            if not is_valid_array:
-                reasoning_content = ""
-                if batch_debug.get("tool_rounds"):
-                    for tr in batch_debug["tool_rounds"]:
-                        if tr.get("reasoning_content"):
-                            reasoning_content = tr["reasoning_content"]
-                            break
-                if reasoning_content.strip():
-                    followup_content = run_reasoning_followups(
-                        client, provider, config, reasoning_content, content, batch_debug
-                    )
-                    if followup_content.strip():
-                        content = followup_content
-                        items, is_valid_array = parse_llm_response_with_status(content)
-
-        # JSON 修复
-        if not is_valid_array and content.strip():
-            items, content = fix_json_with_llm(
-                client, provider, config, content, content_type, batch_debug
-            )
-            _, is_valid_array = parse_llm_response_with_status(content)
-
-        batch_debug["parsed_items"] = items
-        batch_debug["parse_valid"] = is_valid_array
-        batch_debug["raw_response"] = content
-        if debug_path is not None:
-            write_llm_debug(debug_path, batch_start, batch_debug)
-
-        # 使用识别器解析响应
-        matches = recognizer.parse_response(items, config)
-        all_matches.extend(matches)
-        cache_summary = _cache_usage_summary(batch_debug)
-        cache_suffix = f", {cache_summary}" if cache_summary else ""
-        print(
-            f"  LLM batch {batch_idx}/{len(batches)}: done, "
-            f"found {len(matches)} match(es){cache_suffix}"
+        matches = _process_single_batch(
+            batch_idx=batch_idx, batch_count=len(batches),
+            batch_start=batch_start, batch_segments=batch_segments,
+            segments=segments, config=config, recognizer=recognizer,
+            providers=providers, clients=clients, tools=tools,
+            debug_path=debug_path, debug_phase=debug_phase,
+            store_requests=store_requests, reuse_valid_batches=reuse_valid_batches,
+            content_type=content_type,
         )
+        if matches is not None:
+            all_matches.extend(matches)
 
-    _write_active_debug_files(
-        debug_path,
-        [batch_start for batch_start, _ in batches],
-    )
+    _write_active_debug_files(debug_path, [batch_start for batch_start, _ in batches])
     return all_matches

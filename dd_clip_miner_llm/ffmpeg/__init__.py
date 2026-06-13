@@ -109,7 +109,7 @@ def concat_videos(
     audio_bitrate_kbps: int = 320,
     single_file_policy: str = "copy",
     force_normalize: bool = False,
-):
+) -> Path:
     from pathlib import Path
 
     from ..concat.pipeline import concat_videos_smart

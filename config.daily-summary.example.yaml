@@ -12,6 +12,7 @@ asr:
   local:
     backend: faster_whisper
 
+    # faster_whisper 配置（支持 gpu/cpu 自动分流，详见 config.example.yaml）
     faster_whisper:
       model: small
       device: auto
@@ -20,6 +21,7 @@ asr:
       beam_size: 5
       vad_filter: true
       initial_prompt: null
+      inference_mode: batched   # batched | standard
 
     funasr:
       model: iic/SenseVoiceSmall
