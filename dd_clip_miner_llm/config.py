@@ -119,6 +119,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
             },
             "temporal_adjudication": {
                 "enabled": False,
+                "preserve_source_names": True,
                 "max_completion_tokens": 32768,
             },
         },

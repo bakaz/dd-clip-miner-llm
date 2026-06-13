@@ -145,6 +145,10 @@ profiles:
       pipeline:
         strategy: risk_routed_v3
         runtime_adaptive: fixed_three_stage
+        temporal_adjudication:
+          enabled: true
+          preserve_source_names: true
+          max_completion_tokens: 8192
         stages:
           discovery: precision
           recall_audit: uncovered_evidence
