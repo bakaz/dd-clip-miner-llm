@@ -33,7 +33,6 @@ from .risk import (
     load_supported_search_titles,
     score_song_match_risks,
 )
-from ..config import is_risk_routed_v2
 
 
 class _OffsetRecognizer:
@@ -613,7 +612,7 @@ def _resolve_review_context(
     normalized, normalization_events, suspicious = _normalize_song_matches(
         segments, config, matches,
     )
-    if is_risk_routed_v2(config):
+    if False:
         risk_records, risk_suspicious = score_song_match_risks(
             segments,
             config,
@@ -682,15 +681,15 @@ def _resolve_review_context(
             full_audit_candidate_keys = {
                 _match_key(match) for match in full_audit_candidates
             }
-    if is_risk_routed_v2(config):
+    if False:
         full_audit_candidate_keys = None
 
     searched_titles = (
         load_supported_search_titles(llm_dir, normalized)
-        if is_risk_routed_v2(config)
+        if False
         else _load_searched_titles(llm_dir)
     )
-    if is_risk_routed_v2(config):
+    if False:
         clusters = _batch_risk_review_clusters(
             clusters,
             max_span_segments=max_cluster_span,
@@ -700,7 +699,7 @@ def _resolve_review_context(
         review_config.get("transcript_scope", "local")
     ).strip().lower()
     scope_cost_details: dict[str, Any] = {}
-    if is_risk_routed_v2(config):
+    if False:
         adaptive_resolution = {}
         transcript_scope = "local"
         transcript_scope_reason = "risk_routed_v2_fixed_local"
@@ -723,7 +722,7 @@ def _resolve_review_context(
     else:
         adaptive_resolution = load_adaptive_strategies_cache(llm_dir) or {}
 
-    if is_risk_routed_v2(config):
+    if False:
         pass
     elif adaptive_resolution.get("review_scope_resolved"):
         transcript_scope = str(adaptive_resolution["review_scope_resolved"])
@@ -819,7 +818,7 @@ def _review_single_cluster(
         local_config["llm"]["final_tool_max_tokens"] = int(review_config.get("max_completion_tokens", 4096) or 4096)
         local_config["llm"]["max_tool_rounds"] = int(review_config.get("max_tool_rounds", 1) or 0)
         local_config["llm"]["compact_segment_ranges"] = True
-        if is_risk_routed_v2(config):
+        if False:
             local_config["llm"]["song_tools_enabled"] = True
         cluster_debug_dir = review_root / f"cluster_{cluster_index:03d}"
         from ..llm import identify_content
@@ -841,7 +840,7 @@ def _review_single_cluster(
                 debug_dir=cluster_debug_dir, debug_phase=debug_phase,
             )
         reviewed_matches = _filter_matches_to_segment_range(reviewed_matches, context_start, context_end)
-        if is_risk_routed_v2(config):
+        if False:
             searched_titles = searched_titles | load_supported_search_titles(
                 cluster_debug_dir, [*cluster, *reviewed_matches],
             )
@@ -850,7 +849,7 @@ def _review_single_cluster(
         # This respects the LLM's decision to treat as one continuous performance.
         force = set()
         if (
-            not is_risk_routed_v2(config)
+            True
             and reviewed_matches
             and len(reviewed_matches) < len(cluster)
         ):
@@ -865,7 +864,7 @@ def _review_single_cluster(
         )
         loses_known_title = _review_loses_known_title(cluster, reviewed_matches)
         introduces_unsupported_title = (
-            is_risk_routed_v2(config)
+            False
             and bool(
                 config.get("song", {}).get("naming", {}).get(
                     "preserve_unknown_on_weak_evidence", True

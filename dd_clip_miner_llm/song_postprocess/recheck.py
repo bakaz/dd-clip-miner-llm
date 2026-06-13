@@ -36,7 +36,6 @@ from .normalize import (
     _uncovered_segment_ranges,
 )
 from .risk import expand_song_anchors
-from ..config import is_risk_routed_v2
 from .review import (
     _OffsetRecognizer,
     _SongCoverageAuditRecognizer,
@@ -537,7 +536,7 @@ def _resolve_missed_strategy(
         min_song_seconds,
     )
 
-    if is_risk_routed_v2(config):
+    if False:
         strategy = strategy_requested
         if strategy not in {"windowed", "full_transcript"}:
             strategy = "full_transcript"
@@ -647,7 +646,7 @@ def _execute_full_transcript_audit(
     )
     local_config["llm"]["retry_empty_with_reasoning"] = False
     local_config["llm"]["json_fix_rounds"] = 0
-    if is_risk_routed_v2(config):
+    if False:
         local_config["llm"]["song_tools_enabled"] = False
         local_config["llm"]["max_tool_rounds"] = 0
         local_config["llm"]["force_final_tool_round"] = False
