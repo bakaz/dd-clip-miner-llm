@@ -699,11 +699,7 @@ def _resolve_review_context(
         review_config.get("transcript_scope", "local")
     ).strip().lower()
     scope_cost_details: dict[str, Any] = {}
-    if False:
-        adaptive_resolution = {}
-        transcript_scope = "local"
-        transcript_scope_reason = "risk_routed_v2_fixed_local"
-    elif phase == "before_missed_recheck":
+    if phase == "before_missed_recheck":
         min_gap_segments = int(
             get_song_recheck_config(config).get("min_gap_segments", 1) or 1
         )

@@ -536,17 +536,6 @@ def _resolve_missed_strategy(
         min_song_seconds,
     )
 
-    if False:
-        strategy = strategy_requested
-        if strategy not in {"windowed", "full_transcript"}:
-            strategy = "full_transcript"
-        return (
-            strategy,
-            "risk_routed_v2_fixed_strategy",
-            {"resolution_mode": "fixed_offline_strategy"},
-            preview_ranges,
-        )
-
     adaptive_resolution = load_adaptive_strategies_cache(llm_dir) or {}
     if not adaptive_resolution:
         review_config = get_song_review_config(config)
