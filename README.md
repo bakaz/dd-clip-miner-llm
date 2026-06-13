@@ -155,7 +155,7 @@ python -m dd_clip_miner_llm batch-run "D:\input" --config config.yaml --profile 
 `merge_gap_seconds: 40`。`accuracy` 显式使用本地 review 和 windowed missed-recheck；
 `kv_optimized` 固定执行 Precision Discovery、Recall Audit 和 Segmentation Adjudication。
 第一轮只保留明确演唱，第二轮只输出未覆盖区间的短证据，第三轮统一修边界并可有限补漏。
-三轮都不搜索歌词，也不执行 V2 的逐窗口 checkpoint 或 anchor 自动扩张；分段稳定后才可独立命名。
+三轮都不搜索歌词；分段稳定后才可独立命名。
 两个 profile 都完成后会生成
 `02_asr/llm/profile_comparison.json` 和 `profile_comparison.md`。
 
@@ -168,7 +168,7 @@ python -m dd_clip_miner_llm batch-run "D:\input" --config config.yaml --profile 
 全量审计会写入 `missed_recheck/audit.json`，其中包含输入指纹、目标区间、
 结构失败原因、fallback 状态和当前有效的 LLM 调试文件。
 
-V2 离线比较不会调用 API：
+离线比较不会调用 API：
 
 ```powershell
 python scripts/evaluate_song_pipeline_v2.py "results\<date>\<run>" --output ".tmp\song-v2-evaluation.json"
@@ -253,14 +253,14 @@ dd-clip-miner-llm/
     │   └── mimo_asr_backend.py
     ├── recognizers/            # song / dialogue / highlight / funny / cringe / daily_summary
     │   ├── base.py             # BaseRecognizer + post_process 钩子
-    │   └── song.py             # SongRecognizer（legacy / V2 兼容）
+    │   └── song.py             # SongRecognizer（legacy / V3）
     ├── song_postprocess/       # 歌曲后处理流水线
     │   ├── normalize.py        # 同名合并、副歌感知拆分、通用规范化
     │   ├── review.py           # LLM 复核（local / full scope）
     │   ├── recheck.py          # 遗漏复查（windowed / full_transcript / anchor）
     │   ├── temporal.py         # 时序裁决（全量 ASR 边界修正）
     │   ├── risk.py             # 风险评分、边界修复、anchor 扩展
-    │   ├── pipeline.py         # V2 风险路由流水线编排
+    │   ├── pipeline.py         # 共享流水线组件（BoundaryRiskStage、FinalAdjudicationStage 等）
     │   └── v3.py               # V3 三轮对象协议与降级处理
     ├── concat/                 # 多段录像合并流水线
     │   ├── models.py           # VideoMeta, ProblemProfile, ConcatContext
