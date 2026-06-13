@@ -3136,28 +3136,6 @@ class TestRecognizers:
         assert len(matches) == 1
         assert matches[0].segment_indices == [12, 13, 14, 18]
 
-    def test_song_risk_v2_prompt_scans_all_windows(self, sample_segments, sample_config):
-        from dd_clip_miner_llm.recognizers import get_recognizer
-
-        sample_config["llm"]["cache_friendly_prompt_layout"] = True
-        sample_config["song"]["pipeline"] = {"strategy": "risk_routed_v2"}
-        prompt = get_recognizer("song").build_prompt(sample_segments, 0, sample_config)
-
-        assert "必须按 scan_windows 的顺序检查全部窗口" in prompt
-        assert "连续两句歌词，或连续演唱约 10 秒" in prompt
-        assert '"content_type":"scan_checkpoint"' in prompt
-        assert "分段阶段不识别歌名" in prompt
-
-    def test_song_risk_v2_disables_tools_for_large_calls(self, sample_config):
-        from dd_clip_miner_llm.recognizers import get_recognizer
-
-        sample_config["song"]["pipeline"] = {"strategy": "risk_routed_v2"}
-        recognizer = get_recognizer("song")
-        assert recognizer.get_tools(sample_config) is None
-
-        sample_config["llm"]["song_tools_enabled"] = True
-        assert recognizer.get_tools(sample_config)
-
     def test_song_risk_duration_is_soft_review_signal(self):
         from dd_clip_miner_llm.song_postprocess import score_song_match_risks
 
@@ -3693,32 +3671,6 @@ class TestRecognizers:
             ["A", "B"],
             ["C"],
         ]
-
-    def test_risk_pipeline_final_adjudication_removes_title_overlap(self, tmp_path):
-        from dd_clip_miner_llm.recognizers import get_recognizer
-        from dd_clip_miner_llm.song_postprocess.pipeline import run_risk_routed_v2_pipeline
-
-        segments = [
-            TranscriptSegment(float(i * 10), float(i * 10 + 8), "lyric")
-            for i in range(20)
-        ]
-        config = deep_merge(DEFAULT_CONFIG, {
-            "song": {
-                "pipeline": {"strategy": "risk_routed_v2"},
-                "review": {"enabled": False},
-                "missed_recheck": {"enabled": False},
-            }
-        })
-        matches = [
-            ContentMatch("song", "A", list(range(12)), 0.9),
-            ContentMatch("song", "B", list(range(8, 20)), 0.7),
-        ]
-        result = run_risk_routed_v2_pipeline(
-            segments, config, get_recognizer("song"), matches, tmp_path,
-        )
-
-        assert len(result) == 1
-        assert result[0].title == "A"
 
     def test_temporal_adjudication_restores_title_by_overlap(self):
         from dd_clip_miner_llm.song_postprocess import _restore_temporal_titles

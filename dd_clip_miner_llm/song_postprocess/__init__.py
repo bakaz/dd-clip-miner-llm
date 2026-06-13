@@ -60,7 +60,6 @@ from .recheck import (
 from .pipeline import (
     SongPipelineContext,
     SongPipelineStage,
-    run_risk_routed_v2_pipeline,
 )
 from .risk import (
     SongRiskRecord,
@@ -70,7 +69,7 @@ from .risk import (
     repair_song_boundaries,
     score_song_match_risks,
 )
-from ..config import is_risk_routed, is_risk_routed_v2, is_risk_routed_v3, song_pipeline_strategy
+from ..config import is_risk_routed, is_risk_routed_v3, song_pipeline_strategy
 from .v3 import run_risk_routed_v3_pipeline
 from .temporal import (
     _SongTemporalAdjudicationRecognizer,
@@ -124,18 +123,16 @@ __all__ = [
     "_recheck_uncovered_song_segments",
     "_review_debug_succeeded",
     "_run_windowed_missed_recheck",
-    # V2 pipeline and risk routing
+    # V3 pipeline and risk routing
     "SongPipelineContext",
     "SongPipelineStage",
     "SongRiskRecord",
     "get_song_risk_config",
     "expand_song_anchors",
-    "is_risk_routed_v2",
     "is_risk_routed_v3",
     "is_risk_routed",
     "load_supported_search_titles",
     "repair_song_boundaries",
-    "run_risk_routed_v2_pipeline",
     "run_risk_routed_v3_pipeline",
     "score_song_match_risks",
     "song_pipeline_strategy",

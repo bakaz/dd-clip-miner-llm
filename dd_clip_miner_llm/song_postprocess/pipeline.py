@@ -619,45 +619,11 @@ def _anchor_has_minimum_evidence(
     ) >= minimum_seconds
 
 
-def run_risk_routed_v2_pipeline(
-    segments: list[TranscriptSegment],
-    config: dict[str, Any],
-    recognizer: Any,
-    matches: list[ContentMatch],
-    llm_dir: Path,
-) -> list[ContentMatch]:
-    """Run the fixed V2 strategy; runtime adaptation is limited to candidate risk."""
-    from ..config import get_song_recheck_config, get_song_search_config
-
-    context = SongPipelineContext(segments, config, recognizer, llm_dir, matches)
-    stages: list[SongPipelineStage] = []
-
-    if get_song_recheck_config(config).get("enabled", False):
-        stages.append(AnchorMissedRecheckStage())
-
-    stages.append(BoundaryRiskStage("combined", "coverage_audit"))
-    temporal_cfg = config.get("song", {}).get("pipeline", {}).get(
-        "temporal_adjudication", {}
-    )
-    if temporal_cfg.get("enabled", False):
-        stages.append(TemporalAdjudicationStage())
-    stages.append(FinalAdjudicationStage())
-
-    if get_song_search_config(config).get("enabled", False):
-        stages.append(SearchVerificationStage())
-
-    for stage in stages:
-        stage.run(context)
-
-    import json
-
-    (llm_dir / "risk" / "pipeline.json").write_text(
-        json.dumps({
-            "strategy": "risk_routed_v2",
-            "runtime_adaptive": "risk_escalation",
-            "stages": context.stage_history,
-            "final_count": len(context.matches),
-        }, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    return context.matches
+__all__ = [
+    "BoundaryRiskStage",
+    "FinalAdjudicationStage",
+    "SearchVerificationStage",
+    "AnchorMissedRecheckStage",
+    "SongPipelineContext",
+    "SongPipelineStage",
+]
