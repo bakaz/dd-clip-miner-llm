@@ -414,10 +414,29 @@ def _apply_output_overrides(config: dict, args: argparse.Namespace) -> None:
 
 
 def _has_api_key(config: dict) -> bool:
-    api_key = config["llm"].get("api_key")
-    api_key_env = config["llm"].get("api_key_env")
+    import os
+    llm = config.get("llm", {})
+
+    # 新格式：provider_route 检查 providers 内的 key
+    provider_route = llm.get("provider_route")
+    if provider_route:
+        providers = llm.get("providers", {})
+        for name in provider_route:
+            pcfg = providers.get(str(name), {})
+            if not isinstance(pcfg, dict):
+                continue
+            key = pcfg.get("api_key", "")
+            key_env = pcfg.get("api_key_env")
+            if not key and key_env:
+                key = os.environ.get(str(key_env), "")
+            if key:
+                return True
+        return False
+
+    # 旧格式：顶层 api_key
+    api_key = llm.get("api_key")
+    api_key_env = llm.get("api_key_env")
     if not api_key and api_key_env:
-        import os
         api_key = os.environ.get(str(api_key_env), "")
     return bool(api_key)
 

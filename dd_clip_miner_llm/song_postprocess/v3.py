@@ -10,6 +10,7 @@ from ..config import get_llm_config
 from ..llm import (
     _attach_request_debug,
     _build_openai_clients,
+    _get_client,
     _record_cache_reuse,
     _record_usage,
     _write_active_debug_files,
@@ -60,8 +61,22 @@ class _V3Recognizer(BaseRecognizer):
         batch_start: int,
         config: dict[str, Any],
     ) -> str:
+        instructions = self.task_instructions(config)
+        if self.stage == "v3_discovery":
+            expected_last_segment = batch_start + len(segments) - 1
+            instructions = instructions.replace(
+                "<输入最后一个segment index>",
+                str(expected_last_segment),
+            )
+            instructions = (
+                f"{instructions}\n\n"
+                f"本次输入的最后一个 segment index 是 {expected_last_segment}。"
+                "complete_through_segment 表示你已经检查过的最后一行输入索引，"
+                "与该行是否为演唱无关。只有检查到该索引后才能设置 scan_complete=true；"
+                "完整响应必须令 complete_through_segment 等于该索引。"
+            )
         return (
-            f"{self.task_instructions(config)}\n\n"
+            f"{instructions}\n\n"
             "只返回一个 JSON object，不要 Markdown、解释或代码块。\n\n"
             f"完整 ASR 转写片段：\n{_transcript_text(segments, batch_start)}"
         )
@@ -76,7 +91,7 @@ class _PrecisionDiscoveryRecognizer(_V3Recognizer):
 下面是一整段视频的 Whisper ASR 转写片段，每行格式为：
 [序号] (开始秒-结束秒) ASR文本
 
-任务：按时间顺序完整扫描 ASR，找出所有可能是连续演唱的歌曲片段，返回纯 JSON 数组。
+任务：按时间顺序完整扫描 ASR，找出所有可能是连续演唱的歌曲片段，返回一个纯 JSON object。
 
 尽量覆盖同一次演唱的完整片段，边界可以略宽，但不要跨到明显聊天、换歌、报幕或另一首歌。
 
@@ -91,14 +106,12 @@ Whisper ASR 可能存在错字、漏字、同音字替换、外语误识别、�
 此阶段不识别歌名、不搜索歌词。
 
 协议：
-{"candidates":[{"segment_ranges":[[241,271]],"confidence":0.82,"anchor_text":"我终于鼓起勇气"}],"scan_complete":true,"complete_through_segment":2710}
+{"candidates":[{"segment_ranges":[[241,271]],"confidence":0.82,"anchor_text":"我终于鼓起勇气"}],"scan_complete":true,"complete_through_segment":<输入最后一个segment index>}
 
 字段限制：candidate 只能包含 segment_ranges、confidence、anchor_text。segment_ranges 起止均包含并且必须来自输入。没有候选时 candidates 为 []。
 
 输出要求：
-- 只返回 JSON 数组，不要 Markdown，不要解释，不要代码块。
-
-完整 ASR 转写片段：
+- 只返回一个 JSON object，不要 Markdown，不要解释，不要代码块。
 """
 
 
@@ -240,7 +253,10 @@ def _discovery_candidates(payload: Any, segment_count: int) -> list[dict[str, An
     return _dedupe_objects(candidates, lambda item: tuple(map(tuple, item["segment_ranges"])))
 
 
-def _validate_discovery(payload: Any, segment_count: int) -> tuple[bool, str | None]:
+def _validate_discovery(
+    payload: Any,
+    segment_count: int,
+) -> tuple[bool, str | None]:
     if not isinstance(payload, dict):
         return False, "discovery_not_object"
     if payload.get("scan_complete") is not True:
@@ -249,7 +265,7 @@ def _validate_discovery(payload: Any, segment_count: int) -> tuple[bool, str | N
         complete_through = int(payload.get("complete_through_segment"))
     except (TypeError, ValueError):
         return False, "discovery_missing_complete_through"
-    if complete_through < segment_count - 1:
+    if complete_through != segment_count - 1:
         return False, "discovery_incomplete_coverage"
     if not isinstance(payload.get("candidates"), list):
         return False, "discovery_candidates_not_array"
@@ -347,7 +363,7 @@ class _V3StageRunner:
         for provider in self.providers:
             if not provider.api_key:
                 continue
-            client = self.clients[provider.api_key]
+            client = _get_client(provider, self.clients)
             batch_debug["error"] = None
             messages = build_llm_messages(recognizer, self.segments, 0, self.config)
             metadata = build_request_debug_metadata(
@@ -367,6 +383,7 @@ class _V3StageRunner:
                 "risk": self.config.get("song", {}).get("risk", {}),
             })
             cache_path = debug_dir / "llm_batch_000000.json"
+            recovery_seed: dict[str, Any] | None = None
             if reuse and cache_path.exists():
                 try:
                     cached = json.loads(cache_path.read_text(encoding="utf-8"))
@@ -381,6 +398,51 @@ class _V3StageRunner:
                         _record_cache_reuse(debug_dir, 0, cached)
                         _write_active_debug_files(debug_dir, [0])
                         return payload, cached
+                stable_recovery_keys = (
+                    "transcript_batch_fingerprint",
+                    "tools_schema_fingerprint",
+                    "recognizer_protocol",
+                    "phase",
+                )
+                recovery_metadata_matches = isinstance(cached, dict) and all(
+                    cached.get(key) == metadata.get(key)
+                    for key in stable_recovery_keys
+                )
+                cached_provider = cached.get("provider") if isinstance(cached, dict) else None
+                recovery_metadata_matches = recovery_metadata_matches and isinstance(
+                    cached_provider, dict
+                ) and cached_provider == {
+                    "base_url": provider.base_url or "openai",
+                    "model": provider.model,
+                }
+                recovery_allowed = (
+                    recovery_metadata_matches
+                    and recognizer.stage == "v3_discovery"
+                    and cached.get("error") == "discovery_incomplete_coverage"
+                    and cached.get("finish_reason") != "length"
+                    and not cached.get("json_fix_rounds")
+                )
+                if recovery_allowed:
+                    raw_response = cached.get("raw_response")
+                    reparsed = (
+                        parse_llm_json(raw_response)
+                        if isinstance(raw_response, str) and raw_response.strip()
+                        else None
+                    )
+                    if isinstance(reparsed, dict):
+                        try:
+                            complete_through = int(
+                                reparsed.get("complete_through_segment")
+                            )
+                        except (TypeError, ValueError):
+                            complete_through = -1
+                        if -1 <= complete_through < len(self.segments) - 1:
+                            recovery_seed = {
+                                "payload": reparsed,
+                                "raw_response": raw_response,
+                                "usage": list(cached.get("usage") or []),
+                                "complete_through_segment": complete_through,
+                            }
 
             _attach_request_debug(batch_debug, messages, store_requests=store_requests, metadata=metadata)
             batch_debug["provider"] = {
@@ -392,6 +454,27 @@ class _V3StageRunner:
             final_payload: dict[str, Any] | None = None
             final_reason: str | None = None
             raw_parts: list[str] = []
+            if recovery_seed is not None:
+                seed_payload = recovery_seed["payload"]
+                seed_items = seed_payload.get(partial_field, [])
+                accumulated.extend(
+                    item for item in seed_items if isinstance(item, dict)
+                )
+                raw_parts.append(str(recovery_seed["raw_response"]))
+                batch_debug["usage"] = list(recovery_seed["usage"])
+                instruction = _continuation_for_discovery_coverage(
+                    int(recovery_seed["complete_through_segment"]),
+                    len(self.segments) - 1,
+                )
+                batch_debug["continued_from_cached_incomplete_response"] = True
+                batch_debug["continuation_rounds"].append({
+                    "round": 1,
+                    "finish_reason": "stop",
+                    "reason": "discovery_incomplete_coverage",
+                    "partial_count": len(accumulated),
+                    "instruction": instruction,
+                })
+                current_messages = [*messages, {"role": "user", "content": instruction}]
             try:
                 for round_index in range(max_rounds + 1):
                     response = call_llm(
@@ -408,7 +491,11 @@ class _V3StageRunner:
                     response_debug = llm_response_debug(response)
                     _record_usage(
                         batch_debug,
-                        "initial" if round_index == 0 else "continuation",
+                        (
+                            "continuation"
+                            if recovery_seed is not None or round_index > 0
+                            else "initial"
+                        ),
                         response_debug,
                         round=round_index,
                     )
@@ -442,21 +529,44 @@ class _V3StageRunner:
                         final_reason = response_debug["finish_reason"]
                         break
 
-                    if response_debug["finish_reason"] != "length":
+                    coverage_incomplete = (
+                        recognizer.stage == "v3_discovery"
+                        and reason == "discovery_incomplete_coverage"
+                    )
+                    should_continue = (
+                        response_debug["finish_reason"] == "length"
+                        or coverage_incomplete
+                    )
+                    if not should_continue:
                         batch_debug["structural_failure"] = True
                         batch_debug["structural_failure_reason"] = reason or "invalid_protocol"
                         final_reason = response_debug["finish_reason"]
                         break
                     if not continuation_enabled or round_index >= max_rounds:
                         batch_debug["scan_incomplete"] = True
-                        batch_debug["structural_failure_reason"] = "continuation_limit"
-                        final_reason = "length"
+                        batch_debug["structural_failure_reason"] = (
+                            reason if coverage_incomplete else "continuation_limit"
+                        )
+                        final_reason = response_debug["finish_reason"]
                         break
 
-                    instruction = continuation_instruction(accumulated)
+                    if coverage_incomplete:
+                        try:
+                            complete_through = int(
+                                merged_payload.get("complete_through_segment")
+                            )
+                        except (TypeError, ValueError):
+                            complete_through = -1
+                        instruction = _continuation_for_discovery_coverage(
+                            complete_through,
+                            len(self.segments) - 1,
+                        )
+                    else:
+                        instruction = continuation_instruction(accumulated)
                     batch_debug["continuation_rounds"].append({
                         "round": round_index + 1,
                         "finish_reason": response_debug["finish_reason"],
+                        "reason": reason,
                         "partial_count": len(accumulated),
                         "instruction": instruction,
                     })
@@ -581,6 +691,23 @@ def _continuation_for_discovery(
         f"上一响应因长度截断。只继续扫描尚未完成的部分，从 segment {resume} 开始复查到 {segment_count - 1}；"
         f"可向前覆盖 {max(0, overlap)} 段以避免边界遗漏，但不要重复已完整候选。"
         "返回相同 discovery JSON object 协议，并在完成时设置 scan_complete=true。"
+    )
+
+
+def _continuation_for_discovery_coverage(
+    complete_through_segment: int,
+    expected_last_segment: int,
+) -> str:
+    resume = max(0, complete_through_segment + 1)
+    return (
+        "上一响应的 JSON 完整结束，但 coverage 协议尚未完成。"
+        f"你已经检查到 segment {complete_through_segment}；"
+        f"现在只检查剩余闭区间 [{resume},{expected_last_segment}]。"
+        "不要重新输出之前的候选，只输出剩余区间中新发现的 candidates。"
+        "无论剩余内容是否为演唱，都必须检查到最后一行，并返回一个 JSON object："
+        f'{{"candidates":[],"scan_complete":true,'
+        f'"complete_through_segment":{expected_last_segment}}}。'
+        "complete_through_segment 表示最后检查过的输入索引，不是最后一个歌曲候选索引。"
     )
 
 

@@ -98,6 +98,10 @@ def _provider_request_fingerprint(provider: Any, config: dict[str, Any]) -> str:
         "max_tokens": provider.max_tokens,
         "max_completion_tokens": provider.max_completion_tokens,
         "thinking": provider.thinking,
+        "timeout_schedule": getattr(provider, "timeout_schedule", None),
+        "retry_backoff_seconds": getattr(provider, "retry_backoff_seconds", None),
+        "retry_jitter_ratio": getattr(provider, "retry_jitter_ratio", None),
+        "result_retries": getattr(provider, "result_retries", None),
         "max_tool_rounds": llm_config.get("max_tool_rounds"),
         "final_tool_max_tokens": llm_config.get("final_tool_max_tokens"),
         "force_final_tool_round": llm_config.get("force_final_tool_round"),
@@ -141,6 +145,10 @@ def build_request_debug_metadata(
             llm_config.get("cache_friendly_prompt_layout", False)
         ),
         "compact_segment_ranges": bool(llm_config.get("compact_segment_ranges", False)),
+        "timeout_schedule": getattr(provider, "timeout_schedule", None),
+        "retry_backoff_seconds": getattr(provider, "retry_backoff_seconds", None),
+        "retry_jitter_ratio": getattr(provider, "retry_jitter_ratio", None),
+        "result_retries": getattr(provider, "result_retries", None),
     }
     if debug_phase:
         metadata["phase"] = debug_phase

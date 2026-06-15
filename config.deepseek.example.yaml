@@ -52,8 +52,11 @@ asr:
     language: null
 
 # ─── LLM 配置 ─────────────────────────────────
+# active_provider 指定使用哪个 provider，切换时只需改这个值
+# provider_route 指定 fallback 顺序（优先于 active_provider）
 llm:
   active_provider: deepseek
+  provider_route: [deepseek, opencode, mimo]
   providers:
     deepseek:
       api_key: null
@@ -63,21 +66,36 @@ llm:
       thinking: disabled
       temperature: 0.1
       max_tokens: 8192
-      timeout: 300
+      timeout_schedule: [60, 120, 180]
+      retry_backoff_seconds: [2, 5]
+      retry_jitter_ratio: 0.25
+      result_retries: 2
+      # proxy: http://127.0.0.1:7890
+      # stream: false                      # 流式接收，代理截断时保留部分内容
     mimo:
       api_key_env: MIMO_API_KEY
       base_url: https://token-plan-cn.xiaomimimo.com/v1
       model: mimo-v2.5-pro
       temperature: 0.1
       max_tokens: 8192
-      timeout: 300
+      timeout_schedule: [60, 120, 180]
+      retry_backoff_seconds: [2, 5]
+      retry_jitter_ratio: 0.25
+      result_retries: 2
+      # proxy: http://127.0.0.1:7890
+      # stream: false                      # 流式接收，代理截断时保留部分内容
     opencode:
       api_key_env: OPENCODE_API_KEY
       base_url: https://opencode.ai/zen/go/v1
       model: deepseek-v4-flash
       temperature: 0.1
       max_tokens: 8192
-      timeout: 300
+      timeout_schedule: [60, 120, 180]
+      retry_backoff_seconds: [2, 5]
+      retry_jitter_ratio: 0.25
+      result_retries: 2
+      # proxy: http://127.0.0.1:7890
+      # stream: false                      # 流式接收，代理截断时保留部分内容
   retry_empty_with_reasoning: true
   reasoning_followup_rounds: 5
   reasoning_followup_max_tokens: 32768

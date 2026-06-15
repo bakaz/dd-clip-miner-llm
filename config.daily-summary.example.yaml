@@ -47,13 +47,22 @@ asr:
     language: null
 
 llm:
-  api_key: null
-  api_key_env: LLM_API_KEY
-  base_url: null
-  model: gpt-4o
-  temperature: 0.1
-  max_tokens: 8192
-  max_completion_tokens: null
+  active_provider: default
+  providers:
+    default:
+      api_key: null
+      api_key_env: LLM_API_KEY
+      base_url: null
+      model: gpt-4o
+      temperature: 0.1
+      max_tokens: 8192
+      max_completion_tokens: null
+      timeout_schedule: [60, 120, 180]
+      retry_backoff_seconds: [2, 5]
+      retry_jitter_ratio: 0.25
+      result_retries: 2
+      # proxy: http://127.0.0.1:7890
+      # stream: false                      # 流式接收，代理截断时保留部分内容
   retry_empty_with_reasoning: true
   reasoning_followup_rounds: 5
   reasoning_followup_max_tokens: 32768
@@ -62,7 +71,6 @@ llm:
   use_tools: false
   verify_with_search: false
   json_fix_rounds: 3
-  fallbacks: []
 
 content_types:
   daily_summary: true

@@ -16,6 +16,7 @@
 - **可插拔识别器**：每种内容类型独立实现（`recognizers/`）
 - **多 ASR 后端**：faster-whisper（批量推理 `BatchedInferencePipeline`）、FunASR / Qwen3-ASR、远程 MiMo ASR
 - **智能 LLM**：reasoning followup、工具调用、JSON 修复、歌词搜索
+- **Provider 路由与重试**：`provider_route` 按名称顺序 fallback；`timeout_schedule` 逐步升级超时；传输异常与产物错误分离重试；`_call_llm_raw` 唯一底层请求入口，测试可拦截
 - **KV 缓存优化**：`cache_friendly_prompt_layout` 复用 ASR 前缀，`compact_segment_ranges` 减少输出 token
 - **V3 三轮分段流水线**：高精度发现 → 未覆盖召回审计 → 全量时序裁决
 - **时序裁决**：全量 ASR 二次审视，修正首轮边界，支持名称保留
@@ -112,6 +113,38 @@ ASR 支持两种写法（见 `config.example.yaml`）：
 - **旧格式**：顶层 `asr.backend`（程序自动兼容）
 
 LLM Key 优先环境变量：`LLM_API_KEY`、`DEEPSEEK_API_KEY`、`MIMO_API_KEY` 等，对应 `llm.api_key_env`。
+
+### LLM Provider 路由与重试
+
+```yaml
+llm:
+  provider_route: [opencode, deepseek, mimo]   # fallback 顺序
+  providers:
+    opencode:
+      api_key_env: OPENCODE_API_KEY
+      base_url: https://opencode.ai/zen/go/v1
+      model: deepseek-v4-flash
+      timeout_schedule: [60, 120, 180]    # 逐步升级超时（秒）
+      retry_backoff_seconds: [2, 5]      # 退避间隔（索引对应传输轮次）
+      retry_jitter_ratio: 0.25           # 抖动比例（0~1），防雪崩
+      result_retries: 2                  # 产物无效时重放次数
+      # proxy: http://127.0.0.1:7890     # HTTP/HTTPS/SOCKS5 代理
+```
+
+**行为规则**：
+
+- `timeout_schedule` 长度决定传输尝试次数（`[60, 120, 180]` = 3 次）
+- 传输失败（网络/超时/429/5xx）按 `retry_backoff_seconds` + 随机抖动等待后重试
+- 产物失败（空响应/无效 JSON/字段缺失/业务校验不通过）消耗 `result_retries`，从头重放
+- 401/403/400 等不可重试异常立即结束当前 provider，切换下一个
+- `provider_route` 全部耗尽后才报错；未配置时回退到 `active_provider`
+- 每个 provider 有独立的超时、退避和产物重放参数
+- 服务返回 `Retry-After` 时优先遵循，上限 60 秒
+- OpenAI 客户端按 `(base_url, api_key, proxy)` 缓存，相同密钥不同代理不会复用
+- 支持 per-provider `proxy` 配置（HTTP/HTTPS/SOCKS5）
+- 支持 `stream: true` 流式接收，代理截断时保留部分内容，配合续写机制补全
+
+**向后兼容**：仅配置 `timeout: 300` + `max_retries: 3` 时保持旧行为（固定超时、指数退避）。
 
 ### MiMo ASR 远程配置示例
 

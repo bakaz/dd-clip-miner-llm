@@ -76,6 +76,7 @@ def _write_profile_state(
                 "config_fingerprint": config_fingerprint,
                 "transcript_fingerprint": transcript_fingerprint,
                 "model": get_llm_config(config).get("model"),
+                "provider_route": get_llm_config(config).get("provider_route"),
                 "cache_friendly_prompt_layout": bool(
                     get_llm_config(config).get("cache_friendly_prompt_layout", False)
                 ),

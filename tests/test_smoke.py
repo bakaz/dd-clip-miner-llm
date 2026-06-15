@@ -175,7 +175,9 @@ class TestLLM:
         saved = json.loads((debug_dir / "llm_batch_000000.json").read_text(encoding="utf-8"))
         assert "request_messages" not in saved
 
-    def test_batch_cache_reuse_and_invalidation(self, sample_segments, config, tmp_path):
+    def test_batch_cache_reuse_and_invalidation(
+        self, sample_segments, config, tmp_path, monkeypatch
+    ):
         from dd_clip_miner_llm.llm import (
             build_llm_messages,
             build_request_debug_metadata,
@@ -234,18 +236,14 @@ class TestLLM:
             raise AssertionError("cached batch should not call LLM")
 
         import dd_clip_miner_llm.llm as llm_module
-        original = llm_module.call_llm
-        llm_module.call_llm = fail_call_llm
-        try:
-            matches = identify_content(
-                sample_segments,
-                config,
-                recognizer,
-                debug_dir=debug_dir,
-                debug_phase="main",
-            )
-        finally:
-            llm_module.call_llm = original
+        monkeypatch.setattr(llm_module, "_call_llm_raw", fail_call_llm)
+        matches = identify_content(
+            sample_segments,
+            config,
+            recognizer,
+            debug_dir=debug_dir,
+            debug_phase="main",
+        )
 
         assert len(matches) == 1
         assert matches[0].title == "cached"
@@ -257,17 +255,13 @@ class TestLLM:
         assert saved["raw_response"] == "[{\"title\":\"cached\"}]"
         assert saved["cache_reuse"]["count"] == 1
 
-        llm_module.call_llm = fail_call_llm
-        try:
-            identify_content(
-                sample_segments,
-                config,
-                recognizer,
-                debug_dir=debug_dir,
-                debug_phase="main",
-            )
-        finally:
-            llm_module.call_llm = original
+        identify_content(
+            sample_segments,
+            config,
+            recognizer,
+            debug_dir=debug_dir,
+            debug_phase="main",
+        )
         saved = json.loads(
             (debug_dir / "llm_batch_000000.json").read_text(encoding="utf-8")
         )
@@ -281,17 +275,14 @@ class TestLLM:
             called["value"] = True
             raise RuntimeError("model changed, cache should miss")
 
-        llm_module.call_llm = mark_call_llm
-        try:
-            matches_after_change = identify_content(
-                sample_segments,
-                config,
-                recognizer,
-                debug_dir=debug_dir,
-                debug_phase="main",
-            )
-        finally:
-            llm_module.call_llm = original
+        monkeypatch.setattr(llm_module, "_call_llm_raw", mark_call_llm)
+        matches_after_change = identify_content(
+            sample_segments,
+            config,
+            recognizer,
+            debug_dir=debug_dir,
+            debug_phase="main",
+        )
         assert called["value"] is True
         assert matches_after_change == []
 
@@ -563,6 +554,40 @@ class TestLLM:
         assert calls[0]["max_tokens"] == 32768
         assert calls[0]["extra_body"] == {"thinking": {"type": "disabled"}}
         assert "max_completion_tokens" not in calls[0]
+
+    def test_provider_timeout_and_retries_are_forwarded(self, monkeypatch):
+        import time
+
+        from dd_clip_miner_llm.llm import build_providers, call_llm
+
+        calls = []
+
+        class Completions:
+            def create(self, **kwargs):
+                calls.append(kwargs)
+                if len(calls) == 1:
+                    raise TimeoutError("test timeout")
+                return object()
+
+        client = type("Client", (), {
+            "chat": type("Chat", (), {"completions": Completions()})(),
+        })()
+        config = {
+            "llm": {
+                "api_key": "test",
+                "model": "test-model",
+                "timeout": 12,
+                "max_retries": 2,
+            }
+        }
+        provider = build_providers(config)[0]
+        monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+
+        call_llm(client, provider, [{"role": "user", "content": "test"}])
+
+        assert len(calls) == 2
+        assert calls[0]["timeout"] == 12
+        assert provider.max_retries == 2
 
     def test_parse_json_array(self):
         """应能解析 JSON 数组"""

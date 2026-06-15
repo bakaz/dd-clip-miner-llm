@@ -77,8 +77,10 @@ asr:
 
 # ─── LLM 配置 ─────────────────────────────────
 # active_provider 指定使用哪个 provider，切换时只需改这个值
+# provider_route 指定 fallback 顺序（优先于 active_provider）
 llm:
   active_provider: openai
+  # provider_route: [opencode, deepseek, mimo]   # 按顺序路由 fallback
   providers:
     openai:
       api_key: null
@@ -88,6 +90,14 @@ llm:
       temperature: 0.1
       max_tokens: 8192
       timeout: 300
+      max_retries: 3
+      # proxy: http://127.0.0.1:7890       # HTTP/HTTPS/SOCKS5 代理
+      # stream: false                      # 流式接收，代理截断时保留部分内容
+      # 重试退避配置（新格式）
+      # timeout_schedule: [60, 120, 180]    # 逐步升级超时（秒），长度决定传输尝试次数
+      # retry_backoff_seconds: [2, 5]      # 退避间隔列表（索引对应传输轮次）
+      # retry_jitter_ratio: 0.25           # 抖动比例（0~1），防止雪崩
+      # result_retries: 2                  # 产物无效时重放次数
     mimo:
       api_key_env: MIMO_API_KEY
       base_url: https://token-plan-cn.xiaomimimo.com/v1
@@ -95,13 +105,21 @@ llm:
       temperature: 0.1
       max_tokens: 8192
       timeout: 300
+      max_retries: 3
+      # proxy: http://127.0.0.1:7890         # HTTP/HTTPS/SOCKS5 代理
+      # stream: false                        # 流式接收，代理截断时保留部分内容
     opencode:
       api_key_env: OPENCODE_API_KEY
       base_url: https://opencode.ai/zen/go/v1
       model: deepseek-v4-flash
       temperature: 0.1
       max_tokens: 8192
-      timeout: 300
+      timeout_schedule: [60, 120, 180]
+      retry_backoff_seconds: [2, 5]
+      retry_jitter_ratio: 0.25
+      result_retries: 2
+      # proxy: http://127.0.0.1:7890       # HTTP/HTTPS/SOCKS5 代理
+      # stream: false                      # 流式接收，代理截断时保留部分内容
   # 以下参数对所有 provider 生效
   retry_empty_with_reasoning: true
   reasoning_followup_rounds: 5

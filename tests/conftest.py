@@ -7,6 +7,28 @@ import pytest
 from pathlib import Path
 
 
+@pytest.fixture(autouse=True)
+def block_unmarked_real_llm_requests(request, monkeypatch):
+    """Fail fast if an offline test reaches a real OpenAI-compatible client."""
+    if request.node.get_closest_marker("network") or request.node.get_closest_marker("secrets"):
+        return
+
+    import dd_clip_miner_llm.llm as llm_module
+
+    original = llm_module._call_llm_raw
+
+    def guarded_call(client, kwargs):
+        client_module = type(client).__module__
+        if client_module == "openai" or client_module.startswith("openai."):
+            raise AssertionError(
+                "Real LLM request blocked in an unmarked test; mock _call_llm_raw "
+                "or mark the test with @pytest.mark.network/@pytest.mark.secrets."
+            )
+        return original(client, kwargs)
+
+    monkeypatch.setattr(llm_module, "_call_llm_raw", guarded_call)
+
+
 def pytest_configure(config):
     """Windows 上 AppData\\Local\\Temp 可能无写权限，改用项目内临时目录。"""
     if config.option.basetemp is None:

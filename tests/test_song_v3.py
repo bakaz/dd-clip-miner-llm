@@ -54,6 +54,11 @@ def test_v3_stages_share_system_and_full_asr_prefix() -> None:
     prefixes = [item[1]["content"].split("ASR 转写结束。", 1)[0] for item in messages]
     assert prefixes[0] == prefixes[1] == prefixes[2]
     assert all(item.get_tools(config) is None for item in recognizers)
+    discovery_task = messages[0][1]["content"].split("ASR 转写结束。", 1)[1]
+    assert "最后一个 segment index 是 19" in discovery_task
+    assert "complete_through_segment 等于该索引" in discovery_task
+    assert "只返回一个 JSON object" in discovery_task
+    assert "JSON 数组" not in discovery_task
 
 
 def test_recall_prompt_cannot_modify_precision_candidates() -> None:
@@ -119,6 +124,20 @@ def test_v3_protocol_guard_allows_normal_candidate_set() -> None:
         for index in range(20)
     ]
     assert _candidate_explosion(candidates, segments, config) is False
+
+
+def test_discovery_requires_exact_last_segment() -> None:
+    payload = {
+        "candidates": [],
+        "scan_complete": True,
+        "complete_through_segment": 18,
+    }
+    assert _validate_discovery(payload, 20) == (
+        False,
+        "discovery_incomplete_coverage",
+    )
+    payload["complete_through_segment"] = 19
+    assert _validate_discovery(payload, 20) == (True, None)
 
 
 def test_final_discovery_requires_explicit_evidence() -> None:
@@ -211,4 +230,106 @@ def test_discovery_continuation_merges_complete_candidates(monkeypatch, tmp_path
     assert calls[0][1]["content"].split("ASR 转写结束。", 1)[0] == calls[1][1]["content"].split("ASR 转写结束。", 1)[0]
     assert debug["finish_reason"] == "stop"
     assert debug["parse_valid"] is True
+    assert len(debug["usage"]) == 2
+
+
+def test_discovery_stop_with_incomplete_coverage_continues_remaining_range(monkeypatch, tmp_path) -> None:
+    import dd_clip_miner_llm.song_postprocess.v3 as v3
+
+    config = _config()
+    provider = LLMProvider(api_key="test", model="fake", max_completion_tokens=32768)
+    responses = iter([
+        _response(
+            '{"candidates":[{"segment_ranges":[[2,5]],"confidence":0.8,'
+            '"anchor_text":"歌曲"}],"scan_complete":true,'
+            '"complete_through_segment":18}',
+            "stop",
+        ),
+        _response(
+            '{"candidates":[],"scan_complete":true,'
+            '"complete_through_segment":19}',
+            "stop",
+        ),
+    ])
+    calls = []
+    monkeypatch.setattr(v3, "build_providers", lambda _: [provider])
+    monkeypatch.setattr(v3, "_build_openai_clients", lambda _: {"test": object()})
+
+    def fake_call(*args, **kwargs):
+        calls.append(args[2])
+        return next(responses)
+
+    monkeypatch.setattr(v3, "call_llm", fake_call)
+    payload, debug = _V3StageRunner(_segments(), config).run(
+        _PrecisionDiscoveryRecognizer(),
+        tmp_path,
+        validate=lambda value: _validate_discovery(value, 20),
+        partial_field="candidates",
+        continuation_instruction=lambda items: _continuation_for_discovery(items, 20, 50),
+    )
+
+    assert payload is not None
+    assert payload["complete_through_segment"] == 19
+    assert len(payload["candidates"]) == 1
+    assert len(calls) == 2
+    assert "[19,19]" in calls[1][-1]["content"]
+    assert debug["continuation_rounds"][0]["reason"] == "discovery_incomplete_coverage"
+
+
+def test_discovery_continues_previous_stop_coverage_failure(monkeypatch, tmp_path) -> None:
+    import dd_clip_miner_llm.song_postprocess.v3 as v3
+
+    config = _config()
+    config["llm"]["continuation_on_length"] = False
+    provider = LLMProvider(api_key="test", model="fake", max_completion_tokens=32768)
+    first_response = _response(
+        '{"candidates":[],"scan_complete":true,"complete_through_segment":18}',
+        "stop",
+    )
+    calls = 0
+    monkeypatch.setattr(v3, "build_providers", lambda _: [provider])
+    monkeypatch.setattr(v3, "_build_openai_clients", lambda _: {"test": object()})
+
+    def first_call(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return first_response
+
+    monkeypatch.setattr(v3, "call_llm", first_call)
+    runner = _V3StageRunner(_segments(), config)
+    failed, _ = runner.run(
+        _PrecisionDiscoveryRecognizer(),
+        tmp_path,
+        validate=lambda value: _validate_discovery(value, 20),
+        partial_field="candidates",
+        continuation_instruction=lambda items: _continuation_for_discovery(items, 20, 50),
+    )
+    assert failed is None
+    assert calls == 1
+
+    continuation_calls = []
+
+    def continuation_call(*args, **kwargs):
+        continuation_calls.append(args[2])
+        return _response(
+            '{"candidates":[],"scan_complete":true,'
+            '"complete_through_segment":19}',
+            "stop",
+        )
+
+    monkeypatch.setattr(v3, "call_llm", continuation_call)
+    relaxed_config = _config()
+    relaxed_runner = _V3StageRunner(_segments(), relaxed_config)
+    recovered, debug = relaxed_runner.run(
+        _PrecisionDiscoveryRecognizer(),
+        tmp_path,
+        validate=lambda value: _validate_discovery(value, 20),
+        partial_field="candidates",
+        continuation_instruction=lambda items: _continuation_for_discovery(items, 20, 50),
+    )
+    assert recovered is not None
+    assert recovered["complete_through_segment"] == 19
+    assert debug["continued_from_cached_incomplete_response"] is True
+    assert len(continuation_calls) == 1
+    assert "[19,19]" in continuation_calls[0][-1]["content"]
     assert len(debug["usage"]) == 2

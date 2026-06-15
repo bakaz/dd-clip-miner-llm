@@ -44,6 +44,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "llm": {
         "active_provider": "default",
+        "provider_route": None,
         "providers": {
             "default": {
                 "api_key": None,
@@ -54,7 +55,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
                 "max_tokens": 8192,
                 "max_completion_tokens": None,
                 "timeout": 300,
+                "max_retries": 3,
                 "thinking": None,
+                "timeout_schedule": None,
+                "retry_backoff_seconds": [2, 5],
+                "retry_jitter_ratio": 0.25,
+                "result_retries": 2,
             },
         },
         "retry_empty_with_reasoning": True,
@@ -371,7 +377,9 @@ def load_config(
     has_explicit_providers = "providers" in (loaded.get("llm") or {})
     config = _migrate_padding_config(config)
     if has_explicit_providers:
-        config = _resolve_llm_provider(config)
+        llm_cfg = config.get("llm") or {}
+        if not llm_cfg.get("provider_route"):
+            config = _resolve_llm_provider(config)
     return config
 
 
