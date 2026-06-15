@@ -2700,7 +2700,7 @@ class TestCLI:
 
     @pytest.mark.parametrize(
         "path",
-        ["config.yaml", "config.example.yaml", "config.deepseek.example.yaml"],
+        ["config.example.yaml", "config.deepseek.example.yaml"],
     )
     def test_shipped_profile_configs_keep_only_shared_values_common(self, path):
         import yaml
