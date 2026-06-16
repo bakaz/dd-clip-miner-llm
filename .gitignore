@@ -66,3 +66,5 @@ verify_tmp/
 htmlcov/
 .mypy_cache/
 .ruff_cache/
+
+.omo/
