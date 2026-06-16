@@ -442,7 +442,7 @@ def _run_recognition_loop(
         if not reuse_llm:
             from .config import is_risk_routed_v3
             if content_type == "song" and is_risk_routed_v3(config):
-                from .song_postprocess.v3 import run_risk_routed_v3_pipeline
+                from .song_postprocess.song_kv import run_risk_routed_v3_pipeline
                 matches = run_risk_routed_v3_pipeline(
                     segments, config, recognizer, llm_dir,
                 )

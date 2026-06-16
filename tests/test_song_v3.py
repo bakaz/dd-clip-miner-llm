@@ -7,7 +7,7 @@ from dd_clip_miner_llm.config import DEFAULT_CONFIG
 from dd_clip_miner_llm.llm import build_llm_messages
 from dd_clip_miner_llm.llm import LLMProvider
 from dd_clip_miner_llm.models import TranscriptSegment
-from dd_clip_miner_llm.song_postprocess.v3 import (
+from dd_clip_miner_llm.song_postprocess.song_kv import (
     _PrecisionDiscoveryRecognizer,
     _RecallAuditRecognizer,
     _SegmentationAdjudicationRecognizer,
@@ -188,7 +188,7 @@ def _response(content: str, finish_reason: str) -> SimpleNamespace:
 
 
 def test_discovery_continuation_merges_complete_candidates(monkeypatch, tmp_path) -> None:
-    import dd_clip_miner_llm.song_postprocess.v3 as v3
+    import dd_clip_miner_llm.song_postprocess.song_kv as v3
 
     config = _config()
     provider = LLMProvider(api_key="test", model="fake", max_completion_tokens=32768)
@@ -234,7 +234,7 @@ def test_discovery_continuation_merges_complete_candidates(monkeypatch, tmp_path
 
 
 def test_discovery_stop_with_incomplete_coverage_continues_remaining_range(monkeypatch, tmp_path) -> None:
-    import dd_clip_miner_llm.song_postprocess.v3 as v3
+    import dd_clip_miner_llm.song_postprocess.song_kv as v3
 
     config = _config()
     provider = LLMProvider(api_key="test", model="fake", max_completion_tokens=32768)
@@ -277,7 +277,7 @@ def test_discovery_stop_with_incomplete_coverage_continues_remaining_range(monke
 
 
 def test_discovery_continues_previous_stop_coverage_failure(monkeypatch, tmp_path) -> None:
-    import dd_clip_miner_llm.song_postprocess.v3 as v3
+    import dd_clip_miner_llm.song_postprocess.song_kv as v3
 
     config = _config()
     config["llm"]["continuation_on_length"] = False

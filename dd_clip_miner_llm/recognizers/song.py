@@ -229,7 +229,7 @@ Whisper ASR 转写特性（重要）：
         )
 
         if is_risk_routed_v3(config):
-            from ..song_postprocess.v3 import run_risk_routed_v3_pipeline
+            from ..song_postprocess.song_kv import run_risk_routed_v3_pipeline
 
             return run_risk_routed_v3_pipeline(segments, config, self, llm_dir)
 

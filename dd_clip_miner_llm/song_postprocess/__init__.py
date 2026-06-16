@@ -70,7 +70,7 @@ from .risk import (
     score_song_match_risks,
 )
 from ..config import is_risk_routed, is_risk_routed_v3, song_pipeline_strategy
-from .v3 import run_risk_routed_v3_pipeline
+from .song_kv import run_risk_routed_v3_pipeline
 from .temporal import (
     _SongTemporalAdjudicationRecognizer,
     _restore_temporal_titles,
