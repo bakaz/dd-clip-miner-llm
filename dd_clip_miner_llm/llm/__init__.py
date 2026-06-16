@@ -72,6 +72,21 @@ from .identify import (
     identify_content,
 )
 
+# ── llm_debug (re-export for backward compatibility) ──
+from ..llm_debug import (
+    _attach_request_debug,
+    _cache_usage_summary,
+    _extract_task_instructions,
+    _format_transcript_for_cache,
+    _record_cache_reuse,
+    _record_usage,
+    _try_load_cached_batch,
+    _write_active_debug_files,
+    batch_debug_is_reusable,
+    build_request_debug_metadata,
+    llm_response_debug,
+)
+
 __all__ = [
     # error
     "_classify_error",
@@ -116,4 +131,16 @@ __all__ = [
     "identify_structured_content",
     "_process_single_batch",
     "identify_content",
+    # llm_debug (backward compat)
+    "_attach_request_debug",
+    "_cache_usage_summary",
+    "_extract_task_instructions",
+    "_format_transcript_for_cache",
+    "_record_cache_reuse",
+    "_record_usage",
+    "_try_load_cached_batch",
+    "_write_active_debug_files",
+    "batch_debug_is_reusable",
+    "build_request_debug_metadata",
+    "llm_response_debug",
 ]

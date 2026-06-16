@@ -9,9 +9,10 @@ from typing import Any
 
 from .error import _classify_error
 from .provider import LLMProvider
+from ..errors import LLMError
 
 
-class StreamInterruptedError(Exception):
+class StreamInterruptedError(LLMError):
     """流式响应中断异常。"""
 
     def __init__(self, original_error: Exception, partial_content: str):

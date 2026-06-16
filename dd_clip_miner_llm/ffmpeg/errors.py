@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-class FFmpegError(RuntimeError):
+from ..errors import DDClipMinerError
+
+
+class FFmpegError(DDClipMinerError, RuntimeError):
     """FFmpeg command error, optionally carrying raw output for diagnosis."""
 
     def __init__(
