@@ -33,17 +33,14 @@ class DialogueRecognizer(BaseRecognizer):
         batch_start: int,
         config: dict[str, Any],
     ) -> str:
-        lines = []
-        for i, seg in enumerate(segments):
-            idx = batch_start + i
-            lines.append(f"[{idx}] ({seg.start:.1f}s-{seg.end:.1f}s) {seg.text}")
-
-        transcript_text = "\n".join(lines)
+        transcript_text = self._format_transcript(segments, batch_start)
         
         # 获取配置的标签
-        type_config = config.get("dialogue", {})
-        tags = type_config.get("tags", self.default_config["tags"])
+        tags = self._get_config_value(config, "tags", self.default_config["tags"])
         tags_str = "、".join(tags)
+        
+        min_dur = self._get_config_value(config, "min_duration")
+        max_dur = self._get_config_value(config, "max_duration")
 
         return f"""你是一个直播/视频内容分析专家。
 下面是 Whisper ASR 转写片段，每行格式为 [序号] (开始秒-结束秒) 文本。
@@ -64,7 +61,7 @@ class DialogueRecognizer(BaseRecognizer):
 识别原则：
 1. 关注**对话内容**而非歌曲
 2. 前后文要有一定连贯性，是一个完整的对话或互动
-3. 片段时长建议 {type_config.get('min_duration', 10)}秒-{type_config.get('max_duration', 300)}秒
+3. 片段时长建议 {min_dur}秒-{max_dur}秒
 4. 宁可多选不要漏选
 5. 单纯的问候、感谢、报幕不算有趣对话
 

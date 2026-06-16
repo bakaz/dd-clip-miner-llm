@@ -93,12 +93,7 @@ class SongRecognizer(BaseRecognizer):
         batch_start: int,
         config: dict[str, Any],
     ) -> str:
-        lines = []
-        for i, seg in enumerate(segments):
-            idx = batch_start + i
-            lines.append(f"[{idx}] ({seg.start:.1f}s-{seg.end:.1f}s) {seg.text}")
-
-        transcript_text = "\n".join(lines)
+        transcript_text = self._format_transcript(segments, batch_start)
         compact_ranges = bool(
             get_llm_config(config).get("cache_friendly_prompt_layout", False)
             or get_llm_config(config).get("compact_segment_ranges", False)

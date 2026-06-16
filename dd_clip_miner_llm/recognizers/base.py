@@ -178,3 +178,51 @@ class BaseRecognizer(ABC):
         """获取最小持续时间"""
         type_config = config.get(self.name, {})
         return float(type_config.get("min_duration", self.default_config.get("min_duration", 10.0)))
+    
+    def _format_transcript(
+        self,
+        segments: list[TranscriptSegment],
+        batch_start: int,
+    ) -> str:
+        """格式化 ASR 转写片段。
+        
+        统一格式：[idx] (start_seconds-end_seconds) text
+        
+        Args:
+            segments: ASR 转写片段列表
+            batch_start: 当前批次的起始索引
+            
+        Returns:
+            格式化后的转写文本
+        """
+        return "\n".join(
+            f"[{batch_start + i}] ({seg.start:.1f}s-{seg.end:.1f}s) {seg.text}"
+            for i, seg in enumerate(segments)
+        )
+    
+    def _get_config_value(
+        self,
+        config: dict[str, Any],
+        key: str,
+        default: Any = None,
+    ) -> Any:
+        """从 recognizer 专属配置中获取值。
+        
+        优先从 config[self.name][key] 获取，
+        其次从 self.default_config[key] 获取，
+        最后使用传入的 default。
+        
+        Args:
+            config: 完整配置字典
+            key: 配置键名
+            default: 默认值（可选）
+            
+        Returns:
+            配置值
+        """
+        type_config = config.get(self.name, {})
+        if key in type_config:
+            return type_config[key]
+        if default is None:
+            return self.default_config.get(key)
+        return default

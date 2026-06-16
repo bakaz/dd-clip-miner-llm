@@ -78,7 +78,7 @@ class _V3Recognizer(BaseRecognizer):
         return (
             f"{instructions}\n\n"
             "只返回一个 JSON object，不要 Markdown、解释或代码块。\n\n"
-            f"完整 ASR 转写片段：\n{_transcript_text(segments, batch_start)}"
+            f"完整 ASR 转写片段：\n{self._format_transcript(segments, batch_start)}"
         )
 
 

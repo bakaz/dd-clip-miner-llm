@@ -39,16 +39,10 @@ class FunnyRecognizer(BaseRecognizer):
         batch_start: int,
         config: dict[str, Any],
     ) -> str:
-        lines = []
-        for i, seg in enumerate(segments):
-            idx = batch_start + i
-            lines.append(f"[{idx}] ({seg.start:.1f}s-{seg.end:.1f}s) {seg.text}")
-
-        transcript_text = "\n".join(lines)
+        transcript_text = self._format_transcript(segments, batch_start)
         
-        type_config = config.get("funny", {})
-        min_dur = type_config.get("min_duration", self.default_config["min_duration"])
-        max_dur = type_config.get("max_duration", self.default_config["max_duration"])
+        min_dur = self._get_config_value(config, "min_duration")
+        max_dur = self._get_config_value(config, "max_duration")
 
         return f"""你是一个直播/视频内容分析专家，擅长识别幽默搞笑内容。
 下面是 Whisper ASR 转写片段，每行格式为 [序号] (开始秒-结束秒) 文本。

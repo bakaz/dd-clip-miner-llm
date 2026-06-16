@@ -79,16 +79,10 @@ class CringeRecognizer(BaseRecognizer):
         batch_start: int,
         config: dict[str, Any],
     ) -> str:
-        lines = []
-        for i, seg in enumerate(segments):
-            idx = batch_start + i
-            lines.append(f"[{idx}] ({seg.start:.1f}s-{seg.end:.1f}s) {seg.text}")
-
-        transcript_text = "\n".join(lines)
+        transcript_text = self._format_transcript(segments, batch_start)
         
-        type_config = config.get("cringe", {})
-        min_dur = type_config.get("min_duration", self.default_config["min_duration"])
-        max_dur = type_config.get("max_duration", self.default_config["max_duration"])
+        min_dur = self._get_config_value(config, "min_duration")
+        max_dur = self._get_config_value(config, "max_duration")
 
         return f"""你是一个直播切片内容分析助手。你的任务是阅读 Whisper 转写的 VTuber / 主播直播片段，判断其中是否出现"下头事件"。
 
