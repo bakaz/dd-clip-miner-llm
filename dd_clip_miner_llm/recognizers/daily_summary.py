@@ -49,27 +49,17 @@ class DailySummaryRecognizer(BaseRecognizer):
             lines.append(f"[{idx}] ({start_tc}-{end_tc}) {seg.text}")
 
         transcript_text = "\n".join(lines)
-        type_config = config.get("daily_summary", {})
-        title = type_config.get("title", self.default_config["title"])
-        language = type_config.get("language", self.default_config["language"])
-        max_l1 = int(type_config.get("max_level1_items", self.default_config["max_level1_items"]))
-        max_l2 = int(type_config.get("max_level2_per_level1", self.default_config["max_level2_per_level1"]))
-        max_l3 = int(type_config.get("max_level3_per_level2", self.default_config["max_level3_per_level2"]))
-        include_timeline = bool(type_config.get("include_timeline", True))
-        include_quotes = bool(type_config.get("include_quotes", True))
-        include_open_questions = bool(type_config.get("include_open_questions", True))
-        max_indices = int(type_config.get(
-            "max_segment_indices_per_item",
-            self.default_config["max_segment_indices_per_item"],
-        ))
-        max_timeline = int(type_config.get(
-            "max_timeline_items",
-            self.default_config["max_timeline_items"],
-        ))
-        max_quote_chars = int(type_config.get(
-            "max_quote_chars",
-            self.default_config["max_quote_chars"],
-        ))
+        title = self._get_config_value(config, "title")
+        language = self._get_config_value(config, "language")
+        max_l1 = int(self._get_config_value(config, "max_level1_items"))
+        max_l2 = int(self._get_config_value(config, "max_level2_per_level1"))
+        max_l3 = int(self._get_config_value(config, "max_level3_per_level2"))
+        include_timeline = bool(self._get_config_value(config, "include_timeline"))
+        include_quotes = bool(self._get_config_value(config, "include_quotes"))
+        include_open_questions = bool(self._get_config_value(config, "include_open_questions"))
+        max_indices = int(self._get_config_value(config, "max_segment_indices_per_item"))
+        max_timeline = int(self._get_config_value(config, "max_timeline_items"))
+        max_quote_chars = int(self._get_config_value(config, "max_quote_chars"))
 
         return f"""你是一个直播内容分析师。请基于下面的 Whisper ASR 转写，总结当天直播内容。
 
