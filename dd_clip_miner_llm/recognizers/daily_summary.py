@@ -61,31 +61,30 @@ class DailySummaryRecognizer(BaseRecognizer):
         max_timeline = int(self._get_config_value(config, "max_timeline_items"))
         max_quote_chars = int(self._get_config_value(config, "max_quote_chars"))
 
-        return f"""你是一个直播内容分析师。请基于下面的 Whisper ASR 转写，总结当天直播内容。
+        return f"""你是一个直播内容分析师。基于下面的 Whisper ASR 转写，总结当天直播内容。
 
-任务目标：
-1. 使用“金字塔结构”做总分式梳理，必须分成三层。
-2. 第一层是全场级别的总览/主结论，回答“今天主要讲了什么”。
-3. 第二层是支撑主结论的主题、事件或讨论模块。
-4. 第三层是每个模块下面的具体事实、例子、观点、互动或证据。
-5. 只基于 ASR 内容总结，不要编造未出现的信息。ASR 可能有错字，要结合上下文温和纠错。
-6. 保留关键时间点和 segment index，方便回看原直播。
+任务：使用三层金字塔结构总结直播内容。
+- 第一层（{max_l1}个）：全场总览/主结论，回答"今天主要讲了什么"
+- 第二层（每个下{max_l2}个）：支撑主结论的主题、事件或讨论模块
+- 第三层（每个下{max_l3}个）：具体事实、例子、观点、互动或证据
+
+Whisper ASR 转写特性：
+- 可能有错字、漏字、同音字替换，结合上下文温和纠错
+- 标点符号基本缺失，需要根据语义判断断句
+- 语气词、感叹词可能缺失或被错误转写
+
+要求：
+1. 只基于 ASR 内容总结，不要编造未出现的信息
+2. 保留关键 segment index 方便回看，每个数组最多 {max_indices} 个代表编号（长范围只取起点/中点/终点）
+3. timeline 最多 {max_timeline} 条，只保留关键阶段
+4. evidence_quote 最多 {max_quote_chars} 字，不复制长段 ASR
+5. 输出紧凑，目标 < 6000 tokens，优先总结不堆砌索引
 
 输出语言：{language}
 标题：{title}
-数量约束：
-- level_1 最多 {max_l1} 个
-- 每个 level_1 下 level_2 最多 {max_l2} 个
-- 每个 level_2 下 level_3 最多 {max_l3} 个
-- timeline: {"需要" if include_timeline else "不需要"}
-- evidence_quotes: {"需要" if include_quotes else "不需要"}
-- open_questions: {"需要" if include_open_questions else "不需要"}
-- 所有 segment_indices 数组最多 {max_indices} 个代表性编号；严禁列出连续长数组，长范围只保留起点/中点/终点等代表编号。
-- timeline 最多 {max_timeline} 条，只保留关键阶段。
-- evidence_quote 最多 {max_quote_chars} 个中文字符；不要复制长段 ASR。
-- 输出必须紧凑，目标总长度小于 6000 tokens；优先总结，不要堆砌索引。
+可选部分：timeline={"需要" if include_timeline else "不需要"}、evidence_quotes={"需要" if include_quotes else "不需要"}、open_questions={"需要" if include_open_questions else "不需要"}
 
-输出必须是纯 JSON object，不要 Markdown，不要代码块，不要解释。结构必须严格如下：
+输出纯 JSON object，不要 Markdown、代码块或解释：
 {{
   "content_type": "daily_summary",
   "title": "{title}",
@@ -98,41 +97,26 @@ class DailySummaryRecognizer(BaseRecognizer):
   }},
   "level_1": [
     {{
-      "title": "一级总览标题",
-      "summary": "这个一级主题的总述",
-      "time_range": {{
-        "start_segment": 0,
-        "end_segment": 10,
-        "start_time": "00:00:00",
-        "end_time": "00:10:00"
-      }},
+      "title": "一级标题",
+      "summary": "一级总述",
+      "time_range": {{"start_segment": 0, "end_segment": 10, "start_time": "00:00:00", "end_time": "00:10:00"}},
       "level_2": [
         {{
-          "title": "二级分论点标题",
-          "summary": "二级分论点说明",
+          "title": "二级标题",
+          "summary": "二级说明",
           "segment_indices": [0, 1, 2],
           "level_3": [
-            {{
-              "point": "三级具体事实/例子/证据",
-              "segment_indices": [0],
-              "evidence_quote": "ASR 中能支撑该点的短句；没有就留空",
-              "importance": "high|medium|low"
-            }}
+            {{"point": "具体事实/例子/证据", "segment_indices": [0], "evidence_quote": "ASR短句或留空", "importance": "high|medium|low"}}
           ]
         }}
       ]
     }}
   ],
   "timeline": [
-    {{
-      "time": "00:00:00",
-      "title": "阶段标题",
-      "summary": "这一阶段发生了什么",
-      "segment_indices": [0, 1]
-    }}
+    {{"time": "00:00:00", "title": "阶段标题", "summary": "发生了什么", "segment_indices": [0, 1]}}
   ],
   "key_takeaways": ["最重要结论1", "最重要结论2"],
-  "open_questions": ["仍不明确或需要回看的问题"],
+  "open_questions": ["仍不明确的问题"],
   "tags": ["主题标签"]
 }}
 
