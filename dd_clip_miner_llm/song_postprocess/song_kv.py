@@ -38,15 +38,17 @@ def _compact_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
-def _transcript_text(segments: list[TranscriptSegment], batch_start: int = 0) -> str:
-    return "\n".join(
-        f"[{batch_start + offset}] ({segment.start:.1f}s-{segment.end:.1f}s) {segment.text}"
-        for offset, segment in enumerate(segments)
-    )
+_PROTOCOL_RETRY_REASONS = {
+    "invalid_protocol",
+    "invalid_coordinate_range",
+    "mixed_coordinate_mode",
+    "seconds_coordinate_drift",
+}
 
 
 class _V3Recognizer(BaseRecognizer):
     stage = "v3"
+    transcript_include_timestamps = False
 
     @property
     def name(self) -> str:
@@ -89,7 +91,7 @@ class _PrecisionDiscoveryRecognizer(_V3Recognizer):
         return """你是一个面向演唱会、直播和长视频的歌曲分段专家。
 
 下面是一整段视频的 Whisper ASR 转写片段，每行格式为：
-[序号] (开始秒-结束秒) ASR文本
+[序号] ASR文本
 
 任务：按时间顺序完整扫描 ASR，找出所有可能是连续演唱的歌曲片段，返回一个纯 JSON object。
 
@@ -170,17 +172,102 @@ def _sanitize_ranges(value: Any, segment_count: int) -> list[list[int]]:
     for item in value:
         if not isinstance(item, (list, tuple)) or len(item) != 2:
             continue
+        if isinstance(item[0], bool) or isinstance(item[1], bool):
+            continue
         try:
             start = int(item[0])
             end = int(item[1])
         except (TypeError, ValueError):
             continue
-        start = max(0, start)
-        end = min(segment_count - 1, end)
-        if start <= end:
+        if 0 <= start <= end < segment_count:
             result.append([start, end])
     result.sort()
     return result
+
+
+def _classify_range(
+    value: Any,
+    *,
+    segment_count: int,
+    total_duration_seconds: float,
+) -> tuple[str, list[int]] | None:
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        return None
+    if isinstance(value[0], bool) or isinstance(value[1], bool):
+        return None
+    try:
+        start = int(value[0])
+        end = int(value[1])
+    except (TypeError, ValueError):
+        return None
+    if start > end or start < 0:
+        return "invalid", [start, end]
+    if end < segment_count:
+        return "index", [start, end]
+    duration_limit = max(segment_count - 1, int(math.ceil(total_duration_seconds)))
+    if end <= duration_limit:
+        return "seconds", [start, end]
+    return "invalid", [start, end]
+
+
+def _analyze_coordinate_fields(
+    payload: Any,
+    fields: list[str],
+    *,
+    segment_count: int,
+    total_duration_seconds: float,
+) -> dict[str, Any]:
+    diagnostics = {
+        "coordinate_mode": "empty",
+        "seconds_like_range_count": 0,
+        "example_seconds_like_ranges": [],
+        "invalid_range_count": 0,
+        "example_invalid_ranges": [],
+        "valid_range_count": 0,
+    }
+    if not isinstance(payload, dict):
+        return diagnostics
+    for value in payload.values():
+        if not isinstance(value, list):
+            continue
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            for field_name in fields:
+                field_value = item.get(field_name)
+                if not isinstance(field_value, list):
+                    continue
+                for range_value in field_value:
+                    classified = _classify_range(
+                        range_value,
+                        segment_count=segment_count,
+                        total_duration_seconds=total_duration_seconds,
+                    )
+                    if classified is None:
+                        diagnostics["invalid_range_count"] += 1
+                        if len(diagnostics["example_invalid_ranges"]) < 3:
+                            diagnostics["example_invalid_ranges"].append([None, None])
+                        continue
+                    kind, normalized = classified
+                    if kind == "index":
+                        diagnostics["valid_range_count"] += 1
+                    elif kind == "seconds":
+                        diagnostics["seconds_like_range_count"] += 1
+                        if len(diagnostics["example_seconds_like_ranges"]) < 3:
+                            diagnostics["example_seconds_like_ranges"].append(normalized)
+                    else:
+                        diagnostics["invalid_range_count"] += 1
+                        if len(diagnostics["example_invalid_ranges"]) < 3:
+                            diagnostics["example_invalid_ranges"].append(normalized)
+    if diagnostics["seconds_like_range_count"] and diagnostics["valid_range_count"]:
+        diagnostics["coordinate_mode"] = "mixed_coordinate_mode"
+    elif diagnostics["seconds_like_range_count"]:
+        diagnostics["coordinate_mode"] = "seconds_coordinate_drift"
+    elif diagnostics["invalid_range_count"]:
+        diagnostics["coordinate_mode"] = "invalid_coordinate_range"
+    elif diagnostics["valid_range_count"]:
+        diagnostics["coordinate_mode"] = "segment_index"
+    return diagnostics
 
 
 def _ranges_to_indices(ranges: list[list[int]]) -> list[int]:
@@ -256,46 +343,72 @@ def _discovery_candidates(payload: Any, segment_count: int) -> list[dict[str, An
 def _validate_discovery(
     payload: Any,
     segment_count: int,
-) -> tuple[bool, str | None]:
+    total_duration_seconds: float,
+) -> tuple[bool, str | None, dict[str, Any]]:
+    diagnostics = _analyze_coordinate_fields(
+        payload,
+        ["segment_ranges"],
+        segment_count=segment_count,
+        total_duration_seconds=total_duration_seconds,
+    )
     if not isinstance(payload, dict):
-        return False, "discovery_not_object"
+        return False, "discovery_not_object", diagnostics
+    if diagnostics["coordinate_mode"] == "mixed_coordinate_mode":
+        return False, "mixed_coordinate_mode", diagnostics
+    if diagnostics["coordinate_mode"] == "seconds_coordinate_drift":
+        return False, "seconds_coordinate_drift", diagnostics
+    if diagnostics["coordinate_mode"] == "invalid_coordinate_range":
+        return False, "invalid_coordinate_range", diagnostics
     if payload.get("scan_complete") is not True:
-        return False, "discovery_scan_incomplete"
+        return False, "discovery_scan_incomplete", diagnostics
     try:
         complete_through = int(payload.get("complete_through_segment"))
     except (TypeError, ValueError):
-        return False, "discovery_missing_complete_through"
+        return False, "discovery_missing_complete_through", diagnostics
     if complete_through != segment_count - 1:
-        return False, "discovery_incomplete_coverage"
+        return False, "discovery_incomplete_coverage", diagnostics
     if not isinstance(payload.get("candidates"), list):
-        return False, "discovery_candidates_not_array"
-    return True, None
+        return False, "discovery_candidates_not_array", diagnostics
+    return True, None, diagnostics
 
 
 def _validate_recall(
     payload: Any,
     targets: list[dict[str, Any]],
     segment_count: int,
-) -> tuple[bool, str | None]:
+    total_duration_seconds: float,
+) -> tuple[bool, str | None, dict[str, Any]]:
+    diagnostics = _analyze_coordinate_fields(
+        payload,
+        ["evidence_ranges"],
+        segment_count=segment_count,
+        total_duration_seconds=total_duration_seconds,
+    )
     if not isinstance(payload, dict):
-        return False, "recall_not_object"
+        return False, "recall_not_object", diagnostics
+    if diagnostics["coordinate_mode"] == "mixed_coordinate_mode":
+        return False, "mixed_coordinate_mode", diagnostics
+    if diagnostics["coordinate_mode"] == "seconds_coordinate_drift":
+        return False, "seconds_coordinate_drift", diagnostics
+    if diagnostics["coordinate_mode"] == "invalid_coordinate_range":
+        return False, "invalid_coordinate_range", diagnostics
     if payload.get("audit_complete") is not True:
-        return False, "recall_incomplete"
+        return False, "recall_incomplete", diagnostics
     if not isinstance(payload.get("anchors"), list):
-        return False, "recall_anchors_not_array"
+        return False, "recall_anchors_not_array", diagnostics
     target_map = {item["target_id"]: item["segment_range"] for item in targets}
     for item in payload["anchors"]:
         if not isinstance(item, dict):
-            return False, "recall_invalid_anchor"
+            return False, "recall_invalid_anchor", diagnostics
         target = target_map.get(str(item.get("target_id") or ""))
         if target is None:
-            return False, "recall_unknown_target"
+            return False, "recall_unknown_target", diagnostics
         ranges = _sanitize_ranges(item.get("evidence_ranges"), segment_count)
         if not ranges:
-            return False, "recall_missing_evidence"
+            return False, "recall_missing_evidence", diagnostics
         if any(start < target[0] or end > target[1] for start, end in ranges):
-            return False, "recall_evidence_outside_target"
-    return True, None
+            return False, "recall_evidence_outside_target", diagnostics
+    return True, None, diagnostics
 
 
 def _candidate_explosion(
@@ -322,6 +435,16 @@ def _candidate_explosion(
     )
 
 
+def _unpack_validation_result(
+    result: tuple[bool, str | None] | tuple[bool, str | None, dict[str, Any]],
+) -> tuple[bool, str | None, dict[str, Any]]:
+    if len(result) == 3:
+        valid, reason, diagnostics = result
+        return valid, reason, diagnostics
+    valid, reason = result
+    return valid, reason, {}
+
+
 class _V3StageRunner:
     def __init__(self, segments: list[TranscriptSegment], config: dict[str, Any]) -> None:
         self.segments = segments
@@ -336,7 +459,10 @@ class _V3StageRunner:
         recognizer: _V3Recognizer,
         debug_dir: Path,
         *,
-        validate: Callable[[Any], tuple[bool, str | None]],
+        validate: Callable[
+            [Any],
+            tuple[bool, str | None] | tuple[bool, str | None, dict[str, Any]],
+        ],
         partial_field: str,
         continuation_instruction: Callable[[list[dict[str, Any]]], str],
     ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
@@ -357,6 +483,7 @@ class _V3StageRunner:
             "continuation_rounds": [],
             "usage": [],
             "error": None,
+            "provider_attempts": [],
         }
         last_error: Exception | None = None
 
@@ -364,7 +491,6 @@ class _V3StageRunner:
             if not provider.api_key:
                 continue
             client = _get_client(provider, self.clients)
-            batch_debug["error"] = None
             messages = build_llm_messages(recognizer, self.segments, 0, self.config)
             metadata = build_request_debug_metadata(
                 messages,
@@ -393,7 +519,7 @@ class _V3StageRunner:
                     cached, expected_metadata=metadata,
                 ):
                     payload = cached.get("parsed_json")
-                    valid, _ = validate(payload)
+                    valid, _, _ = _unpack_validation_result(validate(payload))
                     if valid:
                         _record_cache_reuse(debug_dir, 0, cached)
                         _write_active_debug_files(debug_dir, [0])
@@ -411,10 +537,10 @@ class _V3StageRunner:
                 cached_provider = cached.get("provider") if isinstance(cached, dict) else None
                 recovery_metadata_matches = recovery_metadata_matches and isinstance(
                     cached_provider, dict
-                ) and cached_provider == {
-                    "base_url": provider.base_url or "openai",
-                    "model": provider.model,
-                }
+                ) and (
+                    cached_provider.get("base_url") == (provider.base_url or "openai")
+                    and cached_provider.get("model") == provider.model
+                )
                 recovery_allowed = (
                     recovery_metadata_matches
                     and recognizer.stage == "v3_discovery"
@@ -443,148 +569,222 @@ class _V3StageRunner:
                                 "usage": list(cached.get("usage") or []),
                                 "complete_through_segment": complete_through,
                             }
+            result_retries = max(0, int(provider.result_retries or 0))
+            total_result_attempts = result_retries + 1
 
-            _attach_request_debug(batch_debug, messages, store_requests=store_requests, metadata=metadata)
-            batch_debug["provider"] = {
-                "base_url": provider.base_url or "openai",
-                "model": provider.model,
-            }
-            accumulated: list[dict[str, Any]] = []
-            current_messages = messages
-            final_payload: dict[str, Any] | None = None
-            final_reason: str | None = None
-            raw_parts: list[str] = []
-            if recovery_seed is not None:
-                seed_payload = recovery_seed["payload"]
-                seed_items = seed_payload.get(partial_field, [])
-                accumulated.extend(
-                    item for item in seed_items if isinstance(item, dict)
+            for result_attempt in range(1, total_result_attempts + 1):
+                if result_attempt > 1:
+                    import random as _random
+                    import time as _time
+
+                    backoff_list = provider.retry_backoff_seconds or [2, 5]
+                    base = float(backoff_list[min(result_attempt - 2, len(backoff_list) - 1)])
+                    delta = base * float(provider.retry_jitter_ratio or 0.0) * (2 * _random.random() - 1)
+                    _time.sleep(max(0.0, base + delta))
+
+                batch_debug["error"] = None
+                batch_debug["raw_response"] = None
+                batch_debug["parsed_json"] = None
+                batch_debug["continuation_rounds"] = []
+                batch_debug["usage"] = []
+                batch_debug["provider"] = {
+                    "base_url": provider.base_url or "openai",
+                    "model": provider.model,
+                    "result_retries": result_retries,
+                    "result_attempt": result_attempt,
+                }
+                batch_debug["parse_valid"] = False
+                batch_debug["protocol_valid"] = False
+                batch_debug["coordinate_mode"] = "empty"
+                batch_debug["seconds_like_range_count"] = 0
+                batch_debug["example_seconds_like_ranges"] = []
+                batch_debug.pop("invalid_range_count", None)
+                batch_debug.pop("example_invalid_ranges", None)
+                batch_debug.pop("valid_range_count", None)
+                batch_debug.pop("structural_failure", None)
+                batch_debug.pop("structural_failure_reason", None)
+                batch_debug.pop("scan_incomplete", None)
+                batch_debug.pop("continued_from_cached_incomplete_response", None)
+                _attach_request_debug(
+                    batch_debug,
+                    messages,
+                    store_requests=store_requests,
+                    metadata=metadata,
                 )
-                raw_parts.append(str(recovery_seed["raw_response"]))
-                batch_debug["usage"] = list(recovery_seed["usage"])
-                instruction = _continuation_for_discovery_coverage(
-                    int(recovery_seed["complete_through_segment"]),
-                    len(self.segments) - 1,
-                )
-                batch_debug["continued_from_cached_incomplete_response"] = True
-                batch_debug["continuation_rounds"].append({
-                    "round": 1,
-                    "finish_reason": "stop",
-                    "reason": "discovery_incomplete_coverage",
-                    "partial_count": len(accumulated),
-                    "instruction": instruction,
-                })
-                current_messages = [*messages, {"role": "user", "content": instruction}]
-            try:
-                for round_index in range(max_rounds + 1):
-                    response = call_llm(
-                        client,
-                        provider,
-                        current_messages,
-                        tools=None,
-                        max_tokens_override=(
-                            provider.max_completion_tokens
-                            if provider.max_completion_tokens is not None
-                            else provider.max_tokens
-                        ),
-                    )
-                    response_debug = llm_response_debug(response)
-                    _record_usage(
-                        batch_debug,
-                        (
-                            "continuation"
-                            if recovery_seed is not None or round_index > 0
-                            else "initial"
-                        ),
-                        response_debug,
-                        round=round_index,
-                    )
-                    raw = response_debug["content"] or response_debug["reasoning_content"]
-                    raw_parts.append(raw)
-                    parsed = parse_llm_json(raw)
-                    partial = (
-                        parsed.get(partial_field, [])
-                        if isinstance(parsed, dict) and isinstance(parsed.get(partial_field), list)
-                        else _extract_array_objects(raw, partial_field)
-                    )
-                    accumulated.extend(item for item in partial if isinstance(item, dict))
-                    merged_payload = dict(parsed) if isinstance(parsed, dict) else {}
-                    merged_payload[partial_field] = accumulated
-                    valid, reason = validate(merged_payload)
 
-                    if recognizer.stage == "v3_discovery":
-                        partial_candidates = _discovery_candidates(
-                            {"candidates": accumulated}, len(self.segments)
-                        )
-                        if _candidate_explosion(partial_candidates, self.segments, self.config):
-                            reason = "candidate_protocol_explosion"
-                            batch_debug["structural_failure"] = True
-                            batch_debug["structural_failure_reason"] = reason
-                            valid = False
-                            final_reason = response_debug["finish_reason"]
-                            break
-
-                    if valid and response_debug["finish_reason"] != "length":
-                        final_payload = merged_payload
-                        final_reason = response_debug["finish_reason"]
-                        break
-
-                    coverage_incomplete = (
-                        recognizer.stage == "v3_discovery"
-                        and reason == "discovery_incomplete_coverage"
+                accumulated: list[dict[str, Any]] = []
+                current_messages = messages
+                final_payload: dict[str, Any] | None = None
+                final_reason: str | None = None
+                raw_parts: list[str] = []
+                protocol_reason: str | None = None
+                active_recovery_seed = recovery_seed if result_attempt == 1 else None
+                if active_recovery_seed is not None:
+                    seed_payload = active_recovery_seed["payload"]
+                    seed_items = seed_payload.get(partial_field, [])
+                    accumulated.extend(
+                        item for item in seed_items if isinstance(item, dict)
                     )
-                    should_continue = (
-                        response_debug["finish_reason"] == "length"
-                        or coverage_incomplete
+                    raw_parts.append(str(active_recovery_seed["raw_response"]))
+                    batch_debug["usage"] = list(active_recovery_seed["usage"])
+                    instruction = _continuation_for_discovery_coverage(
+                        int(active_recovery_seed["complete_through_segment"]),
+                        len(self.segments) - 1,
                     )
-                    if not should_continue:
-                        batch_debug["structural_failure"] = True
-                        batch_debug["structural_failure_reason"] = reason or "invalid_protocol"
-                        final_reason = response_debug["finish_reason"]
-                        break
-                    if not continuation_enabled or round_index >= max_rounds:
-                        batch_debug["scan_incomplete"] = True
-                        batch_debug["structural_failure_reason"] = (
-                            reason if coverage_incomplete else "continuation_limit"
-                        )
-                        final_reason = response_debug["finish_reason"]
-                        break
-
-                    if coverage_incomplete:
-                        try:
-                            complete_through = int(
-                                merged_payload.get("complete_through_segment")
-                            )
-                        except (TypeError, ValueError):
-                            complete_through = -1
-                        instruction = _continuation_for_discovery_coverage(
-                            complete_through,
-                            len(self.segments) - 1,
-                        )
-                    else:
-                        instruction = continuation_instruction(accumulated)
+                    batch_debug["continued_from_cached_incomplete_response"] = True
                     batch_debug["continuation_rounds"].append({
-                        "round": round_index + 1,
-                        "finish_reason": response_debug["finish_reason"],
-                        "reason": reason,
+                        "round": 1,
+                        "finish_reason": "stop",
+                        "reason": "discovery_incomplete_coverage",
                         "partial_count": len(accumulated),
                         "instruction": instruction,
                     })
                     current_messages = [*messages, {"role": "user", "content": instruction}]
+                try:
+                    for round_index in range(max_rounds + 1):
+                        response = call_llm(
+                            client,
+                            provider,
+                            current_messages,
+                            tools=None,
+                            max_tokens_override=(
+                                provider.max_completion_tokens
+                                if provider.max_completion_tokens is not None
+                                else provider.max_tokens
+                            ),
+                        )
+                        response_debug = llm_response_debug(response)
+                        _record_usage(
+                            batch_debug,
+                            (
+                                "continuation"
+                                if active_recovery_seed is not None or round_index > 0
+                                else "initial"
+                            ),
+                            response_debug,
+                            round=round_index,
+                        )
+                        raw = response_debug["content"] or response_debug["reasoning_content"]
+                        raw_parts.append(raw)
+                        parsed = parse_llm_json(raw)
+                        partial = (
+                            parsed.get(partial_field, [])
+                            if isinstance(parsed, dict) and isinstance(parsed.get(partial_field), list)
+                            else _extract_array_objects(raw, partial_field)
+                        )
+                        accumulated.extend(item for item in partial if isinstance(item, dict))
+                        merged_payload = dict(parsed) if isinstance(parsed, dict) else {}
+                        merged_payload[partial_field] = accumulated
+                        valid, reason, diagnostics = _unpack_validation_result(validate(merged_payload))
+                        batch_debug.update(diagnostics)
+                        batch_debug["protocol_valid"] = valid
+
+                        if recognizer.stage == "v3_discovery":
+                            partial_candidates = _discovery_candidates(
+                                {"candidates": accumulated}, len(self.segments)
+                            )
+                            if _candidate_explosion(partial_candidates, self.segments, self.config):
+                                reason = "candidate_protocol_explosion"
+                                batch_debug["structural_failure"] = True
+                                batch_debug["structural_failure_reason"] = reason
+                                valid = False
+                                batch_debug["protocol_valid"] = False
+                                final_reason = response_debug["finish_reason"]
+                                break
+
+                        if valid and response_debug["finish_reason"] != "length":
+                            final_payload = merged_payload
+                            final_reason = response_debug["finish_reason"]
+                            batch_debug["protocol_valid"] = True
+                            break
+
+                        coverage_incomplete = (
+                            recognizer.stage == "v3_discovery"
+                            and reason == "discovery_incomplete_coverage"
+                        )
+                        should_continue = (
+                            response_debug["finish_reason"] == "length"
+                            or coverage_incomplete
+                        )
+                        if not should_continue:
+                            protocol_reason = reason or "invalid_protocol"
+                            batch_debug["structural_failure"] = True
+                            batch_debug["structural_failure_reason"] = protocol_reason
+                            final_reason = response_debug["finish_reason"]
+                            break
+                        if not continuation_enabled or round_index >= max_rounds:
+                            batch_debug["scan_incomplete"] = True
+                            batch_debug["structural_failure_reason"] = (
+                                reason if coverage_incomplete else "continuation_limit"
+                            )
+                            protocol_reason = batch_debug["structural_failure_reason"]
+                            final_reason = response_debug["finish_reason"]
+                            break
+
+                        if coverage_incomplete:
+                            try:
+                                complete_through = int(
+                                    merged_payload.get("complete_through_segment")
+                                )
+                            except (TypeError, ValueError):
+                                complete_through = -1
+                            instruction = _continuation_for_discovery_coverage(
+                                complete_through,
+                                len(self.segments) - 1,
+                            )
+                        else:
+                            instruction = continuation_instruction(accumulated)
+                        batch_debug["continuation_rounds"].append({
+                            "round": round_index + 1,
+                            "finish_reason": response_debug["finish_reason"],
+                            "reason": reason,
+                            "partial_count": len(accumulated),
+                            "instruction": instruction,
+                        })
+                        current_messages = [*messages, {"role": "user", "content": instruction}]
+                except Exception as exc:
+                    last_error = exc
+                    batch_debug["error"] = str(exc)
+                    batch_debug.setdefault("provider_attempts", []).append({
+                        "provider": batch_debug["provider"],
+                        "status": "exception",
+                        "error": str(exc),
+                    })
+                    # Result retries are for malformed LLM payloads. Transport
+                    # failures have already exhausted call_llm's timeout schedule,
+                    # so replaying them here would multiply a bad provider's delay.
+                    break
 
                 batch_debug["finish_reason"] = final_reason
                 batch_debug["raw_response"] = "\n".join(raw_parts)
                 batch_debug["parsed_json"] = final_payload
                 batch_debug["parse_valid"] = final_payload is not None
-                if final_payload is None and not batch_debug.get("error"):
-                    batch_debug["error"] = batch_debug.get("structural_failure_reason") or "invalid_protocol"
-                write_llm_debug(debug_dir, 0, batch_debug)
-                _write_active_debug_files(debug_dir, [0])
-                return final_payload, batch_debug
-            except Exception as exc:
-                last_error = exc
-                batch_debug["error"] = str(exc)
-                continue
+                if final_payload is not None:
+                    batch_debug.setdefault("provider_attempts", []).append({
+                        "provider": batch_debug["provider"],
+                        "status": "success",
+                        "finish_reason": final_reason,
+                    })
+                    write_llm_debug(debug_dir, 0, batch_debug)
+                    _write_active_debug_files(debug_dir, [0])
+                    return final_payload, batch_debug
+
+                batch_debug["error"] = (
+                    batch_debug.get("structural_failure_reason")
+                    or protocol_reason
+                    or "invalid_protocol"
+                )
+                batch_debug["protocol_valid"] = False
+                batch_debug.setdefault("provider_attempts", []).append({
+                    "provider": batch_debug["provider"],
+                    "status": "invalid_result",
+                    "error": batch_debug["error"],
+                    "coordinate_mode": batch_debug.get("coordinate_mode"),
+                    "seconds_like_range_count": batch_debug.get("seconds_like_range_count"),
+                })
+                if batch_debug["error"] in _PROTOCOL_RETRY_REASONS and result_attempt < total_result_attempts:
+                    continue
+                break
 
         batch_debug["error"] = str(last_error or batch_debug.get("error") or "all providers failed")
         write_llm_debug(debug_dir, 0, batch_debug)
@@ -744,53 +944,65 @@ def _validate_adjudication(
     candidate_ids: list[str],
     segments: list[TranscriptSegment],
     config: dict[str, Any],
-) -> tuple[bool, str | None]:
+) -> tuple[bool, str | None, dict[str, Any]]:
+    diagnostics = _analyze_coordinate_fields(
+        payload,
+        ["segment_ranges", "evidence_ranges"],
+        segment_count=len(segments),
+        total_duration_seconds=max((float(segment.end) for segment in segments), default=0.0),
+    )
     if not isinstance(payload, dict):
-        return False, "adjudication_not_object"
+        return False, "adjudication_not_object", diagnostics
+    if diagnostics["coordinate_mode"] == "mixed_coordinate_mode":
+        return False, "mixed_coordinate_mode", diagnostics
+    if diagnostics["coordinate_mode"] == "seconds_coordinate_drift":
+        return False, "seconds_coordinate_drift", diagnostics
+    if diagnostics["coordinate_mode"] == "invalid_coordinate_range":
+        return False, "invalid_coordinate_range", diagnostics
     if payload.get("adjudication_complete") is not True:
-        return False, "adjudication_incomplete"
+        return False, "adjudication_incomplete", diagnostics
     decisions = payload.get("decisions")
     additions = payload.get("additions")
     if not isinstance(decisions, list) or not isinstance(additions, list):
-        return False, "adjudication_arrays_missing"
+        return False, "adjudication_arrays_missing", diagnostics
     expected = set(candidate_ids)
     used: list[str] = []
     valid_actions = {"accept", "reject", "adjust", "split", "merge"}
     for item in decisions:
         if not isinstance(item, dict) or str(item.get("action")) not in valid_actions:
-            return False, "adjudication_invalid_action"
+            return False, "adjudication_invalid_action", diagnostics
         ids = item.get("candidate_ids")
         if not isinstance(ids, list) or not ids:
-            return False, "adjudication_missing_ids"
+            return False, "adjudication_missing_ids", diagnostics
         normalized_ids = [str(value) for value in ids]
         if any(value not in expected for value in normalized_ids):
-            return False, "adjudication_unknown_id"
+            return False, "adjudication_unknown_id", diagnostics
         if str(item.get("action")) == "merge" and len(normalized_ids) < 2:
-            return False, "adjudication_invalid_merge"
+            return False, "adjudication_invalid_merge", diagnostics
         if str(item.get("action")) != "merge" and len(normalized_ids) != 1:
-            return False, "adjudication_multi_id_non_merge"
+            return False, "adjudication_multi_id_non_merge", diagnostics
         ranges = _sanitize_ranges(item.get("segment_ranges"), len(segments))
         if str(item.get("action")) == "reject":
             if ranges:
-                return False, "adjudication_reject_has_ranges"
+                return False, "adjudication_reject_has_ranges", diagnostics
         elif not ranges:
-            return False, "adjudication_missing_ranges"
+            return False, "adjudication_missing_ranges", diagnostics
         used.extend(normalized_ids)
     if len(used) != len(set(used)):
-        return False, "adjudication_duplicate_id"
+        return False, "adjudication_duplicate_id", diagnostics
     if set(used) != expected:
-        return False, "adjudication_missing_id"
+        return False, "adjudication_missing_id", diagnostics
 
     guard = config.get("song", {}).get("pipeline", {}).get("protocol_guard", {})
     if len(additions) > int(guard.get("max_final_additions", 10) or 10):
-        return False, "adjudication_too_many_additions"
+        return False, "adjudication_too_many_additions", diagnostics
     if any(
         not isinstance(item, dict)
         or not _addition_has_evidence(item, segments, len(segments))
         for item in additions
     ):
-        return False, "adjudication_addition_without_evidence"
-    return True, None
+        return False, "adjudication_addition_without_evidence", diagnostics
+    return True, None, diagnostics
 
 
 def _addition_has_evidence(
@@ -869,13 +1081,16 @@ def run_risk_routed_v3_pipeline(
             "continuation_overlap_segments", 50
         ) or 50
     )
+    total_duration_seconds = max((float(segment.end) for segment in segments), default=0.0)
     history: list[dict[str, Any]] = []
 
     discovery_recognizer = _PrecisionDiscoveryRecognizer()
     discovery_payload, discovery_debug = runner.run(
         discovery_recognizer,
         v3_dir / "discovery",
-        validate=lambda value: _validate_discovery(value, len(segments)),
+        validate=lambda value: _validate_discovery(
+            value, len(segments), total_duration_seconds,
+        ),
         partial_field="candidates",
         continuation_instruction=lambda items: _continuation_for_discovery(
             items, len(segments), overlap
@@ -906,7 +1121,9 @@ def run_risk_routed_v3_pipeline(
     recall_payload, recall_debug = runner.run(
         recall_recognizer,
         v3_dir / "recall_audit",
-        validate=lambda value: _validate_recall(value, targets, len(segments)),
+        validate=lambda value: _validate_recall(
+            value, targets, len(segments), total_duration_seconds,
+        ),
         partial_field="anchors",
         continuation_instruction=lambda items: _continuation_for_recall(items, targets),
     )

@@ -66,6 +66,50 @@ def _call_llm_raw(client: Any, kwargs: dict[str, Any]) -> Any:
     return client.chat.completions.create(**kwargs)
 
 
+def _call_with_hard_timeout(func: Any, timeout_seconds: float | None) -> Any:
+    if timeout_seconds is None or timeout_seconds <= 0:
+        return func()
+
+    import queue
+    import threading
+
+    result_queue: queue.Queue[tuple[bool, Any]] = queue.Queue(maxsize=1)
+
+    def worker() -> None:
+        try:
+            result_queue.put((True, func()))
+        except BaseException as exc:  # pragma: no cover - re-raised in caller
+            result_queue.put((False, exc))
+
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
+    thread.join(float(timeout_seconds))
+    if thread.is_alive():
+        raise TimeoutError(
+            f"LLM request exceeded hard timeout of {float(timeout_seconds):g}s"
+        )
+    ok, value = result_queue.get_nowait()
+    if ok:
+        return value
+    raise value
+
+
+def _next_with_idle_timeout(iterator: Any, timeout_seconds: float | None) -> tuple[bool, Any]:
+    try:
+        return True, _call_with_hard_timeout(lambda: next(iterator), timeout_seconds)
+    except StopIteration:
+        return False, None
+
+
+def _is_timeout_like(exc: Exception | None, reason: str) -> bool:
+    if exc is None:
+        return False
+    if isinstance(exc, TimeoutError):
+        return True
+    text = f"{type(exc).__name__} {exc}".casefold()
+    return "timeout" in text or "timed out" in text or reason == "timeout"
+
+
 def call_llm(
     client: Any,
     provider: LLMProvider,
@@ -105,7 +149,10 @@ def call_llm(
             flush=True,
         )
         try:
-            return _call_llm_raw(client, kwargs)
+            return _call_with_hard_timeout(
+                lambda: _call_llm_raw(client, kwargs),
+                float(kwargs["timeout"]),
+            )
         except Exception as exc:
             last_exc = exc
             if retry < effective_max_retries - 1:
@@ -142,10 +189,12 @@ def call_llm_with_transport_retry(
         max_tokens_override=max_tokens_override, timeout=timeout,
     )
     fallback_attempts = provider.max_retries if max_attempts is None else max(1, max_attempts)
-    schedule = provider.timeout_schedule or [provider.timeout] * fallback_attempts
+    configured_schedule = provider.timeout_schedule or [provider.timeout] * fallback_attempts
+    schedule = configured_schedule[:1]
     backoff_list = provider.retry_backoff_seconds or [2, 5]
     jitter = provider.retry_jitter_ratio
-    use_stream = provider.stream and not tools
+    use_stream = False
+    stream_fallback_enabled = not tools
 
     if use_stream:
         kwargs["stream"] = True
@@ -162,9 +211,16 @@ def call_llm_with_transport_retry(
         )
         try:
             if use_stream:
-                response, content = _collect_stream(client, kwargs)
+                response, content = _collect_stream(
+                    client,
+                    kwargs,
+                    idle_timeout=float(timeout_val),
+                )
             else:
-                response = _call_llm_raw(client, kwargs)
+                response = _call_with_hard_timeout(
+                    lambda: _call_llm_raw(client, kwargs),
+                    float(timeout_val),
+                )
                 content = ""
                 choice = response.choices[0] if response.choices else None
                 message = choice.message if choice is not None else None
@@ -247,7 +303,41 @@ def call_llm_with_transport_retry(
                 continue
 
     # 传输重试耗尽
-    if use_stream and last_partial_content:
+    retryable, reason = _classify_error(last_exc) if last_exc is not None else (False, "")
+    if stream_fallback_enabled and retryable and _is_timeout_like(last_exc, reason):
+        timeout_val = float(schedule[-1])
+        stream_kwargs = dict(kwargs)
+        stream_kwargs["timeout"] = timeout_val
+        stream_kwargs["stream"] = True
+        stream_kwargs["stream_options"] = {"include_usage": True}
+        print(
+            f"  [llm] non-stream timed out; switching to stream fallback "
+            f"(idle_timeout={timeout_val:g}s, provider={provider.name})",
+            flush=True,
+        )
+        try:
+            response, content = _collect_stream(
+                client,
+                stream_kwargs,
+                idle_timeout=timeout_val,
+            )
+            if batch_debug is not None:
+                from ..llm_debug import _record_usage, llm_response_debug
+                _record_usage(
+                    batch_debug,
+                    "transport_stream_fallback",
+                    llm_response_debug(response),
+                    attempt=1,
+                )
+            return response, content
+        except StreamInterruptedError as exc:
+            last_exc = exc.original_error
+            if len(exc.partial_content) > len(last_partial_content):
+                last_partial_content = exc.partial_content
+        except Exception as exc:
+            last_exc = exc
+
+    if last_partial_content:
         print(
             f"  [llm] stream interrupted, returning partial content "
             f"({len(last_partial_content)} chars) for continuation",
@@ -264,33 +354,86 @@ def call_llm_with_transport_retry(
     raise last_exc
 
 
-def _collect_stream(client: Any, kwargs: dict[str, Any]) -> tuple[Any, str]:
+def _collect_stream(
+    client: Any,
+    kwargs: dict[str, Any],
+    *,
+    idle_timeout: float | None = None,
+) -> tuple[Any, str]:
     """收集流式响应，返回 (response, content)。"""
-    stream = _call_llm_raw(client, kwargs)
+    import time
+
+    stream = _call_with_hard_timeout(
+        lambda: _call_llm_raw(client, kwargs),
+        idle_timeout,
+    )
     content_parts: list[str] = []
     reasoning_parts: list[str] = []
     finish_reason = None
     usage = None
     model = None
+    last_meaningful_at = time.monotonic()
+    last_progress_log_at = last_meaningful_at
+    meaningful_chars = 0
+    heartbeat_grace_seconds = (
+        float(idle_timeout) * 5.0
+        if idle_timeout is not None and idle_timeout > 0
+        else None
+    )
 
     try:
-        for chunk in stream:
+        iterator = iter(stream)
+        while True:
+            has_chunk, chunk = _next_with_idle_timeout(iterator, idle_timeout)
+            if not has_chunk:
+                break
+            now = time.monotonic()
             model = getattr(chunk, "model", None) or model
             if not chunk.choices:
                 usage = getattr(chunk, "usage", None) or usage
+                if (
+                    heartbeat_grace_seconds is not None
+                    and now - last_meaningful_at > heartbeat_grace_seconds
+                ):
+                    raise TimeoutError(
+                        f"LLM stream produced only heartbeat chunks for "
+                        f"{heartbeat_grace_seconds:g}s"
+                    )
                 continue
             choice = chunk.choices[0]
             delta = choice.delta
+            got_text = False
             if delta:
                 if delta.content:
                     content_parts.append(delta.content)
+                    meaningful_chars += len(delta.content)
+                    got_text = True
                 rc = getattr(delta, "reasoning_content", None)
                 if rc:
                     reasoning_parts.append(rc)
+                    meaningful_chars += len(rc)
+                    got_text = True
+            if got_text:
+                last_meaningful_at = now
+                if now - last_progress_log_at >= 30.0:
+                    print(
+                        f"  [llm] stream received {meaningful_chars} chars "
+                        f"(provider={kwargs.get('model', '')})",
+                        flush=True,
+                    )
+                    last_progress_log_at = now
             fr = getattr(choice, "finish_reason", None)
             if fr:
                 finish_reason = fr
             usage = getattr(chunk, "usage", None) or usage
+            if (
+                heartbeat_grace_seconds is not None
+                and now - last_meaningful_at > heartbeat_grace_seconds
+            ):
+                raise TimeoutError(
+                    f"LLM stream produced only heartbeat chunks for "
+                    f"{heartbeat_grace_seconds:g}s"
+                )
     except Exception as exc:
         partial = "".join(content_parts) or "".join(reasoning_parts)
         raise StreamInterruptedError(exc, partial) from exc
@@ -316,7 +459,14 @@ def _build_llm_response(
     from types import SimpleNamespace
 
     message = SimpleNamespace(
-        content=content, reasoning_content="", tool_calls=None,
+        content=content,
+        reasoning_content="",
+        tool_calls=None,
+        model_dump=lambda: {
+            "content": content,
+            "reasoning_content": "",
+            "tool_calls": None,
+        },
     )
     choice = SimpleNamespace(message=message, finish_reason=finish_reason)
     return SimpleNamespace(choices=[choice], usage=usage, model=model)

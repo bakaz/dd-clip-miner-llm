@@ -1,7 +1,6 @@
-"""歌曲识别器"""
+"""Song recognizer."""
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
@@ -18,12 +17,14 @@ from ..search_tools import get_tools
 
 @register
 class SongRecognizer(BaseRecognizer):
-    """歌曲片段识别器"""
-    
+    """识别歌曲片段。"""
+
+    transcript_include_timestamps = False
+
     @property
     def name(self) -> str:
         return "song"
-    
+
     @property
     def default_config(self) -> dict[str, Any]:
         return {
@@ -86,7 +87,7 @@ class SongRecognizer(BaseRecognizer):
                 },
             },
         }
-    
+
     def build_prompt(
         self,
         segments: list[TranscriptSegment],
@@ -103,9 +104,9 @@ class SongRecognizer(BaseRecognizer):
 - 不要输出 segment_indices。区间必须精确，不得包含中间的聊天、感谢、报幕或口播。不同歌曲的区间严禁重叠。"""
             coverage_instruction = """
 完整性检查（必须执行）：
-- 在生成 JSON 前，从第一个 segment 到最后一个 segment 按时间顺序检查一遍，先找出全部演唱区间，再识别歌名。
+- 在生成 JSON 前，从第一个 segment 到最后一个 segment 按顺序检查一遍，先找出全部演唱区间，再识别歌名。
 - 搜索工具只用于确认歌名，不能因为未搜索、搜索失败或无法确认歌名而删除演唱区间。
-- 外语谐音、ASR 乱码、只能听出零碎歌词的演唱也必须输出；无法命名时使用"未知歌曲："。
+- 外语谐音、ASR 乱码、只能听出零碎歌词的演唱也必须输出；无法命名时使用“未知歌曲：...”。
 - 输出歌曲数量不设上限。最终数组必须覆盖你判断为演唱的每一个连续区间，不能只返回能确认歌名的歌曲。
 """
             output_example = (
@@ -127,43 +128,42 @@ class SongRecognizer(BaseRecognizer):
 
         object_fields = f"""每个对象必须包含以下字段：
 - content_type: "song"
-- title: 歌名。能识别出原曲时填写准确歌名；无法确认时填写"未知歌曲："加最有代表性的一句歌词。
+- title: 歌名。能识别出原曲时填写准确歌名；无法确认时填写"未知歌曲：..."加最有代表性的一句歌词。
 - artist: 原唱或演唱者。无法判断时填空字符串。
 {segment_field}
 - confidence: 0 到 1 的置信度。
 - tags: 空数组。
 - description: 空字符串。"""
-        tool_instruction = "可以使用 search_lyrics 工具搜索歌词确认歌名，最多搜索2次，然后必须返回结果。"
+        tool_instruction = "可以使用 search_lyrics 工具搜索歌词确认歌名，最多搜索 3 次，然后必须返回结果。"
 
-        return f"""你是一个面向演唱会、直播和长视频的歌曲识别专家。
-下面是一整段视频的 Whisper ASR 转写片段，每行格式为 [序号] (开始秒-结束秒) 文本。
+        return f"""你是一个面向演唱会、直播和长视频的歌曲识别专家。下面是一整段视频的 Whisper ASR 转写片段，每行格式为 [序号] 文本。
 
 任务：从完整上下文中识别所有演唱片段，返回纯 JSON 数组。
 {object_fields}
 
 识别原则：
-1. 只要是**在唱歌**的段落都应识别出来，即使无法确定歌名。
+1. 只要是在唱歌的段落都应识别出来，即使无法确定歌名。
 2. 同一首歌的连续演唱段落必须合并成一个对象。不要把主歌、副歌、桥段拆成多首。
 3. 明显的说话、聊天、感谢、报幕、互动、口播不要放进 segment_indices。
 4. 不要因为短于 2 分钟就丢弃。只要是在唱歌就标出来。
 
 Whisper ASR 转写特性（重要）：
-- 歌词转写可能有错字、漏字、同音字替换，不要因为歌词不完全匹配就否定是歌
-- 日语、英语歌词可能被误识别为中文谐音，如"息が止まるの"可能写成"息卡止まるの"
-- 语气词、感叹词（啊、呀、啦、哦）可能缺失或被错误转写
-- 同一首歌的歌词可能在不同段落重复出现，这是正常的（副歌重复）
-- 歌手名字可能不完整或有误，需要结合歌词内容综合判断
-- ASR 可能将快速说唱段落合并成一行，也可能将一句歌词拆成多行
-- 标点符号基本缺失，需要根据语义判断断句
+- 歌词转写可能有错字、漏字、同音字替换，不要因为歌词不完全匹配就否定是歌。
+- 日语、英语歌词可能被误识别为中文谐音。
+- 语气词、感叹词可能缺失或被错误转写。
+- 同一首歌的歌词可能在不同段落重复出现，这是正常的。
+- 歌手名字可能不完整或有误，需要结合歌词内容综合判断。
+- ASR 可能将快速说唱段落合并成一行，也可能将一句歌词拆成多行。
+- 标点符号基本缺失，需要根据语义判断断句。
 
 判断是否在唱歌的线索：
-- 歌词有押韵、节奏感、重复结构
-- 与前后文内容有明显切换（从说话变成唱歌）
-- 同一段歌词反复出现（副歌）
-- 歌词内容明显是某首已知歌曲
+- 歌词有押韵、节奏感、重复结构。
+- 与前后文内容有明显切换（从说话变成唱歌）。
+- 同一段歌词反复出现。
+- 歌词内容明显是某首已知歌曲。
 
 {tool_instruction}
-宁可返回"未知歌曲"也不要漏掉任何演唱片段。
+宁可返回“未知歌曲”也不要漏掉任何演唱片段。
 {coverage_instruction}
 
 输出要求：
@@ -190,7 +190,7 @@ Whisper ASR 转写特性（重要）：
                 )
             normalized.append(normalized_item)
         return super().parse_response(normalized, config)
-    
+
     def get_tools(self, config: dict[str, Any]) -> list[dict[str, Any]] | None:
         if is_risk_routed_v3(config) and not get_llm_config(config).get(
             "song_tools_enabled", False
@@ -199,11 +199,11 @@ Whisper ASR 转写特性（重要）：
         if get_llm_config(config).get("use_tools", True):
             return get_tools()
         return None
-    
+
     def get_merge_gap(self, config: dict[str, Any]) -> float:
         padding_config = config.get("song", {}).get("padding", config.get("padding", {}))
         return float(padding_config.get("merge_gap_seconds", 40.0))
-    
+
     def get_min_duration(self, config: dict[str, Any]) -> float:
         padding_config = config.get("song", {}).get("padding", config.get("padding", {}))
         return float(padding_config.get("min_song_seconds", 75.0))

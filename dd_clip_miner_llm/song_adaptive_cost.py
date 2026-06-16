@@ -337,6 +337,10 @@ class _OffsetRecognizer:
     def default_config(self) -> dict[str, Any]:
         return getattr(self._recognizer, "default_config", {})
 
+    @property
+    def transcript_include_timestamps(self) -> bool:
+        return bool(getattr(self._recognizer, "transcript_include_timestamps", True))
+
     def transcript_index_start(self, batch_start: int) -> int:
         return self._offset + batch_start
 

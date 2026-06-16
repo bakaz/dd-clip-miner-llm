@@ -7,7 +7,11 @@ from pathlib import Path
 from typing import Any
 
 from .models import TranscriptSegment
-from .recognizers.base import BaseRecognizer
+from .recognizers.base import (
+    BaseRecognizer,
+    format_transcript_lines,
+    recognizer_transcript_include_timestamps,
+)
 
 
 def llm_response_debug(response: Any) -> dict[str, Any]:
@@ -192,6 +196,14 @@ def batch_debug_is_reusable(
         if isinstance(item, dict)
     ):
         return False
+    if payload.get("protocol_valid") is False:
+        return False
+    if payload.get("coordinate_mode") in {
+        "mixed_coordinate_mode",
+        "seconds_coordinate_drift",
+        "invalid_coordinate_range",
+    }:
+        return False
     for key, value in expected_metadata.items():
         if payload.get(key) != value:
             return False
@@ -278,9 +290,10 @@ def _format_transcript_for_cache(
     resolve_start = getattr(recognizer, "transcript_index_start", None)
     if callable(resolve_start):
         index_start = int(resolve_start(batch_start))
-    return "\n".join(
-        f"[{index_start + i}] ({seg.start:.1f}s-{seg.end:.1f}s) {seg.text}"
-        for i, seg in enumerate(segments)
+    return format_transcript_lines(
+        segments,
+        index_start,
+        include_timestamps=recognizer_transcript_include_timestamps(recognizer),
     )
 
 

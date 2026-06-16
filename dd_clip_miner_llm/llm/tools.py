@@ -47,7 +47,7 @@ def run_llm_with_tools(
             max_tokens_override=last_round_tokens,
             tools=call_tools, tool_choice=tool_choice,
         )
-        debug = _llm_response_debug(response)
+        debug = llm_response_debug(response)
         _record_usage(batch_debug, "tool", debug, round=tool_round + 1)
         batch_debug["finish_reason"] = debug["finish_reason"]
         batch_debug.setdefault("tool_rounds", []).append({

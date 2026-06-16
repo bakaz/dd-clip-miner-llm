@@ -3104,8 +3104,9 @@ class TestRecognizers:
         prompt = daily_summary.build_prompt(sample_segments, 0, sample_config)
         assert "金字塔结构" in prompt
         assert "level_1" in prompt
-        assert "segment_indices 数组最多" in prompt
-        assert "严禁列出连续长数组" in prompt
+        assert "segment_indices" in prompt
+        assert "最多" in prompt
+        assert "起点/中点/终点" in prompt
 
     def test_recognizer_parse_response(self):
         from dd_clip_miner_llm.recognizers import get_recognizer
@@ -3744,7 +3745,7 @@ class TestRecognizers:
 
         assert "segment_ranges" in prompt
         assert "不要输出 segment_indices" in prompt
-        assert "从第一个 segment 到最后一个 segment 按时间顺序检查一遍" in prompt
+        assert "从第一个 segment 到最后一个 segment 按顺序检查一遍" in prompt
         assert "不能只返回能确认歌名的歌曲" in prompt
 
     def test_song_accuracy_prompt_keeps_legacy_coverage_layout(self, sample_segments, sample_config):

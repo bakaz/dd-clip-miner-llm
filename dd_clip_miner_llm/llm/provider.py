@@ -169,12 +169,22 @@ def _ensure_openai_clients(
         cache_key = (provider.base_url, provider.api_key, provider.proxy)
         if not provider.api_key or cache_key in clients:
             continue
-        client_kwargs: dict[str, Any] = {"api_key": provider.api_key}
+        # Keep retry/timeout semantics in our transport layer.  The OpenAI SDK
+        # defaults to hidden retries, which can make one logged attempt block
+        # far longer than the configured timeout_schedule.
+        client_kwargs: dict[str, Any] = {
+            "api_key": provider.api_key,
+            "max_retries": 0,
+            "timeout": provider.timeout,
+        }
         if provider.base_url:
             client_kwargs["base_url"] = provider.base_url
         if provider.proxy:
             import httpx
-            client_kwargs["http_client"] = httpx.Client(proxy=provider.proxy)
+            client_kwargs["http_client"] = httpx.Client(
+                proxy=provider.proxy,
+                timeout=provider.timeout,
+            )
         clients[cache_key] = OpenAI(**client_kwargs)
 
 

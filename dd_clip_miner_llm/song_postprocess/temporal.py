@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from ..models import ContentMatch, TranscriptSegment
+from ..recognizers.base import format_transcript_lines
 from .normalize import (
     _clone_match_with_indices,
     _indices_to_ranges,
@@ -17,6 +18,7 @@ class _SongTemporalAdjudicationRecognizer:
     """Full-transcript, no-tool recognizer concerned only with performance timing."""
 
     name = "song"
+    transcript_include_timestamps = False
 
     def __init__(self, base_recognizer: Any, candidates: list[ContentMatch]) -> None:
         self._base_recognizer = base_recognizer
@@ -36,10 +38,11 @@ class _SongTemporalAdjudicationRecognizer:
             "temporal_adjudication", {}
         ).get("preserve_source_names", False)
 
-        lines = [
-            f"[{batch_start + index}] ({segment.start:.1f}s-{segment.end:.1f}s) {segment.text}"
-            for index, segment in enumerate(segments)
-        ]
+        lines = format_transcript_lines(
+            segments,
+            batch_start,
+            include_timestamps=self.transcript_include_timestamps,
+        )
         candidates = []
         for idx, match in enumerate(self._candidates):
             if not match.segment_indices:
@@ -82,7 +85,7 @@ class _SongTemporalAdjudicationRecognizer:
 10. 只返回 JSON 数组，不要解释、Markdown 或分析过程。
 
 完整 ASR 转写片段：
-{chr(10).join(lines)}"""
+{lines}"""
 
     def build_system_prompt(self, config: dict[str, Any]) -> str | None:
         return self._base_recognizer.build_system_prompt(config)

@@ -8,6 +8,27 @@ from typing import Any
 from ..models import ContentMatch, TranscriptSegment
 
 
+def format_transcript_lines(
+    segments: list[TranscriptSegment],
+    batch_start: int,
+    *,
+    include_timestamps: bool = True,
+) -> str:
+    if include_timestamps:
+        return "\n".join(
+            f"[{batch_start + i}] ({seg.start:.1f}s-{seg.end:.1f}s) {seg.text}"
+            for i, seg in enumerate(segments)
+        )
+    return "\n".join(
+        f"[{batch_start + i}] {seg.text}"
+        for i, seg in enumerate(segments)
+    )
+
+
+def recognizer_transcript_include_timestamps(recognizer: Any) -> bool:
+    return bool(getattr(recognizer, "transcript_include_timestamps", True))
+
+
 class BaseRecognizer(ABC):
     """内容识别器基类
     
@@ -195,9 +216,10 @@ class BaseRecognizer(ABC):
         Returns:
             格式化后的转写文本
         """
-        return "\n".join(
-            f"[{batch_start + i}] ({seg.start:.1f}s-{seg.end:.1f}s) {seg.text}"
-            for i, seg in enumerate(segments)
+        return format_transcript_lines(
+            segments,
+            batch_start,
+            include_timestamps=self.transcript_include_timestamps,
         )
     
     def _get_config_value(
@@ -226,3 +248,4 @@ class BaseRecognizer(ABC):
         if default is None:
             return self.default_config.get(key)
         return default
+    transcript_include_timestamps = True

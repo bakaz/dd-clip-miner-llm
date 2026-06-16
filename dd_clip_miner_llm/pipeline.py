@@ -212,12 +212,24 @@ def _export_results(
     do_audio = config["output"].get("audio_segments", True)
     do_video = config["output"].get("video_clips", True)
 
+    for target_dir, enabled in ((audio_dir_out, do_audio), (video_dir_out, do_video)):
+        if not enabled or not target_dir.exists():
+            continue
+        for stale_file in target_dir.iterdir():
+            if stale_file.is_file():
+                stale_file.unlink()
+
+    stem_counts: dict[str, int] = {}
     tasks: list[tuple[ContentResult, str, str]] = []
     for result in results:
         stem = resolve_export_stem(
             result, config, content_type, naming_profile,
             legacy_safe_filename=_safe_filename,
         )
+        seen_count = stem_counts.get(stem, 0)
+        stem_counts[stem] = seen_count + 1
+        if seen_count:
+            stem = f"{stem}_{result.index:03d}"
         tasks.append((result, stem, "audio" if do_audio else None))
         tasks.append((result, stem, "video" if do_video else None))
 

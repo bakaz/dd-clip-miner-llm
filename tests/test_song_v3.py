@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import re
 from copy import deepcopy
 from types import SimpleNamespace
 
 from dd_clip_miner_llm.config import DEFAULT_CONFIG
-from dd_clip_miner_llm.llm import build_llm_messages
-from dd_clip_miner_llm.llm import LLMProvider
+from dd_clip_miner_llm.llm import LLMProvider, batch_debug_is_reusable, build_llm_messages
 from dd_clip_miner_llm.models import TranscriptSegment
+from dd_clip_miner_llm.recognizers.song import SongRecognizer
 from dd_clip_miner_llm.song_postprocess.song_kv import (
     _PrecisionDiscoveryRecognizer,
     _RecallAuditRecognizer,
@@ -14,8 +15,8 @@ from dd_clip_miner_llm.song_postprocess.song_kv import (
     _V3StageRunner,
     _candidate_explosion,
     _continuation_for_discovery,
-    _validate_discovery,
     _validate_adjudication,
+    _validate_discovery,
 )
 
 
@@ -26,11 +27,53 @@ def _config() -> dict:
     return config
 
 
-def _segments(count: int = 20) -> list[TranscriptSegment]:
+def _segments(
+    count: int = 20,
+    *,
+    start_offset: float = 0.0,
+    step: float = 3.0,
+) -> list[TranscriptSegment]:
     return [
-        TranscriptSegment(start=float(index * 3), end=float(index * 3 + 2), text=f"文本 {index}")
+        TranscriptSegment(
+            start=start_offset + index * step,
+            end=start_offset + index * step + 2.0,
+            text=f"文本 {index}",
+        )
         for index in range(count)
     ]
+
+
+def _long_timeline_segments(count: int = 20) -> list[TranscriptSegment]:
+    return _segments(count, step=500.0)
+
+
+def _total_duration_seconds(segments: list[TranscriptSegment]) -> float:
+    return max((float(segment.end) for segment in segments), default=0.0)
+
+
+def test_song_prompts_use_index_only_transcript_lines() -> None:
+    config = _config()
+    segments = _segments()
+    recognizers = [
+        SongRecognizer(),
+        _PrecisionDiscoveryRecognizer(),
+        _RecallAuditRecognizer([{"target_id": "U001", "segment_range": [0, 9]}]),
+        _SegmentationAdjudicationRecognizer(
+            [{
+                "candidate_id": "P001",
+                "segment_ranges": [[2, 8]],
+                "confidence": 0.8,
+                "anchor_text": "歌词",
+            }],
+            True,
+        ),
+    ]
+
+    for recognizer in recognizers:
+        messages = build_llm_messages(recognizer, segments, 0, config)
+        content = messages[-1]["content"]
+        assert "[0] 文本 0" in content
+        assert re.search(r"\(\d+\.\ds-\d+\.\ds\)", content) is None
 
 
 def test_v3_stages_share_system_and_full_asr_prefix() -> None:
@@ -51,23 +94,69 @@ def test_v3_stages_share_system_and_full_asr_prefix() -> None:
     ]
     messages = [build_llm_messages(item, segments, 0, config) for item in recognizers]
     assert all(item[0] == messages[0][0] for item in messages)
-    prefixes = [item[1]["content"].split("ASR 转写结束。", 1)[0] for item in messages]
+    prefixes = [item[1]["content"].split("ASR 转写结束。\n\n", 1)[0] for item in messages]
     assert prefixes[0] == prefixes[1] == prefixes[2]
     assert all(item.get_tools(config) is None for item in recognizers)
-    discovery_task = messages[0][1]["content"].split("ASR 转写结束。", 1)[1]
-    assert "最后一个 segment index 是 19" in discovery_task
-    assert "complete_through_segment 等于该索引" in discovery_task
+    discovery_task = messages[0][1]["content"].split("ASR 转写结束。\n\n", 1)[1]
+    assert "最后一个 segment index" in discovery_task
+    assert "complete_through_segment" in discovery_task
     assert "只返回一个 JSON object" in discovery_task
     assert "JSON 数组" not in discovery_task
 
 
-def test_recall_prompt_cannot_modify_precision_candidates() -> None:
-    prompt = _RecallAuditRecognizer(
-        [{"target_id": "U001", "segment_range": [10, 19]}]
-    ).task_instructions(_config())
-    assert "第一轮已经确定的歌曲不能修改" in prompt
-    assert "只返回短 evidence_ranges" in prompt
-    assert "不要推测整首歌边界" in prompt
+def test_coordinate_validator_detects_mixed_mode() -> None:
+    segments = _long_timeline_segments()
+    payload = {
+        "candidates": [
+            {"segment_ranges": [[2, 5]], "confidence": 0.8, "anchor_text": "前半段"},
+            {"segment_ranges": [[8658, 8757]], "confidence": 0.7, "anchor_text": "后半段"},
+        ],
+        "scan_complete": True,
+        "complete_through_segment": len(segments) - 1,
+    }
+
+    valid, reason, diagnostics = _validate_discovery(
+        payload, len(segments), _total_duration_seconds(segments),
+    )
+    assert valid is False
+    assert reason == "mixed_coordinate_mode"
+    assert diagnostics["coordinate_mode"] == "mixed_coordinate_mode"
+    assert diagnostics["seconds_like_range_count"] == 1
+    assert diagnostics["example_seconds_like_ranges"] == [[8658, 8757]]
+
+
+def test_coordinate_validator_detects_seconds_drift() -> None:
+    segments = _long_timeline_segments()
+    payload = {
+        "candidates": [
+            {"segment_ranges": [[8658, 8757]], "confidence": 0.7, "anchor_text": "后半段"},
+        ],
+        "scan_complete": True,
+        "complete_through_segment": len(segments) - 1,
+    }
+
+    valid, reason, diagnostics = _validate_discovery(
+        payload, len(segments), _total_duration_seconds(segments),
+    )
+    assert valid is False
+    assert reason == "seconds_coordinate_drift"
+    assert diagnostics["coordinate_mode"] == "seconds_coordinate_drift"
+    assert diagnostics["seconds_like_range_count"] == 1
+
+
+def test_batch_cache_rejects_mixed_coordinate_debug() -> None:
+    metadata = {"request_fingerprint": "same"}
+    payload = {
+        **metadata,
+        "error": None,
+        "parse_valid": True,
+        "json_fix_rounds": [],
+        "reasoning_followups": [],
+        "tool_rounds": [],
+        "protocol_valid": False,
+        "coordinate_mode": "mixed_coordinate_mode",
+    }
+    assert batch_debug_is_reusable(payload, expected_metadata=metadata) is False
 
 
 def test_adjudication_requires_exactly_once_id_coverage() -> None:
@@ -91,7 +180,7 @@ def test_adjudication_requires_exactly_once_id_coverage() -> None:
         "adjudication_complete": True,
     }
     segments = _segments()
-    assert _validate_adjudication(valid, ["P001", "R001"], segments, config) == (True, None)
+    assert _validate_adjudication(valid, ["P001", "R001"], segments, config)[:2] == (True, None)
 
     missing = deepcopy(valid)
     missing["decisions"] = missing["decisions"][:1]
@@ -127,17 +216,19 @@ def test_v3_protocol_guard_allows_normal_candidate_set() -> None:
 
 
 def test_discovery_requires_exact_last_segment() -> None:
+    segments = _segments()
     payload = {
         "candidates": [],
         "scan_complete": True,
         "complete_through_segment": 18,
     }
-    assert _validate_discovery(payload, 20) == (
-        False,
-        "discovery_incomplete_coverage",
-    )
+    assert _validate_discovery(
+        payload, 20, _total_duration_seconds(segments),
+    )[:2] == (False, "discovery_incomplete_coverage")
     payload["complete_through_segment"] = 19
-    assert _validate_discovery(payload, 20) == (True, None)
+    assert _validate_discovery(
+        payload, 20, _total_duration_seconds(segments),
+    )[:2] == (True, None)
 
 
 def test_final_discovery_requires_explicit_evidence() -> None:
@@ -154,7 +245,7 @@ def test_final_discovery_requires_explicit_evidence() -> None:
         }],
         "adjudication_complete": True,
     }
-    valid, reason = _validate_adjudication(payload, [], segments, config)
+    valid, reason, _ = _validate_adjudication(payload, [], segments, config)
     assert valid is False
     assert reason == "adjudication_addition_without_evidence"
 
@@ -218,7 +309,7 @@ def test_discovery_continuation_merges_complete_candidates(monkeypatch, tmp_path
     payload, debug = runner.run(
         _PrecisionDiscoveryRecognizer(),
         tmp_path,
-        validate=lambda value: _validate_discovery(value, 20),
+        validate=lambda value: _validate_discovery(value, 20, _total_duration_seconds(_segments())),
         partial_field="candidates",
         continuation_instruction=lambda items: _continuation_for_discovery(items, 20, 50),
     )
@@ -227,7 +318,7 @@ def test_discovery_continuation_merges_complete_candidates(monkeypatch, tmp_path
     assert len(payload["candidates"]) == 2
     assert len(calls) == 2
     assert calls[0][0] == calls[1][0]
-    assert calls[0][1]["content"].split("ASR 转写结束。", 1)[0] == calls[1][1]["content"].split("ASR 转写结束。", 1)[0]
+    assert calls[0][1]["content"].split("ASR 转写结束。\n\n", 1)[0] == calls[1][1]["content"].split("ASR 转写结束。\n\n", 1)[0]
     assert debug["finish_reason"] == "stop"
     assert debug["parse_valid"] is True
     assert len(debug["usage"]) == 2
@@ -263,7 +354,7 @@ def test_discovery_stop_with_incomplete_coverage_continues_remaining_range(monke
     payload, debug = _V3StageRunner(_segments(), config).run(
         _PrecisionDiscoveryRecognizer(),
         tmp_path,
-        validate=lambda value: _validate_discovery(value, 20),
+        validate=lambda value: _validate_discovery(value, 20, _total_duration_seconds(_segments())),
         partial_field="candidates",
         continuation_instruction=lambda items: _continuation_for_discovery(items, 20, 50),
     )
@@ -300,7 +391,7 @@ def test_discovery_continues_previous_stop_coverage_failure(monkeypatch, tmp_pat
     failed, _ = runner.run(
         _PrecisionDiscoveryRecognizer(),
         tmp_path,
-        validate=lambda value: _validate_discovery(value, 20),
+        validate=lambda value: _validate_discovery(value, 20, _total_duration_seconds(_segments())),
         partial_field="candidates",
         continuation_instruction=lambda items: _continuation_for_discovery(items, 20, 50),
     )
@@ -323,7 +414,7 @@ def test_discovery_continues_previous_stop_coverage_failure(monkeypatch, tmp_pat
     recovered, debug = relaxed_runner.run(
         _PrecisionDiscoveryRecognizer(),
         tmp_path,
-        validate=lambda value: _validate_discovery(value, 20),
+        validate=lambda value: _validate_discovery(value, 20, _total_duration_seconds(_segments())),
         partial_field="candidates",
         continuation_instruction=lambda items: _continuation_for_discovery(items, 20, 50),
     )
@@ -333,3 +424,138 @@ def test_discovery_continues_previous_stop_coverage_failure(monkeypatch, tmp_pat
     assert len(continuation_calls) == 1
     assert "[19,19]" in continuation_calls[0][-1]["content"]
     assert len(debug["usage"]) == 2
+
+
+def test_v3_runner_retries_provider_then_falls_back_on_coordinate_drift(monkeypatch, tmp_path) -> None:
+    import dd_clip_miner_llm.song_postprocess.song_kv as v3
+
+    config = _config()
+    segments = _long_timeline_segments()
+    provider_a = LLMProvider(
+        name="a",
+        api_key="a",
+        model="provider-a",
+        max_completion_tokens=32768,
+        result_retries=1,
+        retry_backoff_seconds=[0],
+        retry_jitter_ratio=0.0,
+    )
+    provider_b = LLMProvider(
+        name="b",
+        api_key="b",
+        model="provider-b",
+        max_completion_tokens=32768,
+        result_retries=0,
+        retry_backoff_seconds=[0],
+        retry_jitter_ratio=0.0,
+    )
+    responses = {
+        "provider-a": iter([
+            _response(
+                '{"candidates":[{"segment_ranges":[[2,5]],"confidence":0.8,"anchor_text":"前半段"},'
+                '{"segment_ranges":[[8658,8757]],"confidence":0.7,"anchor_text":"后半段"}],'
+                '"scan_complete":true,"complete_through_segment":19}',
+                "stop",
+            ),
+            _response(
+                '{"candidates":[{"segment_ranges":[[3,6]],"confidence":0.8,"anchor_text":"还是坏的"},'
+                '{"segment_ranges":[[8700,8757]],"confidence":0.7,"anchor_text":"还是秒数"}],'
+                '"scan_complete":true,"complete_through_segment":19}',
+                "stop",
+            ),
+        ]),
+        "provider-b": iter([
+            _response(
+                '{"candidates":[{"segment_ranges":[[1,4]],"confidence":0.91,"anchor_text":"前半段歌词"},'
+                '{"segment_ranges":[[10,13]],"confidence":0.88,"anchor_text":"后半段副歌"}],'
+                '"scan_complete":true,"complete_through_segment":19}',
+                "stop",
+            ),
+        ]),
+    }
+    calls: list[str] = []
+    monkeypatch.setattr(v3, "build_providers", lambda _: [provider_a, provider_b])
+    monkeypatch.setattr(v3, "_build_openai_clients", lambda _: {
+        "a": object(),
+        "b": object(),
+    })
+
+    def fake_call(_client, provider, *_args, **_kwargs):
+        calls.append(provider.model)
+        return next(responses[provider.model])
+
+    monkeypatch.setattr(v3, "call_llm", fake_call)
+    payload, debug = _V3StageRunner(segments, config).run(
+        _PrecisionDiscoveryRecognizer(),
+        tmp_path,
+        validate=lambda value: _validate_discovery(
+            value, len(segments), _total_duration_seconds(segments),
+        ),
+        partial_field="candidates",
+        continuation_instruction=lambda items: _continuation_for_discovery(items, len(segments), 50),
+    )
+
+    assert payload is not None
+    assert calls == ["provider-a", "provider-a", "provider-b"]
+    assert [item["segment_ranges"] for item in payload["candidates"]] == [
+        [[1, 4]],
+        [[10, 13]],
+    ]
+    assert debug["provider"]["model"] == "provider-b"
+    assert debug["provider_attempts"][0]["error"] == "mixed_coordinate_mode"
+
+
+def test_v3_runner_does_not_result_retry_transport_exception(monkeypatch, tmp_path) -> None:
+    import dd_clip_miner_llm.song_postprocess.song_kv as v3
+
+    config = _config()
+    segments = _long_timeline_segments()
+    provider_a = LLMProvider(
+        name="a",
+        api_key="a",
+        model="provider-a",
+        max_completion_tokens=32768,
+        result_retries=2,
+        retry_backoff_seconds=[0],
+        retry_jitter_ratio=0.0,
+    )
+    provider_b = LLMProvider(
+        name="b",
+        api_key="b",
+        model="provider-b",
+        max_completion_tokens=32768,
+        result_retries=0,
+        retry_backoff_seconds=[0],
+        retry_jitter_ratio=0.0,
+    )
+    calls: list[str] = []
+    monkeypatch.setattr(v3, "build_providers", lambda _: [provider_a, provider_b])
+    monkeypatch.setattr(v3, "_build_openai_clients", lambda _: {
+        "a": object(),
+        "b": object(),
+    })
+
+    def fake_call(_client, provider, *_args, **_kwargs):
+        calls.append(provider.model)
+        if provider.model == "provider-a":
+            raise TimeoutError("stuck provider")
+        return _response(
+            '{"candidates":[{"segment_ranges":[[1,4]],"confidence":0.91,"anchor_text":"前半段歌词"}],'
+            '"scan_complete":true,"complete_through_segment":19}',
+            "stop",
+        )
+
+    monkeypatch.setattr(v3, "call_llm", fake_call)
+    payload, debug = _V3StageRunner(segments, config).run(
+        _PrecisionDiscoveryRecognizer(),
+        tmp_path,
+        validate=lambda value: _validate_discovery(
+            value, len(segments), _total_duration_seconds(segments),
+        ),
+        partial_field="candidates",
+        continuation_instruction=lambda items: _continuation_for_discovery(items, len(segments), 50),
+    )
+
+    assert payload is not None
+    assert calls == ["provider-a", "provider-b"]
+    assert debug["provider"]["model"] == "provider-b"

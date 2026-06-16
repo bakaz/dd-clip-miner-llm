@@ -275,7 +275,10 @@ class TestLLM:
             called["value"] = True
             raise RuntimeError("model changed, cache should miss")
 
+        import dd_clip_miner_llm.llm.transport as transport_module
+
         monkeypatch.setattr(llm_module, "_call_llm_raw", mark_call_llm)
+        monkeypatch.setattr(transport_module, "_call_llm_raw", mark_call_llm)
         matches_after_change = identify_content(
             sample_segments,
             config,
@@ -389,9 +392,11 @@ class TestLLM:
         dialogue_user = dialogue_messages[1]["content"]
         song_prefix = song_user.split("ASR 转写结束。", 1)[0]
         dialogue_prefix = dialogue_user.split("ASR 转写结束。", 1)[0]
-        assert song_prefix == dialogue_prefix
+        assert song_prefix != dialogue_prefix
         assert song_user != dialogue_user
-        assert "[0] (0.0s-3.0s)" in song_user
+        assert "[0] 大家好欢迎来到直播间" in song_user
+        assert "(0.0s-3.0s)" not in song_user
+        assert "[0] (0.0s-3.0s)" in dialogue_user
 
     def test_final_tool_round_keeps_tools_and_disables_tool_calls(self):
         from dd_clip_miner_llm.llm import LLMProvider, run_llm_with_tools

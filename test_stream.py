@@ -1,4 +1,10 @@
-"""Test stream interruption handling."""
+"""Test stream fallback and interruption handling.
+
+New behavior (transport.py):
+- Non-stream is the default path
+- On timeout, falls back to stream with idle_timeout
+- Stream interrupted → partial content → finish_reason="length"
+"""
 import time
 from unittest.mock import MagicMock, patch
 from types import SimpleNamespace
@@ -8,13 +14,22 @@ import pytest
 from dd_clip_miner_llm.llm import LLMProvider, call_llm_with_transport_retry, StreamInterruptedError
 
 
+def _mock_response(content: str, finish_reason: str = "stop") -> SimpleNamespace:
+    """Create a mock non-stream response."""
+    message = SimpleNamespace(
+        content=content, reasoning_content="",
+        tool_calls=None, model_dump=lambda: {"content": content},
+    )
+    choice = SimpleNamespace(message=message, finish_reason=finish_reason)
+    usage = SimpleNamespace(
+        prompt_tokens=10, completion_tokens=20, total_tokens=30,
+        model_dump=lambda: {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30},
+    )
+    return SimpleNamespace(choices=[choice], usage=usage, model="test-model")
+
+
 def make_stream_chunks(content_parts, fail_at=None):
-    """Create a generator that yields stream chunks, optionally failing.
-    
-    Args:
-        content_parts: List of content strings to yield
-        fail_at: If set, raise TimeoutError after yielding this many chunks
-    """
+    """Create a generator that yields stream chunks, optionally failing."""
     def stream():
         for i, text in enumerate(content_parts):
             yield SimpleNamespace(
@@ -24,10 +39,8 @@ def make_stream_chunks(content_parts, fail_at=None):
                 )],
                 usage=None, model="test-model",
             )
-            # Fail after yielding the chunk at index fail_at-1
             if fail_at is not None and i >= fail_at - 1:
                 raise TimeoutError("read timeout")
-        # Final chunk (only reached if no failure)
         yield SimpleNamespace(
             choices=[SimpleNamespace(
                 delta=SimpleNamespace(content=None, reasoning_content=None),
@@ -42,82 +55,81 @@ def make_stream_chunks(content_parts, fail_at=None):
     return stream()
 
 
-class TestStreamCompletion:
-    """Test normal stream completion."""
+class TestNonStreamSuccess:
+    """Non-stream path succeeds directly."""
 
-    def test_normal_stream_completion(self):
-        """Test 1: Stream completes normally."""
+    def test_non_stream_returns_response(self):
         provider = LLMProvider(
             name="test", api_key="key", base_url="https://test.com/v1",
             model="test", stream=True, timeout_schedule=[60], result_retries=0,
         )
         client = MagicMock()
-        client.chat.completions.create.return_value = make_stream_chunks(["[", '{"ok": true}', "]"])
+        client.chat.completions.create.return_value = _mock_response('[{"ok": true}]')
 
-        with patch("time.sleep"):
-            response, content = call_llm_with_transport_retry(
-                client, provider, [{"role": "user", "content": "test"}],
-            )
-        assert content == '[{"ok": true}]', f"Expected content, got: {repr(content)}"
+        response, content = call_llm_with_transport_retry(
+            client, provider, [{"role": "user", "content": "test"}],
+        )
+        assert content == '[{"ok": true}]'
         assert response.choices[0].finish_reason == "stop"
+        # Should NOT set stream=True on the request
+        call_kwargs = client.chat.completions.create.call_args[1]
+        assert "stream" not in call_kwargs
 
 
-class TestStreamRetry:
-    """Test stream interruption and retry."""
+class TestStreamFallback:
+    """Non-stream times out → falls back to stream."""
 
-    def test_stream_interrupt_retry_succeeds(self):
-        """Test 2: Stream interrupted, transport retry succeeds."""
+    def test_timeout_triggers_stream_fallback(self):
         provider = LLMProvider(
             name="test", api_key="key", base_url="https://test.com/v1",
-            model="test", stream=True, timeout_schedule=[60, 120], result_retries=0,
+            model="test", stream=True, timeout_schedule=[1], result_retries=0,
         )
         client = MagicMock()
 
-        # Create separate generators for each call
-        first_stream = make_stream_chunks(["partial"], fail_at=1)
-        second_stream = make_stream_chunks(["[", '{"ok": true}', "]"])
-        
         call_count = [0]
-        def make_stream_with_retry(*args, **kwargs):
+        def mock_create(*args, **kwargs):
             call_count[0] += 1
-            if call_count[0] == 1:
-                return first_stream
+            if kwargs.get("stream"):
+                # Stream path succeeds
+                return make_stream_chunks(['[{"ok": true}]'])
             else:
-                return second_stream
+                # Non-stream times out
+                raise TimeoutError("request timed out")
 
-        client.chat.completions.create.side_effect = make_stream_with_retry
+        client.chat.completions.create.side_effect = mock_create
 
         with patch("time.sleep"):
             response, content = call_llm_with_transport_retry(
                 client, provider, [{"role": "user", "content": "test"}],
             )
-        assert content == '[{"ok": true}]', f"Expected content, got: {repr(content)}"
-        assert call_count[0] == 2
+        assert content == '[{"ok": true}]'
+        assert call_count[0] == 2  # non-stream + stream fallback
 
 
-class TestStreamPartial:
-    """Test stream interruption returning partial content."""
+class TestStreamInterruptPartial:
+    """Stream fallback interrupted → returns partial content."""
 
     def test_stream_interrupt_returns_partial(self):
-        """Test 3: Stream interrupted, all transport retries exhausted, return partial."""
         provider = LLMProvider(
             name="test", api_key="key", base_url="https://test.com/v1",
-            model="test", stream=True, timeout_schedule=[60, 120, 180], result_retries=0,
+            model="test", stream=True, timeout_schedule=[1], result_retries=0,
         )
         client = MagicMock()
-        
-        # Create separate generators for each call to avoid exhausted generator issue
-        def make_failing_stream(*args, **kwargs):
-            return make_stream_chunks(['[{"partial": "data"]'], fail_at=1)
-        
-        client.chat.completions.create.side_effect = make_failing_stream
+
+        def mock_create(*args, **kwargs):
+            if kwargs.get("stream"):
+                return make_stream_chunks(['[{"partial": "data"]'], fail_at=1)
+            else:
+                raise TimeoutError("request timed out")
+
+        client.chat.completions.create.side_effect = mock_create
 
         with patch("time.sleep"):
             response, content = call_llm_with_transport_retry(
                 client, provider, [{"role": "user", "content": "test"}],
             )
-        assert '[{"partial":' in content, f"Expected partial content, got: {repr(content)}"
-        assert response.choices[0].finish_reason == "length", f"Expected length, got: {response.choices[0].finish_reason}"
+        assert '[{"partial":' in content
+        assert response.choices[0].finish_reason == "length"
 
 
 if __name__ == "__main__":

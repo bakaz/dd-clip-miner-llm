@@ -7,6 +7,7 @@ from typing import Any
 
 from ..config import get_llm_config, get_padding_config, get_song_recheck_config, get_song_review_config
 from ..models import ContentMatch, TranscriptSegment
+from ..recognizers.base import format_transcript_lines
 from ..song_adaptive import (
     ensure_song_adaptive_strategies,
     load_adaptive_strategies_cache,
@@ -49,6 +50,10 @@ class _OffsetRecognizer:
     def default_config(self) -> dict[str, Any]:
         return getattr(self._recognizer, "default_config", {})
 
+    @property
+    def transcript_include_timestamps(self) -> bool:
+        return bool(getattr(self._recognizer, "transcript_include_timestamps", True))
+
     def transcript_index_start(self, batch_start: int) -> int:
         return self._offset + batch_start
 
@@ -72,6 +77,7 @@ class _OffsetRecognizer:
 
 class _SongReviewRecognizer:
     name = "song"
+    transcript_include_timestamps = False
 
     def __init__(self, base_recognizer: Any, candidates: list[ContentMatch]) -> None:
         self._base_recognizer = base_recognizer
@@ -87,10 +93,11 @@ class _SongReviewRecognizer:
         batch_start: int,
         config: dict[str, Any],
     ) -> str:
-        lines = [
-            f"[{batch_start + index}] ({segment.start:.1f}s-{segment.end:.1f}s) {segment.text}"
-            for index, segment in enumerate(segments)
-        ]
+        lines = format_transcript_lines(
+            segments,
+            batch_start,
+            include_timestamps=self.transcript_include_timestamps,
+        )
         candidates = []
         for match in self._candidates:
             candidates.append({
@@ -112,7 +119,7 @@ class _SongReviewRecognizer:
 5. 可以使用 search_lyrics 一次确认歌词。查询必须使用 ASR 中最有辨识度的歌词原句，不要只用候选歌名反向搜索；无法确认时保留“未知歌曲：代表歌词”。
 
 完整 ASR 转写片段：
-{chr(10).join(lines)}"""
+{lines}"""
 
     def build_system_prompt(self, config: dict[str, Any]) -> str | None:
         return None
@@ -130,6 +137,7 @@ class _SongReviewRecognizer:
 
 class _SongFullReviewRecognizer:
     name = "song"
+    transcript_include_timestamps = False
 
     def __init__(
         self,
@@ -158,10 +166,11 @@ class _SongFullReviewRecognizer:
         batch_start: int,
         config: dict[str, Any],
     ) -> str:
-        lines = [
-            f"[{batch_start + index}] ({segment.start:.1f}s-{segment.end:.1f}s) {segment.text}"
-            for index, segment in enumerate(segments)
-        ]
+        lines = format_transcript_lines(
+            segments,
+            batch_start,
+            include_timestamps=self.transcript_include_timestamps,
+        )
         candidates = []
         for match in self._candidates:
             candidates.append({
@@ -189,7 +198,7 @@ class _SongFullReviewRecognizer:
 5. 可以使用 search_lyrics 一次确认歌词。查询必须使用 ASR 中最有辨识度的歌词原句，不要只用候选歌名反向搜索；无法确认时保留“未知歌曲：代表歌词”。
 
 完整 ASR 转写片段：
-{chr(10).join(lines)}"""
+{lines}"""
 
     def build_system_prompt(self, config: dict[str, Any]) -> str | None:
         return self._base_recognizer.build_system_prompt(config)
@@ -207,6 +216,7 @@ class _SongFullReviewRecognizer:
 
 class _SongCoverageAuditRecognizer:
     name = "song"
+    transcript_include_timestamps = False
 
     def __init__(
         self,
@@ -228,10 +238,11 @@ class _SongCoverageAuditRecognizer:
         batch_start: int,
         config: dict[str, Any],
     ) -> str:
-        lines = [
-            f"[{batch_start + index}] ({segment.start:.1f}s-{segment.end:.1f}s) {segment.text}"
-            for index, segment in enumerate(segments)
-        ]
+        lines = format_transcript_lines(
+            segments,
+            batch_start,
+            include_timestamps=self.transcript_include_timestamps,
+        )
         target_ranges = [[start, end] for start, end in self._target_ranges]
         output_mode = str(
             config.get("song", {}).get("missed_recheck", {}).get("output_mode", "matches")
@@ -284,7 +295,7 @@ class _SongCoverageAuditRecognizer:
 {anchor_instruction}
 
 完整 ASR 转写片段：
-{chr(10).join(lines)}"""
+{lines}"""
 
     def build_system_prompt(self, config: dict[str, Any]) -> str | None:
         return self._base_recognizer.build_system_prompt(config)
