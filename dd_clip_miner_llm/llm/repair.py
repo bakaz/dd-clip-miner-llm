@@ -157,6 +157,83 @@ def _continue_truncated_json_array(
     return content
 
 
+def _continue_truncated_json_object(
+    client: Any,
+    provider: LLMProvider,
+    config: dict[str, Any],
+    messages: list[dict[str, Any]],
+    content: str,
+    finish_reason: str | None,
+    batch_debug: dict[str, Any],
+    *,
+    max_tokens: int | None = None,
+) -> str:
+    """Continue a truncated JSON object by appending raw continuation text."""
+    llm_config = get_llm_config(config)
+    if finish_reason != "length" or not llm_config.get("continuation_on_length", False):
+        return content
+
+    parsed = parse_llm_json(content)
+    if isinstance(parsed, dict) and parsed:
+        return content
+
+    max_rounds = max(0, int(llm_config.get("max_continuation_rounds", 0) or 0))
+    current = content
+    current_reason = finish_reason
+    continuation_debug = batch_debug.setdefault("structured_continuation_rounds", [])
+
+    for round_index in range(max_rounds):
+        continuation_prompt = (
+            "The previous assistant message is a single JSON object that was cut off. "
+            "Continue from the exact next character after the previous message. "
+            "Do not repeat any earlier text. Do not wrap in Markdown. "
+            "Do not explain. Output only the remaining JSON characters needed to "
+            "complete that same object."
+        )
+        response = call_llm(
+            client,
+            provider,
+            [
+                *messages,
+                {"role": "assistant", "content": current},
+                {"role": "user", "content": continuation_prompt},
+            ],
+            max_tokens_override=max_tokens,
+        )
+        debug = llm_response_debug(response)
+        _record_usage(batch_debug, "structured_continuation", debug, round=round_index + 1)
+        continuation_content = debug["content"] or debug["reasoning_content"]
+        current_reason = debug["finish_reason"]
+
+        if continuation_content.strip():
+            continuation_parsed = parse_llm_json(continuation_content)
+            if isinstance(continuation_parsed, dict) and continuation_parsed:
+                current = continuation_content
+            else:
+                current = current + continuation_content
+
+        parsed = parse_llm_json(current)
+        parse_valid = isinstance(parsed, dict) and bool(parsed)
+        continuation_debug.append({
+            "round": round_index + 1,
+            "finish_reason": current_reason,
+            "parse_valid": parse_valid,
+            "content": continuation_content[:500],
+            "usage": debug["usage"],
+        })
+        if parse_valid and current_reason != "length":
+            batch_debug["structured_continuation_complete"] = True
+            batch_debug["finish_reason"] = current_reason
+            return current
+
+        if not continuation_content.strip() and current_reason != "length":
+            break
+
+    batch_debug["structured_continuation_complete"] = False
+    batch_debug["finish_reason"] = current_reason
+    return current
+
+
 def build_reasoning_followup_prompt(reasoning_content: str, partial_content: str = "") -> str:
     """构建 reasoning followup 提示词"""
     partial_block = (

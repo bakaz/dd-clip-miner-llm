@@ -33,6 +33,7 @@ from .provider import (
 )
 from .repair import (
     _continue_truncated_json_array,
+    _continue_truncated_json_object,
     fix_json_with_llm,
     fix_structured_json_with_llm,
     run_reasoning_followups,
@@ -126,6 +127,22 @@ def identify_structured_content(
                 response, content = call_llm_with_transport_retry(
                     prov_client, candidate, messages,
                     batch_debug=batch_debug,
+                )
+                debug = llm_response_debug(response)
+                batch_debug["finish_reason"] = debug["finish_reason"]
+                content = _continue_truncated_json_object(
+                    prov_client,
+                    candidate,
+                    config,
+                    messages,
+                    content,
+                    debug["finish_reason"],
+                    batch_debug,
+                    max_tokens=(
+                        candidate.max_completion_tokens
+                        if candidate.max_completion_tokens is not None
+                        else candidate.max_tokens
+                    ),
                 )
             except Exception as exc:
                 last_error = exc

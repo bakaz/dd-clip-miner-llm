@@ -31,6 +31,7 @@ from dd_clip_miner_llm.llm import (
     build_providers,
     call_llm,
     call_llm_with_transport_retry,
+    _continue_truncated_json_object,
 )
 
 
@@ -246,6 +247,36 @@ class TestTransportRetry:
         assert calls[1][1]["timeout"] == 60
         assert "stream" not in calls[0][1]
         assert calls[1][1]["stream"] is True
+
+    def test_structured_json_object_continuation_appends_partial(self, monkeypatch):
+        provider = _make_provider(timeout_schedule=[60])
+        config = _make_config(continuation_on_length=True, max_continuation_rounds=2)
+        calls = []
+
+        def fake_call_llm(*args, **kwargs):
+            calls.append((args, kwargs))
+            return _mock_response('"]}', finish_reason="stop")
+
+        import dd_clip_miner_llm.llm.repair as repair
+
+        monkeypatch.setattr(repair, "call_llm", fake_call_llm)
+        debug: dict[str, Any] = {}
+
+        content = _continue_truncated_json_object(
+            client=MagicMock(),
+            provider=provider,
+            config=config,
+            messages=[{"role": "user", "content": "return JSON object"}],
+            content='{"content_type":"daily_summary","level_1":["a',
+            finish_reason="length",
+            batch_debug=debug,
+            max_tokens=128,
+        )
+
+        assert content == '{"content_type":"daily_summary","level_1":["a"]}'
+        assert debug["structured_continuation_complete"] is True
+        assert debug["structured_continuation_rounds"][0]["parse_valid"] is True
+        assert calls[0][0][2][-2]["role"] == "assistant"
 
     def test_non_retryable_raises_immediately(self):
         provider = _make_provider(timeout_schedule=[60, 120, 180])
