@@ -394,9 +394,10 @@ def _normalize_song_matches(
         norm_cfg = get_song_normalization_config(config)
         if norm_cfg.get("force_merge_same_title", False):
             before_count = len(normalized)
-            normalized = _v2_force_merge_adjacent_same_title(
+            normalized, force_events = _v2_force_merge_adjacent_same_title(
                 normalized, segments, gap_seconds=merge_gap_seconds,
             )
+            events.extend(force_events)
             if len(normalized) < before_count:
                 events.append({
                     "type": "v2_force_merge_same_title",
@@ -454,18 +455,28 @@ def _v2_force_merge_adjacent_same_title(
     matches: list[ContentMatch],
     segments: list[TranscriptSegment],
     gap_seconds: float,
-) -> list[ContentMatch]:
+) -> tuple[list[ContentMatch], list[dict[str, Any]]]:
+    from .risk import is_unknown_song_title
+
     """合并相邻同名 match，不跨越其他候选。
 
     按 min(segment_indices) 排序后，相邻 match 标题 casefold() 相同
     且时间间隔 ≤ gap_seconds 时合并。
     合并后 segment_indices 取并集，confidence 取 max，元数据优先使用高置信结果。
+
+    对于未知歌曲（title 以"未知歌曲"开头），不比较标题，仅比较
+    时间间隔（≤ gap_seconds）和 ASR 文本相似度（≥ 0.3），
+    满足条件则合并并添加 "unknown_song_merge" tag。
+
+    Returns:
+        (merged_matches, merge_events)
     """
     if not matches:
-        return []
+        return [], []
 
     sorted_matches = sorted(matches, key=lambda m: min(m.segment_indices))
     merged: list[ContentMatch] = []
+    merge_events: list[dict[str, Any]] = []
 
     for match in sorted_matches:
         if not merged:
@@ -476,9 +487,7 @@ def _v2_force_merge_adjacent_same_title(
         title_key = match.title.strip().casefold()
         prev_title_key = prev.title.strip().casefold()
 
-        if title_key != prev_title_key:
-            merged.append(match)
-            continue
+        both_unknown = is_unknown_song_title(prev.title) and is_unknown_song_title(match.title)
 
         # 计算时间间隔
         prev_end_idx = max(prev.segment_indices)
@@ -488,37 +497,90 @@ def _v2_force_merge_adjacent_same_title(
         else:
             gap = max(0.0, float(segments[match_start_idx].start) - float(segments[prev_end_idx].end))
 
-        if gap > gap_seconds:
-            merged.append(match)
-            continue
-
-        # 合并：segment_indices 取并集
-        combined_indices = sorted(set(prev.segment_indices) | set(match.segment_indices))
-        # 高置信结果的元数据优先
-        if match.confidence >= prev.confidence:
-            merged[-1] = ContentMatch(
-                content_type=match.content_type,
-                title=match.title,
-                segment_indices=combined_indices,
-                confidence=match.confidence,
-                tags=list(set(match.tags) | set(prev.tags)),
-                description=match.description or prev.description,
-                artist=match.artist or prev.artist,
-                lyrics_snippet=match.lyrics_snippet or prev.lyrics_snippet,
-            )
+        if both_unknown:
+            # 未知歌曲：gap + ASR 文本相似度
+            if gap > gap_seconds:
+                merged.append(match)
+                continue
+            prev_texts = [segments[i].text for i in prev.segment_indices if 0 <= i < len(segments)]
+            match_texts = [segments[i].text for i in match.segment_indices if 0 <= i < len(segments)]
+            similarity = _v2_text_similarity(prev_texts, match_texts)
+            if similarity < 0.3:
+                merged.append(match)
+                continue
+            # 合并未知歌曲
+            combined_indices = sorted(set(prev.segment_indices) | set(match.segment_indices))
+            merged_tags = list(set(prev.tags) | set(match.tags) | {"unknown_song_merge"})
+            if match.confidence >= prev.confidence:
+                merged[-1] = ContentMatch(
+                    content_type=match.content_type,
+                    title=prev.title,  # 保留第一个未知歌曲标题
+                    segment_indices=combined_indices,
+                    confidence=match.confidence,
+                    tags=merged_tags,
+                    description=match.description or prev.description,
+                    artist=match.artist or prev.artist,
+                    lyrics_snippet=match.lyrics_snippet or prev.lyrics_snippet,
+                )
+            else:
+                merged[-1] = ContentMatch(
+                    content_type=prev.content_type,
+                    title=prev.title,
+                    segment_indices=combined_indices,
+                    confidence=prev.confidence,
+                    tags=merged_tags,
+                    description=prev.description or match.description,
+                    artist=prev.artist or match.artist,
+                    lyrics_snippet=prev.lyrics_snippet or match.lyrics_snippet,
+                )
+            merge_events.append({
+                "type": "force_merge_unknown_song",
+                "prev_title": prev.title,
+                "match_title": match.title,
+                "prev_indices": list(prev.segment_indices),
+                "match_indices": list(match.segment_indices),
+                "gap": gap,
+                "similarity": similarity,
+            })
         else:
-            merged[-1] = ContentMatch(
-                content_type=prev.content_type,
-                title=prev.title,
-                segment_indices=combined_indices,
-                confidence=prev.confidence,
-                tags=list(set(prev.tags) | set(match.tags)),
-                description=prev.description or match.description,
-                artist=prev.artist or match.artist,
-                lyrics_snippet=prev.lyrics_snippet or match.lyrics_snippet,
-            )
+            # 已知歌曲：标题必须相同
+            if title_key != prev_title_key:
+                merged.append(match)
+                continue
+            if gap > gap_seconds:
+                merged.append(match)
+                continue
+            # 合并同名歌曲
+            combined_indices = sorted(set(prev.segment_indices) | set(match.segment_indices))
+            if match.confidence >= prev.confidence:
+                merged[-1] = ContentMatch(
+                    content_type=match.content_type,
+                    title=match.title,
+                    segment_indices=combined_indices,
+                    confidence=match.confidence,
+                    tags=list(set(match.tags) | set(prev.tags)),
+                    description=match.description or prev.description,
+                    artist=match.artist or prev.artist,
+                    lyrics_snippet=match.lyrics_snippet or prev.lyrics_snippet,
+                )
+            else:
+                merged[-1] = ContentMatch(
+                    content_type=prev.content_type,
+                    title=prev.title,
+                    segment_indices=combined_indices,
+                    confidence=prev.confidence,
+                    tags=list(set(prev.tags) | set(match.tags)),
+                    description=prev.description or match.description,
+                    artist=prev.artist or match.artist,
+                    lyrics_snippet=prev.lyrics_snippet or match.lyrics_snippet,
+                )
+            merge_events.append({
+                "type": "force_merge_same_title",
+                "title": prev.title,
+                "gap": gap,
+            })
 
-    return merged
+    return merged, merge_events
 
 
 def _v2_text_similarity(texts_a: list[str], texts_b: list[str]) -> float:

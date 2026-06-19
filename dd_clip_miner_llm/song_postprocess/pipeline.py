@@ -22,6 +22,7 @@ class SongPipelineContext:
     llm_dir: Path
     matches: list[ContentMatch]
     stage_history: list[dict[str, Any]] = field(default_factory=list)
+    merge_events: list[dict[str, Any]] = field(default_factory=list)
 
 
 class SongPipelineStage(Protocol):
@@ -63,6 +64,10 @@ class BoundaryRiskStage:
             source=self.source,
         )
         context.matches = normalized
+        # 收集 unknown_song_merge 事件供 sus 文件夹导出
+        for event in normalization_events:
+            if event.get("type") == "force_merge_unknown_song":
+                context.merge_events.append(event)
         write_risk_audit(
             context.llm_dir / "risk" / f"{self.name}.json",
             strategy=song_pipeline_strategy(context.config),
@@ -302,13 +307,19 @@ def _parse_search_result_per_item(result: dict[str, Any]) -> list[dict[str, Any]
             r"\s*[-–—|]\s*hymnal\.net\s*$",
             r"\s+Song Lyrics, Music Videos & Concerts\s*$",
             r"\s+Music Videos & Concerts\s*$",
+            r"\s+Song Lyrics and Music by\s+.*$",
             r"\s+arranged by\s+.*$",
             r"\s*\|\s*Genius\s*$",
             r"\s*\|\s*AZLyrics\.com\s*$",
             r"\s*\(book\)\s*$",
+            r"\s*[-–—|]\s*抖音\s*$",
+            r"\s*[-–—|]\s*Lyrics\s*$",
+            r"\s+歌词解读\s*$",
         ]
         for pattern in web_suffixes:
             cleaned = _re.sub(pattern, "", cleaned, flags=_re.IGNORECASE)
+        # 清理尾部括号标注（如 (short)、(Romanized)、(Genie Zhuo)）
+        cleaned = _re.sub(r"\s*\([^)]{1,30}\)\s*$", "", cleaned)
         return _re.sub(r"\s+", " ", cleaned).strip()
 
     items: list[dict[str, Any]] = []
@@ -317,8 +328,11 @@ def _parse_search_result_per_item(result: dict[str, Any]) -> list[dict[str, Any]
         if not raw_title:
             continue
         cleaned = _clean_title(raw_title)
-        if not cleaned or len(cleaned) < 2:
+        if not cleaned:
             continue
+        # 清洗后标题过短时保留原始标题
+        if len(cleaned) < 2:
+            cleaned = raw_title
 
         structured_artist = r.get("artist", "").strip()
         entry: dict[str, Any] = {"title": cleaned, "snippet": r.get("snippet", "").strip()}

@@ -183,7 +183,7 @@ profiles:
       normalization:
         force_merge_same_title: true
         chorus_aware_split: true
-        chorus_gap_seconds: 120.0
+        chorus_gap_seconds: 130.0
         chorus_similarity_threshold: 0.3
         chorus_context_segments: 3
       pipeline:
@@ -247,7 +247,7 @@ song:
   normalization:
     force_merge_same_title: false
     chorus_aware_split: false
-    chorus_gap_seconds: 120.0
+    chorus_gap_seconds: 130.0
     chorus_similarity_threshold: 0.3
     chorus_context_segments: 3
   search:

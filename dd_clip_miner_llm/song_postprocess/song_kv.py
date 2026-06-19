@@ -95,7 +95,7 @@ class _PrecisionDiscoveryRecognizer(_KVRecognizer):
 
 任务：按时间顺序完整扫描 ASR，找出所有可能是连续演唱的歌曲片段，返回一个纯 JSON object。
 
-尽量覆盖同一次演唱的完整片段，边界可以略宽，但不要跨到明显聊天、换歌、报幕或另一首歌。
+尽量覆盖同一首歌或一次演唱的完整片段，边界可以略宽，但不要跨到明显聊天、换歌、报幕或另一首歌。
 
 Whisper ASR 可能存在错字、漏字、同音字替换、外语误识别、断句错误、重复切分等问题。判断时不要只依赖文本是否像标准歌词，而要结合上下文连续性、重复结构、押韵/节奏感、旋律化表达、外语段落、说唱结构、哼唱/拟声等线索综合判断。
 
@@ -155,7 +155,9 @@ class _SegmentationAdjudicationRecognizer(_KVRecognizer):
 - accept/adjust/split 通常处理一个 ID；merge 必须处理两个或更多 ID。
 - reject 的 segment_ranges 必须为空。
 - 其他 action 必须返回最终精确 segment_ranges，不跨过聊天、感谢、报幕或另一首歌。
-- split 可返回多个互不重叠区间；merge 只合并确属同一次连续演唱的输入。
+- split 可返回多个互不重叠区间；merge 适用于以下情况：
+  1. 两个或多个候选属于同一首歌（即使中间有聊天、间奏、互动）
+  2. anchor_text 包含相似歌词、时间间隔合理（< 3 分钟且不是另一首歌）
 {additions}
 此阶段不识别歌名、不搜索歌词，分段完整性优先。
 
@@ -1194,6 +1196,12 @@ def run_risk_routed_kv_pipeline(
     (kv_dir / "pipeline.json").write_text(
         json.dumps(audit, ensure_ascii=False, indent=2), encoding="utf-8"
     )
+    # 写入 merge_events 供 sus 文件夹导出
+    if context.merge_events:
+        (llm_dir / "merge_events.json").write_text(
+            json.dumps(context.merge_events, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
     return context.matches
 
 
