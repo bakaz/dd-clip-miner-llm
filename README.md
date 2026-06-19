@@ -20,9 +20,10 @@
 - **KV 缓存优化**：`cache_friendly_prompt_layout` 复用 ASR 前缀，`compact_segment_ranges` 减少输出 token
 - **V3 三轮分段流水线**：高精度发现 → 未覆盖召回审计 → 全量时序裁决（`song_kv.py` 实现）
 - **时序裁决**：全量 ASR 二次审视，修正首轮边界，支持名称保留
-- **副歌感知拆分**：40–120 秒间隔根据文本相似度判断是否为副歌重现
+- **副歌感知拆分**：40–130 秒间隔根据文本相似度判断是否为副歌重现
 - **同名相邻合并**：排序后字面相邻、标题相同且间隔 ≤ 40 秒的候选自动合并
 - **搜索验证命名**：对未知歌曲用歌词锚点搜索，需歌词证据才更新名称
+- **未知歌曲合并**：相邻未知歌曲按时间间隔（≤ 40 秒）和 ASR 文本相似度（≥ 0.3）自动合并，被合并的原始片段导出到 `sus/` 文件夹供人工审核
 - **锚点漏检审计**：可选的 anchor-based 补查，单次 LLM 调用，默认关闭
 - **断点续传**：复用 `01_audio`、`02_asr`、LLM 结果（`progress.json`）
 - **批量 + 多段合并**：`ConcatPipeline` 处理直播分段 H.264 损坏（mkvmerge 优先 + 6 策略 fallback）
@@ -288,7 +289,7 @@ dd-clip-miner-llm/
     │   ├── base.py             # BaseRecognizer + post_process 钩子
     │   └── song.py             # SongRecognizer（legacy / V3）
     ├── song_postprocess/       # 歌曲后处理流水线
-    │   ├── normalize.py        # 同名合并、副歌感知拆分、通用规范化
+    │   ├── normalize.py        # 同名合并、未知歌曲合并、副歌感知拆分、通用规范化
     │   ├── review.py           # LLM 复核（local / full scope）
     │   ├── recheck.py          # 遗漏复查（windowed / full_transcript / anchor）
     │   ├── temporal.py         # 时序裁决（全量 ASR 边界修正）
@@ -329,6 +330,7 @@ runs/<run_name>/
 ├── 02_asr/transcript.json
 ├── 02_asr/llm/<type>/          # matches.json, llm_batch_*.json, ...
 ├── 03_clips/audio|video/<type>/
+│   └── sus/                    # 被合并的未知歌曲原始片段（供人工审核）
 ├── 04_reports/<type>/          # songs.csv, dialogues.csv, ...
 ├── manifest.json / progress.json
 ├── clip_naming.json            # 可选
