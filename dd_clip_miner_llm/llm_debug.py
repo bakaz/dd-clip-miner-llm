@@ -198,6 +198,8 @@ def batch_debug_is_reusable(
         return False
     if payload.get("protocol_valid") is False:
         return False
+    if payload.get("schema_valid") is False:
+        return False
     if payload.get("coordinate_mode") in {
         "mixed_coordinate_mode",
         "seconds_coordinate_drift",

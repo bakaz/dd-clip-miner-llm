@@ -12,7 +12,7 @@ from dd_clip_miner_llm.song_postprocess.song_kv import (
     _PrecisionDiscoveryRecognizer,
     _RecallAuditRecognizer,
     _SegmentationAdjudicationRecognizer,
-    _V3StageRunner,
+    _KVStageRunner,
     _candidate_explosion,
     _continuation_for_discovery,
     _validate_adjudication,
@@ -23,7 +23,7 @@ from dd_clip_miner_llm.song_postprocess.song_kv import (
 def _config() -> dict:
     config = deepcopy(DEFAULT_CONFIG)
     config["llm"]["cache_friendly_prompt_layout"] = True
-    config["song"]["pipeline"]["strategy"] = "risk_routed_v3"
+    config["song"]["pipeline"]["strategy"] = "risk_routed_kv"
     return config
 
 
@@ -76,7 +76,7 @@ def test_song_prompts_use_index_only_transcript_lines() -> None:
         assert re.search(r"\(\d+\.\ds-\d+\.\ds\)", content) is None
 
 
-def test_v3_stages_share_system_and_full_asr_prefix() -> None:
+def test_kv_stages_share_system_and_full_asr_prefix() -> None:
     config = _config()
     segments = _segments()
     recognizers = [
@@ -195,7 +195,7 @@ def test_adjudication_requires_exactly_once_id_coverage() -> None:
     assert _validate_adjudication(unknown, ["P001", "R001"], segments, config)[0] is False
 
 
-def test_v3_protocol_explosion_rejects_fragment_storm() -> None:
+def test_kv_protocol_explosion_rejects_fragment_storm() -> None:
     config = _config()
     segments = _segments(3211)
     fragments = [
@@ -205,7 +205,7 @@ def test_v3_protocol_explosion_rejects_fragment_storm() -> None:
     assert _candidate_explosion(fragments, segments, config) is True
 
 
-def test_v3_protocol_guard_allows_normal_candidate_set() -> None:
+def test_kv_protocol_guard_allows_normal_candidate_set() -> None:
     config = _config()
     segments = _segments(3211)
     candidates = [
@@ -279,7 +279,7 @@ def _response(content: str, finish_reason: str) -> SimpleNamespace:
 
 
 def test_discovery_continuation_merges_complete_candidates(monkeypatch, tmp_path) -> None:
-    import dd_clip_miner_llm.song_postprocess.song_kv as v3
+    import dd_clip_miner_llm.song_postprocess.song_kv as kv
 
     config = _config()
     provider = LLMProvider(api_key="test", model="fake", max_completion_tokens=32768)
@@ -297,15 +297,15 @@ def test_discovery_continuation_merges_complete_candidates(monkeypatch, tmp_path
         ),
     ])
     calls = []
-    monkeypatch.setattr(v3, "build_providers", lambda _: [provider])
-    monkeypatch.setattr(v3, "_build_openai_clients", lambda _: {"test": object()})
+    monkeypatch.setattr(kv, "build_providers", lambda _: [provider])
+    monkeypatch.setattr(kv, "_build_openai_clients", lambda _: {"test": object()})
 
     def fake_call(*args, **kwargs):
         calls.append(args[2])
         return next(responses)
 
-    monkeypatch.setattr(v3, "call_llm", fake_call)
-    runner = _V3StageRunner(_segments(), config)
+    monkeypatch.setattr(kv, "call_llm", fake_call)
+    runner = _KVStageRunner(_segments(), config)
     payload, debug = runner.run(
         _PrecisionDiscoveryRecognizer(),
         tmp_path,
@@ -325,7 +325,7 @@ def test_discovery_continuation_merges_complete_candidates(monkeypatch, tmp_path
 
 
 def test_discovery_stop_with_incomplete_coverage_continues_remaining_range(monkeypatch, tmp_path) -> None:
-    import dd_clip_miner_llm.song_postprocess.song_kv as v3
+    import dd_clip_miner_llm.song_postprocess.song_kv as kv
 
     config = _config()
     provider = LLMProvider(api_key="test", model="fake", max_completion_tokens=32768)
@@ -343,15 +343,15 @@ def test_discovery_stop_with_incomplete_coverage_continues_remaining_range(monke
         ),
     ])
     calls = []
-    monkeypatch.setattr(v3, "build_providers", lambda _: [provider])
-    monkeypatch.setattr(v3, "_build_openai_clients", lambda _: {"test": object()})
+    monkeypatch.setattr(kv, "build_providers", lambda _: [provider])
+    monkeypatch.setattr(kv, "_build_openai_clients", lambda _: {"test": object()})
 
     def fake_call(*args, **kwargs):
         calls.append(args[2])
         return next(responses)
 
-    monkeypatch.setattr(v3, "call_llm", fake_call)
-    payload, debug = _V3StageRunner(_segments(), config).run(
+    monkeypatch.setattr(kv, "call_llm", fake_call)
+    payload, debug = _KVStageRunner(_segments(), config).run(
         _PrecisionDiscoveryRecognizer(),
         tmp_path,
         validate=lambda value: _validate_discovery(value, 20, _total_duration_seconds(_segments())),
@@ -368,7 +368,7 @@ def test_discovery_stop_with_incomplete_coverage_continues_remaining_range(monke
 
 
 def test_discovery_continues_previous_stop_coverage_failure(monkeypatch, tmp_path) -> None:
-    import dd_clip_miner_llm.song_postprocess.song_kv as v3
+    import dd_clip_miner_llm.song_postprocess.song_kv as kv
 
     config = _config()
     config["llm"]["continuation_on_length"] = False
@@ -378,16 +378,16 @@ def test_discovery_continues_previous_stop_coverage_failure(monkeypatch, tmp_pat
         "stop",
     )
     calls = 0
-    monkeypatch.setattr(v3, "build_providers", lambda _: [provider])
-    monkeypatch.setattr(v3, "_build_openai_clients", lambda _: {"test": object()})
+    monkeypatch.setattr(kv, "build_providers", lambda _: [provider])
+    monkeypatch.setattr(kv, "_build_openai_clients", lambda _: {"test": object()})
 
     def first_call(*args, **kwargs):
         nonlocal calls
         calls += 1
         return first_response
 
-    monkeypatch.setattr(v3, "call_llm", first_call)
-    runner = _V3StageRunner(_segments(), config)
+    monkeypatch.setattr(kv, "call_llm", first_call)
+    runner = _KVStageRunner(_segments(), config)
     failed, _ = runner.run(
         _PrecisionDiscoveryRecognizer(),
         tmp_path,
@@ -408,9 +408,9 @@ def test_discovery_continues_previous_stop_coverage_failure(monkeypatch, tmp_pat
             "stop",
         )
 
-    monkeypatch.setattr(v3, "call_llm", continuation_call)
+    monkeypatch.setattr(kv, "call_llm", continuation_call)
     relaxed_config = _config()
-    relaxed_runner = _V3StageRunner(_segments(), relaxed_config)
+    relaxed_runner = _KVStageRunner(_segments(), relaxed_config)
     recovered, debug = relaxed_runner.run(
         _PrecisionDiscoveryRecognizer(),
         tmp_path,
@@ -426,8 +426,8 @@ def test_discovery_continues_previous_stop_coverage_failure(monkeypatch, tmp_pat
     assert len(debug["usage"]) == 2
 
 
-def test_v3_runner_retries_provider_then_falls_back_on_coordinate_drift(monkeypatch, tmp_path) -> None:
-    import dd_clip_miner_llm.song_postprocess.song_kv as v3
+def test_kv_runner_retries_provider_then_falls_back_on_coordinate_drift(monkeypatch, tmp_path) -> None:
+    import dd_clip_miner_llm.song_postprocess.song_kv as kv
 
     config = _config()
     segments = _long_timeline_segments()
@@ -474,8 +474,8 @@ def test_v3_runner_retries_provider_then_falls_back_on_coordinate_drift(monkeypa
         ]),
     }
     calls: list[str] = []
-    monkeypatch.setattr(v3, "build_providers", lambda _: [provider_a, provider_b])
-    monkeypatch.setattr(v3, "_build_openai_clients", lambda _: {
+    monkeypatch.setattr(kv, "build_providers", lambda _: [provider_a, provider_b])
+    monkeypatch.setattr(kv, "_build_openai_clients", lambda _: {
         "a": object(),
         "b": object(),
     })
@@ -484,8 +484,8 @@ def test_v3_runner_retries_provider_then_falls_back_on_coordinate_drift(monkeypa
         calls.append(provider.model)
         return next(responses[provider.model])
 
-    monkeypatch.setattr(v3, "call_llm", fake_call)
-    payload, debug = _V3StageRunner(segments, config).run(
+    monkeypatch.setattr(kv, "call_llm", fake_call)
+    payload, debug = _KVStageRunner(segments, config).run(
         _PrecisionDiscoveryRecognizer(),
         tmp_path,
         validate=lambda value: _validate_discovery(
@@ -505,8 +505,8 @@ def test_v3_runner_retries_provider_then_falls_back_on_coordinate_drift(monkeypa
     assert debug["provider_attempts"][0]["error"] == "mixed_coordinate_mode"
 
 
-def test_v3_runner_does_not_result_retry_transport_exception(monkeypatch, tmp_path) -> None:
-    import dd_clip_miner_llm.song_postprocess.song_kv as v3
+def test_kv_runner_does_not_result_retry_transport_exception(monkeypatch, tmp_path) -> None:
+    import dd_clip_miner_llm.song_postprocess.song_kv as kv
 
     config = _config()
     segments = _long_timeline_segments()
@@ -529,8 +529,8 @@ def test_v3_runner_does_not_result_retry_transport_exception(monkeypatch, tmp_pa
         retry_jitter_ratio=0.0,
     )
     calls: list[str] = []
-    monkeypatch.setattr(v3, "build_providers", lambda _: [provider_a, provider_b])
-    monkeypatch.setattr(v3, "_build_openai_clients", lambda _: {
+    monkeypatch.setattr(kv, "build_providers", lambda _: [provider_a, provider_b])
+    monkeypatch.setattr(kv, "_build_openai_clients", lambda _: {
         "a": object(),
         "b": object(),
     })
@@ -545,8 +545,8 @@ def test_v3_runner_does_not_result_retry_transport_exception(monkeypatch, tmp_pa
             "stop",
         )
 
-    monkeypatch.setattr(v3, "call_llm", fake_call)
-    payload, debug = _V3StageRunner(segments, config).run(
+    monkeypatch.setattr(kv, "call_llm", fake_call)
+    payload, debug = _KVStageRunner(segments, config).run(
         _PrecisionDiscoveryRecognizer(),
         tmp_path,
         validate=lambda value: _validate_discovery(

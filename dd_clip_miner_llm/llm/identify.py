@@ -42,6 +42,161 @@ from .tools import run_llm_with_tools
 from .transport import call_llm_with_transport_retry
 
 
+def _is_kv_v2_main_song(
+    config: dict[str, Any],
+    *,
+    content_type: str,
+    debug_phase: str | None,
+) -> bool:
+    return (
+        config.get("_profile_name") == "kv_v2"
+        and debug_phase == "main"
+        and content_type == "song"
+    )
+
+
+_SINGING_STRONG_KEYWORDS = (
+    "歌词", "副歌", "主歌", "原曲", "歌名", "唱歌", "在唱",
+    "rap", "verse", "chorus",
+)
+
+_SINGING_VOCAL_MARKERS = (
+    "啦啦", "呜呜", "哼哼", "啊啊", "呀呀", "哦哦",
+    "lalala", "la la", "na na", "woo", "yeah",
+)
+
+
+def _has_repeated_character(text: str) -> bool:
+    previous = ""
+    repeat_count = 0
+    for char in text:
+        if char.isspace():
+            continue
+        if char == previous:
+            repeat_count += 1
+            if repeat_count >= 2:
+                return True
+        else:
+            previous = char
+            repeat_count = 0
+    return False
+
+
+def _is_short_lyric_like_line(text: str) -> bool:
+    compact = "".join(text.split())
+    if not compact:
+        return False
+    return len(compact) <= 28
+
+
+def _asr_has_singing_evidence(segments: list[TranscriptSegment]) -> bool:
+    """Heuristic: does this ASR transcript contain obvious singing evidence?"""
+    strong_count = 0
+    vocal_count = 0
+    consecutive_short = 0
+    max_consecutive_short = 0
+    seen_lines: set[str] = set()
+    repeated_line_count = 0
+    for seg in segments:
+        text = seg.text.strip()
+        if not text:
+            consecutive_short = 0
+            continue
+        lowered = text.casefold()
+        is_strong = any(kw in lowered for kw in _SINGING_STRONG_KEYWORDS)
+        is_vocal = (
+            any(marker in lowered for marker in _SINGING_VOCAL_MARKERS)
+            or _has_repeated_character(text)
+        )
+        if is_strong:
+            strong_count += 1
+        if is_vocal:
+            vocal_count += 1
+        if _is_short_lyric_like_line(text):
+            consecutive_short += 1
+            max_consecutive_short = max(max_consecutive_short, consecutive_short)
+        else:
+            consecutive_short = 0
+        normalized = "".join(lowered.split())
+        if normalized in seen_lines:
+            repeated_line_count += 1
+        seen_lines.add(normalized)
+
+    if strong_count >= 2:
+        return True
+    if strong_count >= 1 and max_consecutive_short >= 2:
+        return True
+    if vocal_count >= 2:
+        return True
+    if repeated_line_count >= 1 and max_consecutive_short >= 2:
+        return True
+    return False
+
+
+def _validate_song_match_schema(
+    items: list[Any],
+    matches: list[ContentMatch],
+    *,
+    segments: list[TranscriptSegment] | None = None,
+) -> dict[str, Any]:
+    raw_item_count = len(items)
+    parsed_match_count = len(matches)
+    details: dict[str, Any] = {
+        "schema_valid": True,
+        "schema_error_reason": None,
+        "raw_item_count": raw_item_count,
+        "parsed_match_count": parsed_match_count,
+    }
+    if not items:
+        if segments is not None and _asr_has_singing_evidence(segments):
+            details["schema_valid"] = False
+            details["schema_error_reason"] = "empty_song_match_array"
+            return details
+        details["schema_valid"] = True
+        details["schema_error_reason"] = None
+        return details
+    if any(not isinstance(item, dict) for item in items):
+        details["schema_valid"] = False
+        details["schema_error_reason"] = "invalid_song_match_schema"
+        return details
+    if any(
+        "segment_ranges" not in item and "segment_indices" not in item
+        for item in items
+    ):
+        details["schema_valid"] = False
+        details["schema_error_reason"] = "missing_song_segments"
+        return details
+    if not matches:
+        details["schema_valid"] = False
+        details["schema_error_reason"] = "zero_parsed_song_matches"
+        return details
+    return details
+
+
+def _validate_song_match_content(
+    content: str,
+    recognizer: BaseRecognizer,
+    config: dict[str, Any],
+    *,
+    segments: list[TranscriptSegment] | None = None,
+) -> tuple[bool, dict[str, Any]]:
+    parsed = parse_llm_json(content)
+    if not isinstance(parsed, list):
+        return False, {
+            "schema_valid": False,
+            "reason": "invalid_json_array",
+            "schema_error_reason": "invalid_json_array",
+            "raw_item_count": 0,
+            "parsed_match_count": 0,
+        }
+    matches = recognizer.parse_response(parsed, config)
+    details = _validate_song_match_schema(parsed, matches, segments=segments)
+    if details["schema_valid"]:
+        return True, details
+    details["reason"] = details["schema_error_reason"]
+    return False, details
+
+
 def identify_songs(
     segments: list[TranscriptSegment],
     config: dict[str, Any],
@@ -105,7 +260,9 @@ def identify_structured_content(
     client = None
     provider = None
 
-    messages = build_llm_messages(recognizer, segments, 0, config)
+    messages = build_llm_messages(
+        recognizer, segments, 0, config, debug_phase=content_type,
+    )
     store_requests = bool(get_llm_config(config).get("debug_store_requests", False))
 
     for candidate in providers:
@@ -253,7 +410,9 @@ def _process_single_batch(
             write_llm_debug(debug_path, batch_start, batch_debug)
         return None
 
-    messages = build_llm_messages(recognizer, batch_segments, batch_start, config)
+    messages = build_llm_messages(
+        recognizer, batch_segments, batch_start, config, debug_phase=debug_phase,
+    )
     request_metadata = build_request_debug_metadata(
         messages, config=config, provider=first_provider, recognizer=recognizer,
         segments=batch_segments, batch_start=batch_start, tools=tools,
@@ -263,10 +422,37 @@ def _process_single_batch(
         cached_batch = _try_load_cached_batch(debug_path, batch_start, expected_metadata=request_metadata)
         if cached_batch is not None:
             cached_payload, cached_items = cached_batch
-            _record_cache_reuse(debug_path, batch_start, cached_payload)
+            raw_cached_response = cached_payload.get("raw_response")
+            raw_cached_items = (
+                parse_llm_json(str(raw_cached_response))
+                if isinstance(raw_cached_response, str)
+                else None
+            )
+            if not isinstance(raw_cached_items, list):
+                raw_cached_items = cached_payload.get("parsed_items")
+            if not isinstance(raw_cached_items, list):
+                raw_cached_items = cached_items
             matches = recognizer.parse_response(cached_items, config)
-            print(f"  LLM batch {batch_idx}/{batch_count}: reused cached result, found {len(matches)} match(es)")
-            return matches
+            if _is_kv_v2_main_song(
+                config, content_type=content_type, debug_phase=debug_phase,
+            ):
+                schema_details = _validate_song_match_schema(
+                    raw_cached_items, matches, segments=batch_segments,
+                )
+                if not schema_details["schema_valid"]:
+                    print(
+                        f"  LLM batch {batch_idx}/{batch_count}: cached result "
+                        f"invalid song schema ({schema_details['raw_item_count']} raw items, "
+                        f"{schema_details['parsed_match_count']} parsed matches), ignoring cache",
+                        flush=True,
+                    )
+                    cached_batch = None
+                else:
+                    cached_payload["schema_valid"] = True
+            if cached_batch is not None:
+                _record_cache_reuse(debug_path, batch_start, cached_payload)
+                print(f"  LLM batch {batch_idx}/{batch_count}: reused cached result, found {len(matches)} match(es)")
+                return matches
 
     _attach_request_debug(batch_debug, messages, store_requests=store_requests, metadata=request_metadata)
 
@@ -317,6 +503,23 @@ def _process_single_batch(
             try:
                 if tools and content_type == "song":
                     from ..search_tools import execute_tool
+                    initial_tool_choice = (
+                        "none"
+                        if _is_kv_v2_main_song(
+                            config, content_type=content_type, debug_phase=debug_phase,
+                        )
+                        else None
+                    )
+                    content_validator = (
+                        (
+                            lambda text, _recognizer=recognizer, _config=config, _segments=batch_segments:
+                            _validate_song_match_content(text, _recognizer, _config, segments=_segments)
+                        )
+                        if _is_kv_v2_main_song(
+                            config, content_type=content_type, debug_phase=debug_phase,
+                        )
+                        else None
+                    )
                     content = run_llm_with_tools(
                         client, provider, messages, tools, execute_tool, batch_debug,
                         max_tool_rounds=int(llm_config.get("max_tool_rounds", 2) or 0),
@@ -324,6 +527,8 @@ def _process_single_batch(
                         force_final_round=bool(llm_config.get("force_final_tool_round", False)),
                         final_instruction=(str(llm_config["final_tool_instruction"]) if llm_config.get("final_tool_instruction") else None),
                         config=config,
+                        initial_tool_choice=initial_tool_choice,
+                        content_validator=content_validator,
                     )
                     batch_debug["provider"] = {
                         "name": provider.name,
@@ -409,6 +614,42 @@ def _process_single_batch(
                 batch_debug["parsed_items"] = items
                 batch_debug["parse_valid"] = True
                 batch_debug["raw_response"] = content
+                if _is_kv_v2_main_song(
+                    config, content_type=content_type, debug_phase=debug_phase,
+                ):
+                    raw_items = parse_llm_json(content)
+                    if not isinstance(raw_items, list):
+                        raw_items = items
+                    schema_details = _validate_song_match_schema(
+                        raw_items, matches, segments=batch_segments,
+                    )
+                    batch_debug.update(schema_details)
+                    if not schema_details["schema_valid"]:
+                        reason = str(schema_details["schema_error_reason"])
+                        last_error = RuntimeError(reason)
+                        batch_debug.setdefault("schema_validation_failures", []).append({
+                            "result_attempt": result_attempt,
+                            "provider": provider.name,
+                            **schema_details,
+                        })
+                        if debug_path is not None:
+                            write_llm_debug(debug_path, batch_start, batch_debug)
+                        action = (
+                            "replaying"
+                            if result_attempt < total_result_attempts
+                            else "switching provider"
+                        )
+                        print(
+                            f"  LLM batch {batch_idx}/{batch_count}: "
+                            f"invalid song schema "
+                            f"({schema_details['raw_item_count']} raw items, "
+                            f"{schema_details['parsed_match_count']} parsed matches), "
+                            f"{action}",
+                            flush=True,
+                        )
+                        continue
+                else:
+                    batch_debug["schema_valid"] = True
                 if debug_path is not None:
                     write_llm_debug(debug_path, batch_start, batch_debug)
                 cache_summary = _cache_usage_summary(batch_debug)

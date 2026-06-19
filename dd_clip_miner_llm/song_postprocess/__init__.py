@@ -69,8 +69,8 @@ from .risk import (
     repair_song_boundaries,
     score_song_match_risks,
 )
-from ..config import is_risk_routed, is_risk_routed_v3, song_pipeline_strategy
-from .song_kv import run_risk_routed_v3_pipeline
+from ..config import is_risk_routed, is_risk_routed_kv, song_pipeline_strategy
+from .song_kv import run_risk_routed_kv_pipeline
 from .temporal import (
     _SongTemporalAdjudicationRecognizer,
     _restore_temporal_titles,
@@ -129,11 +129,11 @@ __all__ = [
     "SongRiskRecord",
     "get_song_risk_config",
     "expand_song_anchors",
-    "is_risk_routed_v3",
+    "is_risk_routed_kv",
     "is_risk_routed",
     "load_supported_search_titles",
     "repair_song_boundaries",
-    "run_risk_routed_v3_pipeline",
+    "run_risk_routed_kv_pipeline",
     "score_song_match_risks",
     "song_pipeline_strategy",
     "_SongTemporalAdjudicationRecognizer",

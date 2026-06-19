@@ -479,14 +479,14 @@ def is_risk_routed_v2(config: dict[str, Any]) -> bool:
     return song_pipeline_strategy(config) == "risk_routed_v2"
 
 
-def is_risk_routed_v3(config: dict[str, Any]) -> bool:
+def is_risk_routed_kv(config: dict[str, Any]) -> bool:
     """Return whether the strict three-stage KV song pipeline is enabled."""
-    return song_pipeline_strategy(config) == "risk_routed_v3"
+    return song_pipeline_strategy(config) == "risk_routed_kv"
 
 
 def is_risk_routed(config: dict[str, Any]) -> bool:
     """Return whether either risk-routed song pipeline is enabled."""
-    return song_pipeline_strategy(config) in {"risk_routed_v2", "risk_routed_v3"}
+    return song_pipeline_strategy(config) in {"risk_routed_v2", "risk_routed_kv"}
 
 
 def get_song_normalization_config(config: dict[str, Any]) -> dict[str, Any]:

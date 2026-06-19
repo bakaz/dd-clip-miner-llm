@@ -79,6 +79,7 @@ def _load_cached_identify_matches(
             batch_segments,
             batch_start,
             config,
+            debug_phase=debug_phase,
         )
         for provider in providers:
             metadata = build_request_debug_metadata(

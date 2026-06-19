@@ -20,9 +20,14 @@ def build_llm_messages(
     segments: list[TranscriptSegment],
     batch_start: int,
     config: dict[str, Any],
+    *,
+    debug_phase: str | None = None,
 ) -> list[dict[str, Any]]:
     """Build request messages with optional cache-friendly layout."""
-    prompt = recognizer.build_prompt(segments, batch_start, config)
+    prompt_config = config
+    if debug_phase is not None:
+        prompt_config = {**config, "_debug_phase": debug_phase}
+    prompt = recognizer.build_prompt(segments, batch_start, prompt_config)
     llm_config = get_llm_config(config)
     if not llm_config.get("cache_friendly_prompt_layout", False):
         system_prompt = recognizer.build_system_prompt(config)

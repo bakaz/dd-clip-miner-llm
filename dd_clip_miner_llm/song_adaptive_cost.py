@@ -207,6 +207,7 @@ def estimate_main_cost(
             batch_segments,
             batch_start,
             config,
+            debug_phase="main",
         )
         if kv_layout:
             shared_chars, suffix_chars = split_kv_cache_parts(messages)
@@ -311,7 +312,9 @@ def estimate_overlong_cost(
         )
         chunk = segments[context_start : context_end + 1]
         offset_recognizer = _OffsetRecognizer(base_recognizer, context_start)
-        messages = build_llm_messages(offset_recognizer, chunk, 0, config)
+        messages = build_llm_messages(
+            offset_recognizer, chunk, 0, config, debug_phase="overlong",
+        )
         miss_tokens += chars_to_tokens(message_total_chars(messages), ratio=ratio)
 
     miss_tokens *= api_rounds
@@ -494,6 +497,7 @@ def estimate_review_cost(
                 segments,
                 0,
                 config,
+                debug_phase="review_after",
             )
         else:
             review_recognizer = _SongReviewRecognizer(base_recognizer, cluster)
@@ -503,6 +507,7 @@ def estimate_review_cost(
                 chunk,
                 0,
                 config,
+                debug_phase="review_after",
             )
 
         if kv_layout and scope == "full":
@@ -577,7 +582,9 @@ def estimate_missed_cost(
             target_ranges,
             matches,
         )
-        messages = build_llm_messages(audit_recognizer, segments, 0, config)
+        messages = build_llm_messages(
+            audit_recognizer, segments, 0, config, debug_phase="missed_recheck",
+        )
         if kv_layout:
             shared_chars, suffix_chars = split_kv_cache_parts(messages)
             hit_tokens += chars_to_tokens(shared_chars, ratio=ratio)
@@ -628,7 +635,9 @@ def estimate_missed_cost(
         )
         chunk = segments[context_start : context_end + 1]
         offset_recognizer = _OffsetRecognizer(base_recognizer, context_start)
-        messages = build_llm_messages(offset_recognizer, chunk, 0, config)
+        messages = build_llm_messages(
+            offset_recognizer, chunk, 0, config, debug_phase="missed_recheck",
+        )
         miss_tokens += chars_to_tokens(message_total_chars(messages), ratio=ratio)
         call_count += api_rounds
 

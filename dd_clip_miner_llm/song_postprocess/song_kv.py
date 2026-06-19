@@ -46,8 +46,8 @@ _PROTOCOL_RETRY_REASONS = {
 }
 
 
-class _V3Recognizer(BaseRecognizer):
-    stage = "v3"
+class _KVRecognizer(BaseRecognizer):
+    stage = "kv"
     transcript_include_timestamps = False
 
     @property
@@ -64,7 +64,7 @@ class _V3Recognizer(BaseRecognizer):
         config: dict[str, Any],
     ) -> str:
         instructions = self.task_instructions(config)
-        if self.stage == "v3_discovery":
+        if self.stage == "kv_discovery":
             expected_last_segment = batch_start + len(segments) - 1
             instructions = instructions.replace(
                 "<输入最后一个segment index>",
@@ -84,8 +84,8 @@ class _V3Recognizer(BaseRecognizer):
         )
 
 
-class _PrecisionDiscoveryRecognizer(_V3Recognizer):
-    stage = "v3_discovery"
+class _PrecisionDiscoveryRecognizer(_KVRecognizer):
+    stage = "kv_discovery"
 
     def task_instructions(self, config: dict[str, Any]) -> str:
         return """你是一个面向演唱会、直播和长视频的歌曲分段专家。
@@ -118,9 +118,9 @@ Whisper ASR 可能存在错字、漏字、同音字替换、外语误识别、�
 
 
 @dataclass
-class _RecallAuditRecognizer(_V3Recognizer):
+class _RecallAuditRecognizer(_KVRecognizer):
     targets: list[dict[str, Any]]
-    stage = "v3_recall_audit"
+    stage = "kv_recall_audit"
 
     def task_instructions(self, config: dict[str, Any]) -> str:
         return f"""你负责歌曲分段 V3 的第二轮 Recall Audit。
@@ -137,10 +137,10 @@ class _RecallAuditRecognizer(_V3Recognizer):
 
 
 @dataclass
-class _SegmentationAdjudicationRecognizer(_V3Recognizer):
+class _SegmentationAdjudicationRecognizer(_KVRecognizer):
     candidates: list[dict[str, Any]]
     allow_final_discovery: bool
-    stage = "v3_adjudication"
+    stage = "kv_adjudication"
 
     def task_instructions(self, config: dict[str, Any]) -> str:
         additions = (
@@ -445,7 +445,7 @@ def _unpack_validation_result(
     return valid, reason, {}
 
 
-class _V3StageRunner:
+class _KVStageRunner:
     def __init__(self, segments: list[TranscriptSegment], config: dict[str, Any]) -> None:
         self.segments = segments
         self.config = config
@@ -456,7 +456,7 @@ class _V3StageRunner:
 
     def run(
         self,
-        recognizer: _V3Recognizer,
+        recognizer: _KVRecognizer,
         debug_dir: Path,
         *,
         validate: Callable[
@@ -502,7 +502,7 @@ class _V3StageRunner:
                 tools=None,
                 debug_phase=recognizer.stage,
             )
-            metadata["v3_stage_config_fingerprint"] = _fingerprint_payload({
+            metadata["kv_stage_config_fingerprint"] = _fingerprint_payload({
                 "pipeline": self.config.get("song", {}).get("pipeline", {}),
                 "missed_recheck": self.config.get("song", {}).get("missed_recheck", {}),
                 "normalization": self.config.get("song", {}).get("normalization", {}),
@@ -543,7 +543,7 @@ class _V3StageRunner:
                 )
                 recovery_allowed = (
                     recovery_metadata_matches
-                    and recognizer.stage == "v3_discovery"
+                    and recognizer.stage == "kv_discovery"
                     and cached.get("error") == "discovery_incomplete_coverage"
                     and cached.get("finish_reason") != "length"
                     and not cached.get("json_fix_rounds")
@@ -679,7 +679,7 @@ class _V3StageRunner:
                         batch_debug.update(diagnostics)
                         batch_debug["protocol_valid"] = valid
 
-                        if recognizer.stage == "v3_discovery":
+                        if recognizer.stage == "kv_discovery":
                             partial_candidates = _discovery_candidates(
                                 {"candidates": accumulated}, len(self.segments)
                             )
@@ -699,7 +699,7 @@ class _V3StageRunner:
                             break
 
                         coverage_incomplete = (
-                            recognizer.stage == "v3_discovery"
+                            recognizer.stage == "kv_discovery"
                             and reason == "discovery_incomplete_coverage"
                         )
                         should_continue = (
@@ -1042,7 +1042,7 @@ def _apply_adjudication(
             title=f"未知歌曲：{anchor}",
             segment_indices=_ranges_to_indices(ranges),
             confidence=_confidence(decision.get("confidence")),
-            tags=["v3_adjudicated", action, *ids],
+            tags=["kv_adjudicated", action, *ids],
             description="",
             artist="",
             lyrics_snippet=anchor,
@@ -1058,7 +1058,7 @@ def _apply_adjudication(
                 title=f"未知歌曲：{anchor or 'final_discovery'}",
                 segment_indices=_ranges_to_indices(ranges),
                 confidence=_confidence(item.get("confidence")),
-                tags=["v3_adjudicated", "final_discovery"],
+                tags=["kv_adjudicated", "final_discovery"],
                 description="",
                 artist="",
                 lyrics_snippet=anchor,
@@ -1066,16 +1066,16 @@ def _apply_adjudication(
     return matches
 
 
-def run_risk_routed_v3_pipeline(
+def run_risk_routed_kv_pipeline(
     segments: list[TranscriptSegment],
     config: dict[str, Any],
     recognizer: Any,
     llm_dir: Path,
 ) -> list[ContentMatch]:
     """Run the strict three-round KV song segmentation protocol."""
-    v3_dir = llm_dir / "v3"
-    v3_dir.mkdir(parents=True, exist_ok=True)
-    runner = _V3StageRunner(segments, config)
+    kv_dir = llm_dir / "kv"
+    kv_dir.mkdir(parents=True, exist_ok=True)
+    runner = _KVStageRunner(segments, config)
     overlap = int(
         config.get("song", {}).get("pipeline", {}).get(
             "continuation_overlap_segments", 50
@@ -1087,7 +1087,7 @@ def run_risk_routed_v3_pipeline(
     discovery_recognizer = _PrecisionDiscoveryRecognizer()
     discovery_payload, discovery_debug = runner.run(
         discovery_recognizer,
-        v3_dir / "discovery",
+        kv_dir / "discovery",
         validate=lambda value: _validate_discovery(
             value, len(segments), total_duration_seconds,
         ),
@@ -1098,12 +1098,12 @@ def run_risk_routed_v3_pipeline(
     )
     if discovery_payload is None:
         audit = {
-            "strategy": "risk_routed_v3",
+            "strategy": "risk_routed_kv",
             "status": "discovery_structural_failure",
             "stages": [{"stage": "precision_discovery", "status": "failed", "error": discovery_debug.get("error")}],
             "final_count": 0,
         }
-        (v3_dir / "pipeline.json").write_text(json.dumps(audit, ensure_ascii=False, indent=2), encoding="utf-8")
+        (kv_dir / "pipeline.json").write_text(json.dumps(audit, ensure_ascii=False, indent=2), encoding="utf-8")
         raise RuntimeError(
             "V3 precision discovery failed: "
             f"{discovery_debug.get('error') or 'invalid protocol'}"
@@ -1120,7 +1120,7 @@ def run_risk_routed_v3_pipeline(
     recall_recognizer = _RecallAuditRecognizer(targets)
     recall_payload, recall_debug = runner.run(
         recall_recognizer,
-        v3_dir / "recall_audit",
+        kv_dir / "recall_audit",
         validate=lambda value: _validate_recall(
             value, targets, len(segments), total_duration_seconds,
         ),
@@ -1145,7 +1145,7 @@ def run_risk_routed_v3_pipeline(
     )
     adjudication_payload, adjudication_debug = runner.run(
         adjudication_recognizer,
-        v3_dir / "adjudication",
+        kv_dir / "adjudication",
         validate=lambda value: _validate_adjudication(
             value, candidate_ids, segments, config
         ),
@@ -1170,7 +1170,7 @@ def run_risk_routed_v3_pipeline(
     })
 
     context = SongPipelineContext(segments, config, recognizer, llm_dir, matches)
-    BoundaryRiskStage("v3_final", "v3_adjudication").run(context)
+    BoundaryRiskStage("kv_final", "kv_adjudication").run(context)
     FinalAdjudicationStage().run(context)
 
     # 搜索验证命名（在所有分段和冲突裁决完成之后）
@@ -1181,7 +1181,7 @@ def run_risk_routed_v3_pipeline(
     history.extend(context.stage_history)
 
     audit = {
-        "strategy": "risk_routed_v3",
+        "strategy": "risk_routed_kv",
         "status": adjudication_status if not recall_failed else "recall_incomplete",
         "stages": history,
         "discovery_candidates": discovery,
@@ -1191,7 +1191,7 @@ def run_risk_routed_v3_pipeline(
         "anchor_boundary_expansion": False,
         "search_enabled": get_song_search_config(config).get("enabled", False),
     }
-    (v3_dir / "pipeline.json").write_text(
+    (kv_dir / "pipeline.json").write_text(
         json.dumps(audit, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     return context.matches
@@ -1203,5 +1203,5 @@ __all__ = [
     "_SegmentationAdjudicationRecognizer",
     "_candidate_explosion",
     "_validate_adjudication",
-    "run_risk_routed_v3_pipeline",
+    "run_risk_routed_kv_pipeline",
 ]

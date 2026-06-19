@@ -34,7 +34,7 @@ from .risk import (
     load_supported_search_titles,
     score_song_match_risks,
 )
-from ..config import is_risk_routed_v3
+from ..config import is_risk_routed_kv
 
 
 class _OffsetRecognizer:
@@ -376,6 +376,132 @@ def _sanitize_full_transcript_review_results(
     )
     events.extend(normalization_events)
     return sanitized, events
+
+
+def _kv_v2_candidate_has_song_evidence(
+    segments: list[TranscriptSegment],
+    match: ContentMatch,
+) -> bool:
+    valid_indices = sorted({i for i in match.segment_indices if 0 <= i < len(segments)})
+    if not valid_indices:
+        return False
+    non_empty_texts = [
+        segments[index].text.strip()
+        for index in valid_indices
+        if segments[index].text.strip()
+    ]
+    if len(non_empty_texts) >= 2:
+        return True
+    return _segment_range_duration_seconds(
+        segments, min(valid_indices), max(valid_indices),
+    ) >= 10.0
+
+
+def _protect_kv_v2_review_after_deletions(
+    segments: list[TranscriptSegment],
+    config: dict[str, Any],
+    matches: list[ContentMatch],
+    candidate_matches: list[ContentMatch],
+) -> tuple[list[ContentMatch], list[dict[str, Any]]]:
+    final_coverage = {
+        index
+        for match in matches
+        for index in match.segment_indices
+    }
+    existing_keys = {_match_key(match) for match in matches}
+    events: list[dict[str, Any]] = []
+    retained: list[ContentMatch] = []
+    for candidate in candidate_matches:
+        valid_indices = sorted({
+            index for index in candidate.segment_indices
+            if 0 <= index < len(segments)
+        })
+        event = {
+            "title": candidate.title,
+            "ranges": _indices_to_ranges(valid_indices),
+            "confidence": candidate.confidence,
+        }
+        if not valid_indices:
+            events.append({**event, "action": "rejected", "reason": "invalid_range"})
+            continue
+        normalized_candidate = _clone_match_with_indices(candidate, valid_indices)
+        if _match_key(normalized_candidate) in existing_keys:
+            events.append({**event, "action": "rejected", "reason": "exact_duplicate"})
+            continue
+        if (
+            candidate.content_type.strip().casefold() not in {"song", "music"}
+            or _is_invalid_audit_title(candidate.title)
+        ):
+            events.append({**event, "action": "rejected", "reason": "invalid_song_candidate"})
+            continue
+        if float(candidate.confidence) < 0.70:
+            events.append({**event, "action": "rejected", "reason": "low_confidence"})
+            continue
+        if not _kv_v2_candidate_has_song_evidence(segments, normalized_candidate):
+            events.append({**event, "action": "rejected", "reason": "weak_asr_evidence"})
+            continue
+        overlap = len(set(valid_indices) & final_coverage)
+        coverage_ratio = overlap / max(1, len(valid_indices))
+        if coverage_ratio >= 0.5:
+            events.append({
+                **event,
+                "action": "rejected",
+                "reason": "already_covered",
+                "coverage_ratio": round(coverage_ratio, 3),
+            })
+            continue
+        if overlap > 0:
+            uncovered = [idx for idx in valid_indices if idx not in final_coverage]
+            if not uncovered:
+                events.append({
+                    **event,
+                    "action": "rejected",
+                    "reason": "partial_overlap_fully_covered",
+                    "coverage_ratio": round(coverage_ratio, 3),
+                })
+                continue
+            trimmed_candidate = _clone_match_with_indices(candidate, uncovered)
+            if not _kv_v2_candidate_has_song_evidence(segments, trimmed_candidate):
+                events.append({
+                    **event,
+                    "action": "rejected",
+                    "reason": "weak_trimmed_asr_evidence",
+                    "coverage_ratio": round(coverage_ratio, 3),
+                    "uncovered_ranges": _indices_to_ranges(uncovered),
+                })
+                continue
+            trimmed_key = _match_key(trimmed_candidate)
+            if trimmed_key in existing_keys:
+                events.append({
+                    **event,
+                    "action": "rejected",
+                    "reason": "trimmed_duplicate",
+                    "coverage_ratio": round(coverage_ratio, 3),
+                })
+                continue
+            retained.append(trimmed_candidate)
+            final_coverage.update(uncovered)
+            existing_keys.add(trimmed_key)
+            events.append({
+                **event,
+                "action": "trimmed",
+                "reason": "partial_overlap_trimmed_to_uncovered",
+                "coverage_ratio": round(coverage_ratio, 3),
+                "uncovered_ranges": _indices_to_ranges(uncovered),
+            })
+            continue
+        retained.append(normalized_candidate)
+        final_coverage.update(valid_indices)
+        existing_keys.add(_match_key(normalized_candidate))
+        events.append({**event, "action": "retained", "reason": "deleted_high_confidence_missed_candidate"})
+
+    if not retained:
+        return matches, events
+    protected, normalization_events, _ = _normalize_song_matches(
+        segments, config, [*matches, *retained],
+    )
+    events.extend(normalization_events)
+    return protected, events
 
 
 def _build_song_review_clusters(
@@ -817,7 +943,7 @@ def _review_single_cluster(
         # This respects the LLM's decision to treat as one continuous performance.
         force = set()
         if (
-            not is_risk_routed_v3(config)
+            not is_risk_routed_kv(config)
             and reviewed_matches
             and len(reviewed_matches) < len(cluster)
         ):
@@ -954,6 +1080,7 @@ def _review_song_matches(
         final_events.extend(merge_events)
 
     sanitation_events: list[dict[str, Any]] = []
+    full_audit_candidates: list[ContentMatch] = []
     if full_audit_candidate_keys is not None:
         full_audit_path = llm_dir / "missed_recheck" / "audit.json"
         try:
@@ -975,6 +1102,35 @@ def _review_song_matches(
                 segments, config, final_matches, full_audit_candidates, target_ranges,
             )
 
+    kv_v2_deletion_events: list[dict[str, Any]] = []
+    if (
+        config.get("_profile_name") == "kv_v2"
+        and phase == "after_missed_recheck"
+        and full_audit_candidates
+    ):
+        final_matches, kv_v2_deletion_events = _protect_kv_v2_review_after_deletions(
+            segments, config, final_matches, full_audit_candidates,
+        )
+        retained_count = sum(
+            1 for event in kv_v2_deletion_events
+            if event.get("action") == "retained"
+        )
+        trimmed_count = sum(
+            1 for event in kv_v2_deletion_events
+            if event.get("action") == "trimmed"
+        )
+        rejected_count = sum(
+            1 for event in kv_v2_deletion_events
+            if event.get("action") == "rejected"
+        )
+        if retained_count or trimmed_count or rejected_count:
+            print(
+                f"  Song review ({phase}): kv_v2 deletion protection "
+                f"retained {retained_count}, trimmed {trimmed_count}, "
+                f"rejected {rejected_count}",
+                flush=True,
+            )
+
     summary = {
         "phase": phase,
         "input_count": len(matches),
@@ -988,6 +1144,7 @@ def _review_song_matches(
         "normalization_events": normalization_events,
         "final_normalization_events": final_events,
         "full_transcript_sanitation_events": sanitation_events,
+        "kv_v2_review_deletion_events": kv_v2_deletion_events,
         "clusters": audit_clusters,
     }
     (review_root / "summary.json").write_text(

@@ -183,7 +183,7 @@ python -m dd_clip_miner_llm batch-run "D:\input" --config config.yaml --profile 
 配置包含 `profiles` 时，音频和 ASR 由两个 profile 共享，LLM、切片和报告分别写入
 `02_asr/llm/<profile>`、`03_clips/<profile>`、`04_reports/<profile>`。
 `accuracy` 保留 task-first 和 `segment_indices`；`kv_optimized` 使用
-`risk_routed_v3`、缓存友好布局和三轮对象协议。时长、边界膨胀和重叠只作为复核风险，
+`risk_routed_kv`、缓存友好布局和三轮对象协议。时长、边界膨胀和重叠只作为复核风险，
 不会被当作全局硬过滤条件。两套 profile 共享歌曲 padding，默认
 `merge_gap_seconds: 40`。`accuracy` 显式使用本地 review 和 windowed missed-recheck；
 `kv_optimized` 固定执行 Precision Discovery、Recall Audit 和 Segmentation Adjudication。

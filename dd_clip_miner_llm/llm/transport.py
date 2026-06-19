@@ -4,7 +4,6 @@ LLM 调用、重试、流式处理。
 """
 from __future__ import annotations
 
-import time as _time
 from typing import Any
 
 from .error import _classify_error
@@ -101,13 +100,46 @@ def _next_with_idle_timeout(iterator: Any, timeout_seconds: float | None) -> tup
         return False, None
 
 
-def _is_timeout_like(exc: Exception | None, reason: str) -> bool:
+def _is_stream_unsupported_error(exc: Exception | None) -> bool:
     if exc is None:
         return False
-    if isinstance(exc, TimeoutError):
-        return True
     text = f"{type(exc).__name__} {exc}".casefold()
-    return "timeout" in text or "timed out" in text or reason == "timeout"
+    if not any(key in text for key in ("stream", "streaming", "stream_options")):
+        return False
+    return any(
+        key in text
+        for key in (
+            "unsupported",
+            "not support",
+            "does not support",
+            "unknown parameter",
+            "unrecognized",
+            "invalid parameter",
+            "not allowed",
+        )
+    )
+
+
+def _extract_response_content(response: Any) -> str:
+    content = ""
+    choice = response.choices[0] if response.choices else None
+    message = choice.message if choice is not None else None
+    if message:
+        content = message.content or ""
+        if not content.strip():
+            reasoning = getattr(message, "reasoning_content", None) or ""
+            if reasoning.strip():
+                content = reasoning
+    return content
+
+
+def _call_non_stream_without_hard_timeout(client: Any, kwargs: dict[str, Any]) -> tuple[Any, str]:
+    request_kwargs = dict(kwargs)
+    request_kwargs.pop("stream", None)
+    request_kwargs.pop("stream_options", None)
+    request_kwargs.pop("timeout", None)
+    response = _call_llm_raw(client, request_kwargs)
+    return response, _extract_response_content(response)
 
 
 def call_llm(
@@ -125,47 +157,17 @@ def call_llm(
         provider.max_retries if max_retries is None else max(1, int(max_retries))
     )
 
-    # 流式响应必须由传输级重试负责收集
-    if provider.timeout_schedule or (provider.stream and not tools):
-        response, _content = call_llm_with_transport_retry(
-            client, provider, messages,
-            tools=tools, tool_choice=tool_choice,
-            max_tokens_override=max_tokens_override,
-            timeout=timeout,
-            max_attempts=effective_max_retries,
-        )
-        return response
-
-    # 旧路径：无 timeout_schedule 时按 max_retries 指数退避
-    kwargs = _build_request_kwargs(
-        provider, messages, tools=tools, tool_choice=tool_choice,
-        max_tokens_override=max_tokens_override, timeout=timeout,
+    # Stream-first transport for all requests. Tool-call streaming is supported
+    # via _collect_stream with accumulated tool_calls. Providers that don't
+    # support streaming fall back to non-stream automatically.
+    response, _content = call_llm_with_transport_retry(
+        client, provider, messages,
+        tools=tools, tool_choice=tool_choice,
+        max_tokens_override=max_tokens_override,
+        timeout=timeout,
+        max_attempts=effective_max_retries,
     )
-    last_exc = None
-    for retry in range(effective_max_retries):
-        print(
-            f"  [llm] Request attempt {retry + 1}/{effective_max_retries} "
-            f"(timeout={kwargs['timeout']:g}s, provider={provider.name})",
-            flush=True,
-        )
-        try:
-            return _call_with_hard_timeout(
-                lambda: _call_llm_raw(client, kwargs),
-                float(kwargs["timeout"]),
-            )
-        except Exception as exc:
-            last_exc = exc
-            if retry < effective_max_retries - 1:
-                wait_time = 2 ** retry
-                print(
-                    f"  [llm] API call failed "
-                    f"(attempt {retry + 1}/{effective_max_retries}, wait {wait_time}s): {exc}",
-                    flush=True,
-                )
-                _time.sleep(wait_time)
-    if last_exc is None:
-        raise RuntimeError("call_llm was invoked with max_retries=0; no attempt was made")
-    raise last_exc
+    return response
 
 
 def call_llm_with_transport_retry(
@@ -190,11 +192,11 @@ def call_llm_with_transport_retry(
     )
     fallback_attempts = provider.max_retries if max_attempts is None else max(1, max_attempts)
     configured_schedule = provider.timeout_schedule or [provider.timeout] * fallback_attempts
-    schedule = configured_schedule[:1]
+    schedule = configured_schedule
     backoff_list = provider.retry_backoff_seconds or [2, 5]
     jitter = provider.retry_jitter_ratio
-    use_stream = False
-    stream_fallback_enabled = not tools
+    # 始终优先尝试流式。流式支持 tool_calls 累积，若不支持则走 fallback。
+    use_stream = True
 
     if use_stream:
         kwargs["stream"] = True
@@ -204,9 +206,10 @@ def call_llm_with_transport_retry(
     last_partial_content = ""
     for attempt, timeout_val in enumerate(schedule):
         kwargs["timeout"] = timeout_val
+        mode = "stream" if use_stream else "non-stream"
         print(
             f"  [llm] transport attempt {attempt + 1}/{len(schedule)} "
-            f"(timeout={timeout_val:g}s, provider={provider.name})",
+            f"({mode}, timeout={timeout_val:g}s, provider={provider.name})",
             flush=True,
         )
         try:
@@ -217,19 +220,7 @@ def call_llm_with_transport_retry(
                     idle_timeout=float(timeout_val),
                 )
             else:
-                response = _call_with_hard_timeout(
-                    lambda: _call_llm_raw(client, kwargs),
-                    float(timeout_val),
-                )
-                content = ""
-                choice = response.choices[0] if response.choices else None
-                message = choice.message if choice is not None else None
-                if message:
-                    content = message.content or ""
-                    if not content.strip():
-                        reasoning = getattr(message, "reasoning_content", None) or ""
-                        if reasoning.strip():
-                            content = reasoning
+                response, content = _call_non_stream_without_hard_timeout(client, kwargs)
             if batch_debug is not None:
                 from ..llm_debug import _record_usage, llm_response_debug
                 _record_usage(batch_debug, "transport", llm_response_debug(response), attempt=attempt + 1)
@@ -238,6 +229,23 @@ def call_llm_with_transport_retry(
             last_exc = exc.original_error
             if len(exc.partial_content) > len(last_partial_content):
                 last_partial_content = exc.partial_content
+
+            if use_stream and not exc.partial_content and _is_stream_unsupported_error(exc.original_error):
+                print(
+                    f"  [llm] stream unsupported; falling back to non-stream "
+                    f"(provider={provider.name})",
+                    flush=True,
+                )
+                response, content = _call_non_stream_without_hard_timeout(client, kwargs)
+                if batch_debug is not None:
+                    from ..llm_debug import _record_usage, llm_response_debug
+                    _record_usage(
+                        batch_debug,
+                        "transport_non_stream_fallback",
+                        llm_response_debug(response),
+                        attempt=attempt + 1,
+                    )
+                return response, content
 
             retryable, reason = _classify_error(exc.original_error)
             if not retryable:
@@ -271,6 +279,23 @@ def call_llm_with_transport_retry(
                 continue
         except Exception as exc:
             last_exc = exc
+            if use_stream and _is_stream_unsupported_error(exc):
+                print(
+                    f"  [llm] stream unsupported; falling back to non-stream "
+                    f"(provider={provider.name})",
+                    flush=True,
+                )
+                response, content = _call_non_stream_without_hard_timeout(client, kwargs)
+                if batch_debug is not None:
+                    from ..llm_debug import _record_usage, llm_response_debug
+                    _record_usage(
+                        batch_debug,
+                        "transport_non_stream_fallback",
+                        llm_response_debug(response),
+                        attempt=attempt + 1,
+                    )
+                return response, content
+
             retryable, reason = _classify_error(exc)
             if not retryable:
                 print(f"  [llm] non-retryable ({reason}): {exc}", flush=True)
@@ -302,41 +327,6 @@ def call_llm_with_transport_retry(
                 time.sleep(wait_time)
                 continue
 
-    # 传输重试耗尽
-    retryable, reason = _classify_error(last_exc) if last_exc is not None else (False, "")
-    if stream_fallback_enabled and retryable and _is_timeout_like(last_exc, reason):
-        timeout_val = float(schedule[-1])
-        stream_kwargs = dict(kwargs)
-        stream_kwargs["timeout"] = timeout_val
-        stream_kwargs["stream"] = True
-        stream_kwargs["stream_options"] = {"include_usage": True}
-        print(
-            f"  [llm] non-stream timed out; switching to stream fallback "
-            f"(idle_timeout={timeout_val:g}s, provider={provider.name})",
-            flush=True,
-        )
-        try:
-            response, content = _collect_stream(
-                client,
-                stream_kwargs,
-                idle_timeout=timeout_val,
-            )
-            if batch_debug is not None:
-                from ..llm_debug import _record_usage, llm_response_debug
-                _record_usage(
-                    batch_debug,
-                    "transport_stream_fallback",
-                    llm_response_debug(response),
-                    attempt=1,
-                )
-            return response, content
-        except StreamInterruptedError as exc:
-            last_exc = exc.original_error
-            if len(exc.partial_content) > len(last_partial_content):
-                last_partial_content = exc.partial_content
-        except Exception as exc:
-            last_exc = exc
-
     if last_partial_content:
         print(
             f"  [llm] stream interrupted, returning partial content "
@@ -360,7 +350,7 @@ def _collect_stream(
     *,
     idle_timeout: float | None = None,
 ) -> tuple[Any, str]:
-    """收集流式响应，返回 (response, content)。"""
+    """收集流式响应，返回 (response, content)。支持 tool_calls 累积。"""
     import time
 
     stream = _call_with_hard_timeout(
@@ -380,9 +370,16 @@ def _collect_stream(
         if idle_timeout is not None and idle_timeout > 0
         else None
     )
+    # tool_calls 累积：{index: {"id": str, "name": str, "arguments": str}}
+    accrued_tool_calls: dict[int, dict[str, str]] = {}
 
     try:
-        iterator = iter(stream)
+        try:
+            iterator = iter(stream)
+        except TypeError as exc:
+            raise RuntimeError(
+                "streaming unsupported: provider returned a non-stream response"
+            ) from exc
         while True:
             has_chunk, chunk = _next_with_idle_timeout(iterator, idle_timeout)
             if not has_chunk:
@@ -413,6 +410,25 @@ def _collect_stream(
                     reasoning_parts.append(rc)
                     meaningful_chars += len(rc)
                     got_text = True
+                # 累积流式 tool_calls
+                delta_tcs = getattr(delta, "tool_calls", None)
+                if delta_tcs:
+                    for tc in delta_tcs:
+                        idx = getattr(tc, "index", 0) or 0
+                        entry = accrued_tool_calls.setdefault(idx, {"id": "", "name": "", "arguments": ""})
+                        tc_id = getattr(tc, "id", None)
+                        if tc_id:
+                            entry["id"] = tc_id
+                        tc_func = getattr(tc, "function", None)
+                        if tc_func is not None:
+                            fname = getattr(tc_func, "name", None)
+                            if fname:
+                                entry["name"] = fname
+                            fargs = getattr(tc_func, "arguments", None)
+                            if fargs:
+                                entry["arguments"] += fargs
+                    # tool_calls 也算有意义的心跳
+                    last_meaningful_at = now
             if got_text:
                 last_meaningful_at = now
                 if now - last_progress_log_at >= 30.0:
@@ -442,9 +458,26 @@ def _collect_stream(
     if not content.strip() and reasoning_parts:
         content = "".join(reasoning_parts)
 
+    # 组装 tool_calls
+    tool_calls = None
+    if finish_reason == "tool_calls" and accrued_tool_calls:
+        from types import SimpleNamespace as _SN
+        assembled = []
+        for idx in sorted(accrued_tool_calls):
+            entry = accrued_tool_calls[idx]
+            assembled.append(_SN(
+                id=entry["id"],
+                type="function",
+                function=_SN(
+                    name=entry["name"],
+                    arguments=entry["arguments"],
+                ),
+            ))
+        tool_calls = assembled
+
     response = _build_llm_response(
         content=content, finish_reason=finish_reason or "stop",
-        usage=usage, model=model or "",
+        usage=usage, model=model or "", tool_calls=tool_calls,
     )
     return response, content
 
@@ -454,6 +487,7 @@ def _build_llm_response(
     finish_reason: str = "stop",
     usage: Any = None,
     model: str = "",
+    tool_calls: Any = None,
 ) -> Any:
     """构建 LLM 响应对象。"""
     from types import SimpleNamespace
@@ -461,11 +495,18 @@ def _build_llm_response(
     message = SimpleNamespace(
         content=content,
         reasoning_content="",
-        tool_calls=None,
+        tool_calls=tool_calls,
         model_dump=lambda: {
             "content": content,
             "reasoning_content": "",
-            "tool_calls": None,
+            "tool_calls": (
+                [
+                    {"id": tc.id, "type": tc.type, "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+                    for tc in tool_calls
+                ]
+                if tool_calls
+                else None
+            ),
         },
     )
     choice = SimpleNamespace(message=message, finish_reason=finish_reason)

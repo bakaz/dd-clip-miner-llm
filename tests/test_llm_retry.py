@@ -218,7 +218,9 @@ class TestTransportRetry:
     def test_returns_response_and_content(self):
         provider = _make_provider(timeout_schedule=[60])
         client = MagicMock()
-        client.chat.completions.create.return_value = _mock_response('[{"ok": true}]')
+        client.chat.completions.create.return_value = iter(
+            TestStreaming()._mock_stream_chunks('[{"ok": true}]')
+        )
 
         response, content = call_llm_with_transport_retry(
             client, provider, [{"role": "user", "content": "test"}],
@@ -227,8 +229,9 @@ class TestTransportRetry:
         assert content == '[{"ok": true}]'
         assert response is not None
         assert client.chat.completions.create.call_count == 1
+        assert client.chat.completions.create.call_args[1]["stream"] is True
 
-    def test_timeout_switches_to_stream_fallback(self):
+    def test_timeout_retries_stream_request(self):
         provider = _make_provider(timeout_schedule=[60, 120, 180])
         client = MagicMock()
         client.chat.completions.create.side_effect = [
@@ -244,8 +247,8 @@ class TestTransportRetry:
         assert content == '[{"ok": true}]'
         calls = client.chat.completions.create.call_args_list
         assert calls[0][1]["timeout"] == 60
-        assert calls[1][1]["timeout"] == 60
-        assert "stream" not in calls[0][1]
+        assert calls[1][1]["timeout"] == 120
+        assert calls[0][1]["stream"] is True
         assert calls[1][1]["stream"] is True
 
     def test_structured_json_object_continuation_appends_partial(self, monkeypatch):
@@ -301,7 +304,7 @@ class TestTransportRetry:
                     client, provider, [{"role": "user", "content": "test"}],
                 )
 
-        assert client.chat.completions.create.call_count == 2
+        assert client.chat.completions.create.call_count == 3
 
     def test_hard_timeout_interrupts_stuck_sdk_call(self):
         provider = _make_provider(timeout_schedule=[0.05])
@@ -320,7 +323,7 @@ class TestTransportRetry:
             )
 
         assert time.monotonic() - started < 1.0
-        assert client.chat.completions.create.call_count == 2
+        assert client.chat.completions.create.call_count == 1
 
     def test_reasoning_content_fallback(self):
         provider = _make_provider()
@@ -359,7 +362,7 @@ class TestTransportRetry:
                 batch_debug=batch_debug,
             )
 
-        assert any(item.get("phase") == "transport_stream_fallback" for item in batch_debug["usage"])
+        assert any(item.get("phase") == "transport" for item in batch_debug["usage"])
 
 
 # ============ call_llm backward compat ============
@@ -400,7 +403,7 @@ class TestCallLlmBackwardCompat:
 
         assert len(calls) == 2
         assert calls[0]["timeout"] == 12
-        assert "stream" not in calls[0]
+        assert calls[0]["stream"] is True
         assert calls[1]["stream"] is True
 
 
@@ -493,16 +496,19 @@ class TestRetryAfterHeader:
         except ImportError:
             error = RuntimeError("rate limited")
 
-        client.chat.completions.create.side_effect = [error, _mock_response('[{"ok": true}]')]
+        client.chat.completions.create.side_effect = [
+            error,
+            iter(TestStreaming()._mock_stream_chunks('[{"ok": true}]')),
+        ]
 
         with patch("time.sleep") as mock_sleep:
-            with pytest.raises(Exception):
-                call_llm_with_transport_retry(
-                    client, provider, [{"role": "user", "content": "test"}],
-                )
+            _response, content = call_llm_with_transport_retry(
+                client, provider, [{"role": "user", "content": "test"}],
+            )
 
-        assert not mock_sleep.called
-        assert client.chat.completions.create.call_count == 1
+        assert content == '[{"ok": true}]'
+        mock_sleep.assert_called_once_with(10.0)
+        assert client.chat.completions.create.call_count == 2
 
     def test_retry_after_capped_at_60s(self):
         provider = _make_provider(timeout_schedule=[60, 120])
@@ -518,16 +524,19 @@ class TestRetryAfterHeader:
         except ImportError:
             error = RuntimeError("rate limited")
 
-        client.chat.completions.create.side_effect = [error, _mock_response('[{"ok": true}]')]
+        client.chat.completions.create.side_effect = [
+            error,
+            iter(TestStreaming()._mock_stream_chunks('[{"ok": true}]')),
+        ]
 
         with patch("time.sleep") as mock_sleep:
-            with pytest.raises(Exception):
-                call_llm_with_transport_retry(
-                    client, provider, [{"role": "user", "content": "test"}],
-                )
+            _response, content = call_llm_with_transport_retry(
+                client, provider, [{"role": "user", "content": "test"}],
+            )
 
-        assert not mock_sleep.called
-        assert client.chat.completions.create.call_count == 1
+        assert content == '[{"ok": true}]'
+        mock_sleep.assert_called_once_with(60.0)
+        assert client.chat.completions.create.call_count == 2
 
 
 # ============ Backward Compatibility ============
@@ -610,7 +619,9 @@ class TestAuthErrorFallback:
         client1 = MagicMock()
         client1.chat.completions.create.side_effect = _make_auth_error()
         client2 = MagicMock()
-        client2.chat.completions.create.return_value = _mock_response('[{"ok": true}]')
+        client2.chat.completions.create.return_value = iter(
+            TestStreaming()._mock_stream_chunks('[{"ok": true}]')
+        )
 
         clients: dict[tuple[str | None, str, str | None], Any] = {
             (p1.base_url, p1.api_key, p1.proxy): client1,
@@ -692,10 +703,9 @@ class TestStreaming:
         """流式正常完成，返回完整内容。"""
         provider = _make_provider(stream=True, timeout_schedule=[60])
         client = MagicMock()
-        client.chat.completions.create.side_effect = [
-            _make_timeout_error(),
-            iter(self._mock_stream_chunks('[{"ok": true}]')),
-        ]
+        client.chat.completions.create.return_value = iter(
+            self._mock_stream_chunks('[{"ok": true}]')
+        )
 
         response, content = call_llm_with_transport_retry(
             client, provider, [{"role": "user", "content": "test"}],
@@ -708,26 +718,25 @@ class TestStreaming:
         """流式模式设置 stream=True 和 stream_options。"""
         provider = _make_provider(stream=True, timeout_schedule=[60])
         client = MagicMock()
-        client.chat.completions.create.side_effect = [
-            _make_timeout_error(),
-            iter(self._mock_stream_chunks('[{"ok": true}]')),
-        ]
+        client.chat.completions.create.return_value = iter(
+            self._mock_stream_chunks('[{"ok": true}]')
+        )
 
         call_llm_with_transport_retry(
             client, provider, [{"role": "user", "content": "test"}],
         )
 
         first_kwargs = client.chat.completions.create.call_args_list[0][1]
-        second_kwargs = client.chat.completions.create.call_args_list[1][1]
-        assert "stream" not in first_kwargs
-        assert second_kwargs["stream"] is True
-        assert second_kwargs["stream_options"] == {"include_usage": True}
+        assert first_kwargs["stream"] is True
+        assert first_kwargs["stream_options"] == {"include_usage": True}
 
-    def test_stream_disabled_with_tools(self):
-        """工具调用时不走流式。"""
+    def test_stream_enabled_with_tools(self):
+        """工具调用也默认走流式。"""
         provider = _make_provider(stream=True, timeout_schedule=[60])
         client = MagicMock()
-        client.chat.completions.create.return_value = _mock_response('[{"ok": true}]')
+        client.chat.completions.create.return_value = iter(
+            self._mock_stream_chunks('[{"ok": true}]')
+        )
         tools = [{"type": "function", "function": {"name": "test"}}]
 
         call_llm_with_transport_retry(
@@ -736,7 +745,90 @@ class TestStreaming:
         )
 
         call_kwargs = client.chat.completions.create.call_args[1]
-        assert "stream" not in call_kwargs
+        assert call_kwargs["stream"] is True
+        assert call_kwargs["stream_options"] == {"include_usage": True}
+        assert call_kwargs["tools"] == tools
+
+    def test_stream_tool_calls_are_accumulated(self):
+        provider = _make_provider(timeout_schedule=[60])
+        client = MagicMock()
+        tools = [{"type": "function", "function": {"name": "search_lyrics"}}]
+        chunks = [
+            SimpleNamespace(
+                choices=[SimpleNamespace(
+                    delta=SimpleNamespace(
+                        content=None,
+                        reasoning_content=None,
+                        tool_calls=[SimpleNamespace(
+                            index=0,
+                            id="call_1",
+                            function=SimpleNamespace(
+                                name="search_lyrics",
+                                arguments='{"query":"',
+                            ),
+                        )],
+                    ),
+                    finish_reason=None,
+                )],
+                usage=None,
+                model="test-model",
+            ),
+            SimpleNamespace(
+                choices=[SimpleNamespace(
+                    delta=SimpleNamespace(
+                        content=None,
+                        reasoning_content=None,
+                        tool_calls=[SimpleNamespace(
+                            index=0,
+                            id=None,
+                            function=SimpleNamespace(
+                                name=None,
+                                arguments='hello lyrics"}',
+                            ),
+                        )],
+                    ),
+                    finish_reason="tool_calls",
+                )],
+                usage=None,
+                model="test-model",
+            ),
+        ]
+        client.chat.completions.create.return_value = iter(chunks)
+
+        response, content = call_llm_with_transport_retry(
+            client,
+            provider,
+            [{"role": "user", "content": "test"}],
+            tools=tools,
+        )
+
+        assert content == ""
+        tool_call = response.choices[0].message.tool_calls[0]
+        assert tool_call.id == "call_1"
+        assert tool_call.function.name == "search_lyrics"
+        assert tool_call.function.arguments == '{"query":"hello lyrics"}'
+
+    def test_stream_unsupported_falls_back_to_non_stream_without_timeout(self):
+        provider = _make_provider(timeout_schedule=[60])
+        client = MagicMock()
+        client.chat.completions.create.side_effect = [
+            RuntimeError("streaming unsupported by this model"),
+            _mock_response('[{"ok": true}]'),
+        ]
+
+        _response, content = call_llm_with_transport_retry(
+            client,
+            provider,
+            [{"role": "user", "content": "test"}],
+        )
+
+        assert content == '[{"ok": true}]'
+        stream_kwargs = client.chat.completions.create.call_args_list[0][1]
+        fallback_kwargs = client.chat.completions.create.call_args_list[1][1]
+        assert stream_kwargs["stream"] is True
+        assert "stream" not in fallback_kwargs
+        assert "stream_options" not in fallback_kwargs
+        assert "timeout" not in fallback_kwargs
 
     def test_stream_interrupt_returns_partial(self):
         """流式中断且传输重试耗尽时，返回部分内容 + finish_reason=length。"""
@@ -754,7 +846,6 @@ class TestStreaming:
             raise ConnectionError("connection lost")
 
         client.chat.completions.create.side_effect = [
-            _make_timeout_error(),
             failing_stream(),
         ]
 
@@ -775,10 +866,7 @@ class TestStreaming:
                 time.sleep(0.02)
                 yield SimpleNamespace(choices=[], usage=None, model="test-model")
 
-        client.chat.completions.create.side_effect = [
-            _make_timeout_error(),
-            empty_heartbeats(),
-        ]
+        client.chat.completions.create.return_value = empty_heartbeats()
 
         started = time.monotonic()
         with pytest.raises(TimeoutError):
@@ -811,10 +899,7 @@ class TestStreaming:
                 model="test-model",
             )
 
-        client.chat.completions.create.side_effect = [
-            _make_timeout_error(),
-            slow_but_meaningful_stream(),
-        ]
+        client.chat.completions.create.return_value = slow_but_meaningful_stream()
 
         _response, content = call_llm_with_transport_retry(
             client, provider, [{"role": "user", "content": "test"}],
@@ -909,7 +994,7 @@ class TestStreaming:
         assert response.choices[0].message.content == '[{"ok": true}]'
         first_kwargs = client.chat.completions.create.call_args_list[0][1]
         second_kwargs = client.chat.completions.create.call_args_list[1][1]
-        assert "stream" not in first_kwargs
+        assert first_kwargs["stream"] is True
         assert second_kwargs["stream"] is True
         assert second_kwargs["timeout"] == 30
 
@@ -942,8 +1027,8 @@ class TestStreaming:
 
         assert client.chat.completions.create.call_count == 2
 
-    def test_no_stream_when_disabled(self):
-        """stream=False 时不走流式。"""
+    def test_stream_config_is_ignored(self):
+        """stream=False 不再禁用默认流式；不支持时才 fallback。"""
         provider = _make_provider(stream=False, timeout_schedule=[60])
         client = MagicMock()
         client.chat.completions.create.return_value = _mock_response('[{"ok": true}]')
@@ -952,5 +1037,7 @@ class TestStreaming:
             client, provider, [{"role": "user", "content": "test"}],
         )
 
-        call_kwargs = client.chat.completions.create.call_args[1]
-        assert "stream" not in call_kwargs
+        first_kwargs = client.chat.completions.create.call_args_list[0][1]
+        fallback_kwargs = client.chat.completions.create.call_args_list[1][1]
+        assert first_kwargs["stream"] is True
+        assert "stream" not in fallback_kwargs

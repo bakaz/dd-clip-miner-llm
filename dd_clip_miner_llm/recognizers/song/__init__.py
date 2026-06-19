@@ -1,18 +1,50 @@
-"""Song recognizer."""
+"""Song recognizer module.
+
+One entry point (SongRecognizer) dispatching to three pipelines:
+- acc: accuracy (legacy) pipeline with review + recheck
+- kv: risk_routed_kv three-stage pipeline
+- kv_v2: cache-optimized pipeline with initial_tool_choice
+"""
 from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
 
-from . import register
-from .base import BaseRecognizer
-from ..config import (
+from .. import register
+from ..base import BaseRecognizer
+from ...config import (
     get_llm_config,
-    get_padding_config,
-    is_risk_routed_v3,
+    is_risk_routed_kv,
+    song_pipeline_strategy,
 )
-from ..models import ContentMatch, TranscriptSegment
-from ..search_tools import get_tools
+from ...models import ContentMatch, TranscriptSegment
+from ...search_tools import get_tools
+
+
+_KV_V2_MAIN_OVERLAY = """【KV_V2 召回强化】
+- 必须先完整扫描全部 ASR 段落，标记所有可能是演唱的连续区间，再识别歌名。
+- 无法确认歌名的演唱也要输出，title 填写"未知歌曲：..."加代表性歌词。
+- 搜索工具仅用于确认歌名；搜索失败、未搜索、无法确认歌名时，不得删除已标记的演唱区间。
+- 短歌（< 2 分钟）、外语段落、谐音歌词、ASR 乱码、碎片歌词、哼唱/拟声都必须保留。
+- 输出数量不设上限，宁可多报不可漏报。
+"""
+
+
+def _kv_v2_main_overlay(config: dict[str, Any]) -> str:
+    """Return kv_v2 main-only prompt overlay, empty for other profiles/phases."""
+    if config.get("_profile_name") == "kv_v2" and config.get("_debug_phase") == "main":
+        return _KV_V2_MAIN_OVERLAY
+    return ""
+
+
+def _detect_pipeline(config: dict[str, Any]) -> str:
+    """Detect which pipeline to use: acc, kv, or kv_v2."""
+    strategy = song_pipeline_strategy(config)
+    if strategy == "risk_routed_kv":
+        return "kv"
+    if config.get("_profile_name") == "kv_v2":
+        return "kv_v2"
+    return "acc"
 
 
 @register
@@ -106,7 +138,7 @@ class SongRecognizer(BaseRecognizer):
 完整性检查（必须执行）：
 - 在生成 JSON 前，从第一个 segment 到最后一个 segment 按顺序检查一遍，先找出全部演唱区间，再识别歌名。
 - 搜索工具只用于确认歌名，不能因为未搜索、搜索失败或无法确认歌名而删除演唱区间。
-- 外语谐音、ASR 乱码、只能听出零碎歌词的演唱也必须输出；无法命名时使用“未知歌曲：...”。
+- 外语谐音、ASR 乱码、只能听出零碎歌词的演唱也必须输出；无法命名时使用"未知歌曲：..."。
 - 输出歌曲数量不设上限。最终数组必须覆盖你判断为演唱的每一个连续区间，不能只返回能确认歌名的歌曲。
 """
             output_example = (
@@ -163,8 +195,9 @@ Whisper ASR 转写特性（重要）：
 - 歌词内容明显是某首已知歌曲。
 
 {tool_instruction}
-宁可返回“未知歌曲”也不要漏掉任何演唱片段。
+宁可返回"未知歌曲"也不要漏掉任何演唱片段。
 {coverage_instruction}
+{_kv_v2_main_overlay(config)}
 
 输出要求：
 - 只返回 JSON 数组，不要 Markdown，不要解释，不要代码块。
@@ -192,7 +225,7 @@ Whisper ASR 转写特性（重要）：
         return super().parse_response(normalized, config)
 
     def get_tools(self, config: dict[str, Any]) -> list[dict[str, Any]] | None:
-        if is_risk_routed_v3(config) and not get_llm_config(config).get(
+        if is_risk_routed_kv(config) and not get_llm_config(config).get(
             "song_tools_enabled", False
         ):
             return None
@@ -217,37 +250,23 @@ Whisper ASR 转写特性（重要）：
     ) -> list[ContentMatch]:
         import json as _json
 
-        from ..song_postprocess import (
-            _recheck_overlong_song_matches,
-            _recheck_uncovered_song_segments,
-            _review_song_matches,
-        )
-
         (llm_dir / "initial_matches.json").write_text(
             _json.dumps([m.to_dict() for m in matches], ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
 
-        if is_risk_routed_v3(config):
-            from ..song_postprocess.song_kv import run_risk_routed_v3_pipeline
+        pipeline = _detect_pipeline(config)
+        print(f"  Song pipeline: {pipeline}", flush=True)
 
-            return run_risk_routed_v3_pipeline(segments, config, self, llm_dir)
-
-        matches = _review_song_matches(
-            segments, config, self, matches, llm_dir,
-            phase="before_missed_recheck",
-        )
-        matches = _recheck_overlong_song_matches(
-            segments, config, self, matches, llm_dir,
-        )
-        matches = _recheck_uncovered_song_segments(
-            segments, config, self, matches, llm_dir,
-        )
-        matches = _review_song_matches(
-            segments, config, self, matches, llm_dir,
-            phase="after_missed_recheck",
-        )
-        return matches
+        if pipeline == "kv":
+            from .kv import run as run_kv
+            return run_kv(segments, config, self, llm_dir, matches=matches)
+        elif pipeline == "kv_v2":
+            from .kv_v2 import run as run_kv_v2
+            return run_kv_v2(segments, config, self, llm_dir, matches=matches)
+        else:
+            from .acc import run as run_acc
+            return run_acc(segments, config, self, llm_dir, matches=matches)
 
 
 def _expand_segment_ranges(value: Any) -> list[int]:

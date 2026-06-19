@@ -577,7 +577,7 @@ class TestSongMissedRecheck:
     def test_shipped_kv_profile_uses_fixed_risk_routed_pipeline(self):
         config = load_config("config.example.yaml", profile="kv_optimized")
 
-        assert config["song"]["pipeline"]["strategy"] == "risk_routed_v3"
+        assert config["song"]["pipeline"]["strategy"] == "risk_routed_kv"
         assert config["song"]["pipeline"]["runtime_adaptive"] == "fixed_three_stage"
         assert config["song"]["pipeline"]["stages"] == {
             "discovery": "precision",
@@ -893,6 +893,174 @@ class TestSongMissedRecheck:
         assert kept == [(1, 2)]
         assert skipped == 1
 
+    def test_kv_v2_review_after_protection_retains_deleted_missed_candidate(self):
+        from dd_clip_miner_llm.song_postprocess.review import (
+            _protect_kv_v2_review_after_deletions,
+        )
+
+        segments = [
+            TranscriptSegment(start=0.0, end=5.0, text="聊天"),
+            TranscriptSegment(start=5.0, end=10.0, text="歌词第一句"),
+            TranscriptSegment(start=10.0, end=15.0, text="歌词第二句"),
+        ]
+        candidate = ContentMatch(
+            content_type="song",
+            title="未知歌曲：歌词第一句",
+            segment_indices=[1, 2],
+            confidence=0.82,
+        )
+
+        protected, events = _protect_kv_v2_review_after_deletions(
+            segments,
+            DEFAULT_CONFIG,
+            [],
+            [candidate],
+        )
+
+        assert [match.title for match in protected] == ["未知歌曲：歌词第一句"]
+        assert events[0]["action"] == "retained"
+        assert events[0]["reason"] == "deleted_high_confidence_missed_candidate"
+
+    def test_kv_v2_review_after_protection_does_not_duplicate_covered_candidate(self):
+        from dd_clip_miner_llm.song_postprocess.review import (
+            _protect_kv_v2_review_after_deletions,
+        )
+
+        segments = [
+            TranscriptSegment(start=0.0, end=5.0, text="歌词第一句"),
+            TranscriptSegment(start=5.0, end=10.0, text="歌词第二句"),
+        ]
+        existing = ContentMatch(
+            content_type="song",
+            title="已有歌曲",
+            segment_indices=[0, 1],
+            confidence=0.9,
+        )
+        candidate = ContentMatch(
+            content_type="song",
+            title="未知歌曲：歌词第一句",
+            segment_indices=[0, 1],
+            confidence=0.82,
+        )
+
+        protected, events = _protect_kv_v2_review_after_deletions(
+            segments,
+            DEFAULT_CONFIG,
+            [existing],
+            [candidate],
+        )
+
+        assert protected == [existing]
+        assert events[0]["action"] == "rejected"
+        assert events[0]["reason"] == "already_covered"
+
+    def test_kv_v2_review_after_protection_trims_partial_overlap_with_evidence(self):
+        from dd_clip_miner_llm.song_postprocess.review import (
+            _protect_kv_v2_review_after_deletions,
+        )
+
+        segments = [
+            TranscriptSegment(start=0.0, end=5.0, text="歌词已覆盖"),
+            TranscriptSegment(start=5.0, end=10.0, text="歌词第一句"),
+            TranscriptSegment(start=10.0, end=15.0, text="歌词第二句"),
+        ]
+        existing = ContentMatch("song", "已有歌曲", [0], 0.9)
+        candidate = ContentMatch("song", "未知歌曲：歌词第一句", [0, 1, 2], 0.82)
+
+        protected, events = _protect_kv_v2_review_after_deletions(
+            segments,
+            DEFAULT_CONFIG,
+            [existing],
+            [candidate],
+        )
+
+        assert len(protected) == 2
+        assert protected[1].segment_indices == [1, 2]
+        assert events[0]["action"] == "trimmed"
+        assert events[0]["reason"] == "partial_overlap_trimmed_to_uncovered"
+        assert events[0]["uncovered_ranges"] == [[1, 2]]
+
+    def test_kv_v2_review_after_protection_rejects_weak_trimmed_overlap(self):
+        from dd_clip_miner_llm.song_postprocess.review import (
+            _protect_kv_v2_review_after_deletions,
+        )
+
+        segments = [
+            TranscriptSegment(start=0.0, end=5.0, text="歌词第一句"),
+            TranscriptSegment(start=5.0, end=8.0, text="普通聊天"),
+            TranscriptSegment(start=8.0, end=11.0, text=""),
+        ]
+        existing = ContentMatch("song", "已有歌曲", [0], 0.9)
+        candidate = ContentMatch("song", "未知歌曲：歌词第一句", [0, 1, 2], 0.82)
+
+        protected, events = _protect_kv_v2_review_after_deletions(
+            segments,
+            DEFAULT_CONFIG,
+            [existing],
+            [candidate],
+        )
+
+        assert protected == [existing]
+        assert events[0]["action"] == "rejected"
+        assert events[0]["reason"] == "weak_trimmed_asr_evidence"
+
+    def test_kv_v2_survival_audit_records_stage_deltas(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        import json
+        import dd_clip_miner_llm.song_postprocess as song_postprocess
+        from dd_clip_miner_llm.recognizers.song import acc
+
+        config = deep_merge(DEFAULT_CONFIG, {"_profile_name": "kv_v2"})
+        segments = [
+            TranscriptSegment(0.0, 5.0, "歌词第一句"),
+            TranscriptSegment(5.0, 10.0, "歌词第二句"),
+        ]
+        first = ContentMatch("song", "第一首", [0], 0.9)
+        second = ContentMatch("song", "第二首", [1], 0.9)
+
+        def fake_review(_segments, _config, _recognizer, matches, llm_dir, *, phase):
+            if phase == "after_missed_recheck":
+                summary_dir = llm_dir / "review" / "after_missed_recheck"
+                summary_dir.mkdir(parents=True, exist_ok=True)
+                (summary_dir / "summary.json").write_text(
+                    json.dumps({
+                        "kv_v2_review_deletion_events": [
+                            {"action": "trimmed", "reason": "test"}
+                        ]
+                    }),
+                    encoding="utf-8",
+                )
+                return [match for match in matches if match.title != "第一首"]
+            return matches
+
+        monkeypatch.setattr(song_postprocess, "_review_song_matches", fake_review)
+        monkeypatch.setattr(
+            song_postprocess,
+            "_recheck_overlong_song_matches",
+            lambda _segments, _config, _recognizer, matches, _llm_dir: matches,
+        )
+        monkeypatch.setattr(
+            song_postprocess,
+            "_recheck_uncovered_song_segments",
+            lambda _segments, _config, _recognizer, matches, _llm_dir: [*matches, second],
+        )
+
+        result = acc.run(segments, config, object(), tmp_path, matches=[first])
+        audit = json.loads((tmp_path / "survival_audit.json").read_text(encoding="utf-8"))
+
+        assert [match.title for match in result] == ["第二首"]
+        assert audit["profile"] == "kv_v2"
+        assert audit["review_after_deletion_event_counts"] == {"trimmed": 1}
+        missed = next(stage for stage in audit["stages"] if stage["stage"] == "missed_recheck")
+        assert missed["added_count"] == 1
+        assert missed["coverage_delta"] == 1
+        review_after = next(stage for stage in audit["stages"] if stage["stage"] == "review_after")
+        assert review_after["removed_count"] == 1
+        assert review_after["coverage_delta"] == -1
+
     def test_recheck_ranges_include_context_but_keep_core_matches(self, tmp_path, monkeypatch):
         from dd_clip_miner_llm.song_postprocess import _recheck_uncovered_song_segments
         from dd_clip_miner_llm.recognizers import get_recognizer
@@ -1014,6 +1182,28 @@ class TestSongMissedRecheck:
         assert recognizer.get_tools(sample_config) == review.get_tools(sample_config)
         assert "[[1,2]]" in review_messages[1]["content"]
         assert "[[0,2]]" in review_messages[1]["content"]
+
+    def test_kv_v2_overlay_only_applies_to_main_phase(self, sample_segments, sample_config):
+        from dd_clip_miner_llm.llm import build_llm_messages
+        from dd_clip_miner_llm.recognizers import get_recognizer
+
+        sample_config["_profile_name"] = "kv_v2"
+        sample_config["llm"]["cache_friendly_prompt_layout"] = True
+        recognizer = get_recognizer("song")
+
+        main_messages = build_llm_messages(
+            recognizer, sample_segments, 0, sample_config, debug_phase="main",
+        )
+        review_messages = build_llm_messages(
+            recognizer, sample_segments, 0, sample_config, debug_phase="review_after",
+        )
+        missed_messages = build_llm_messages(
+            recognizer, sample_segments, 0, sample_config, debug_phase="missed_recheck",
+        )
+
+        assert "KV_V2 召回强化" in main_messages[1]["content"]
+        assert "KV_V2 召回强化" not in review_messages[1]["content"]
+        assert "KV_V2 召回强化" not in missed_messages[1]["content"]
 
     def test_filter_matches_to_segment_ranges_rejects_covered_indices(self):
         from dd_clip_miner_llm.song_postprocess import _filter_matches_to_segment_ranges
@@ -2681,7 +2871,7 @@ class TestCLI:
         missed = config["profiles"]["kv_optimized"]["song"]["missed_recheck"]
         review = config["profiles"]["kv_optimized"]["song"]["review"]
         pipeline = config["profiles"]["kv_optimized"]["song"]["pipeline"]
-        assert pipeline["strategy"] == "risk_routed_v3"
+        assert pipeline["strategy"] == "risk_routed_kv"
         assert pipeline["stages"]["discovery"] == "precision"
         assert pipeline["stages"]["recall_audit"] == "uncovered_evidence"
         assert pipeline["stages"]["adjudication"] == "full_transcript"

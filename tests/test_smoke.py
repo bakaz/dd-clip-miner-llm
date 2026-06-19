@@ -5,6 +5,7 @@ import json
 import tempfile
 from pathlib import Path
 from copy import deepcopy
+from types import SimpleNamespace
 
 import pytest
 
@@ -315,6 +316,10 @@ class TestLLM:
             {**base, "scan_incomplete": True},
             expected_metadata=metadata,
         )
+        assert not batch_debug_is_reusable(
+            {**base, "schema_valid": False},
+            expected_metadata=metadata,
+        )
 
     def test_truncated_json_array_continues_without_repeating_items(self):
         from dd_clip_miner_llm.llm import (
@@ -398,7 +403,7 @@ class TestLLM:
         assert "(0.0s-3.0s)" not in song_user
         assert "[0] (0.0s-3.0s)" in dialogue_user
 
-    def test_final_tool_round_keeps_tools_and_disables_tool_calls(self):
+    def test_final_tool_round_keeps_tools_and_disables_tool_calls(self, monkeypatch):
         from dd_clip_miner_llm.llm import LLMProvider, run_llm_with_tools
 
         calls = []
@@ -423,22 +428,20 @@ class TestLLM:
                     "prompt_cache_miss_tokens": 2,
                 }
 
-        class Completions:
-            def create(self, **kwargs):
-                calls.append(kwargs)
-                choice = type("Choice", (), {
-                    "message": Message(),
-                    "finish_reason": "stop",
-                })()
-                return type("Response", (), {
-                    "choices": [choice],
-                    "usage": Usage(),
-                    "model": "test-model",
-                })()
+        def fake_call_llm(_client, _provider, messages, **kwargs):
+            calls.append({**kwargs, "messages": messages})
+            choice = type("Choice", (), {
+                "message": Message(),
+                "finish_reason": "stop",
+            })()
+            return type("Response", (), {
+                "choices": [choice],
+                "usage": Usage(),
+                "model": "test-model",
+            })()
 
-        client = type("Client", (), {
-            "chat": type("Chat", (), {"completions": Completions()})(),
-        })()
+        monkeypatch.setattr("dd_clip_miner_llm.llm.tools.call_llm", fake_call_llm)
+        client = object()
         tools = [{"type": "function", "function": {"name": "search", "parameters": {}}}]
         debug = {}
 
@@ -456,10 +459,10 @@ class TestLLM:
         assert result == "[]"
         assert calls[0]["tools"] == tools
         assert calls[0]["tool_choice"] == "none"
-        assert calls[0]["max_tokens"] == 32768
+        assert calls[0]["max_tokens_override"] == 32768
         assert debug["usage"][0]["prompt_cache_hit_tokens"] == 8
 
-    def test_force_final_tool_round_retries_prose_as_json(self):
+    def test_force_final_tool_round_retries_prose_as_json(self, monkeypatch):
         from dd_clip_miner_llm.llm import LLMProvider, run_llm_with_tools
 
         calls = []
@@ -486,23 +489,21 @@ class TestLLM:
                     "prompt_cache_miss_tokens": 2,
                 }
 
-        class Completions:
-            def create(self, **kwargs):
-                calls.append(kwargs)
-                content = "分析后没有漏检歌曲。" if len(calls) == 1 else "[]"
-                choice = type("Choice", (), {
-                    "message": Message(content),
-                    "finish_reason": "stop",
-                })()
-                return type("Response", (), {
-                    "choices": [choice],
-                    "usage": Usage(),
-                    "model": "test-model",
-                })()
+        def fake_call_llm(_client, _provider, messages, **kwargs):
+            calls.append({**kwargs, "messages": messages})
+            content = "分析后没有漏检歌曲。" if len(calls) == 1 else "[]"
+            choice = type("Choice", (), {
+                "message": Message(content),
+                "finish_reason": "stop",
+            })()
+            return type("Response", (), {
+                "choices": [choice],
+                "usage": Usage(),
+                "model": "test-model",
+            })()
 
-        client = type("Client", (), {
-            "chat": type("Chat", (), {"completions": Completions()})(),
-        })()
+        monkeypatch.setattr("dd_clip_miner_llm.llm.tools.call_llm", fake_call_llm)
+        client = object()
         tools = [{"type": "function", "function": {"name": "search", "parameters": {}}}]
         final_instruction = "重新扫描全部目标，只返回 JSON。"
 
@@ -533,6 +534,450 @@ class TestLLM:
             "content": final_instruction,
         }
 
+    def test_initial_tool_choice_none_returns_valid_json_without_tools(self, monkeypatch):
+        from dd_clip_miner_llm.llm import LLMProvider, run_llm_with_tools
+
+        calls = []
+
+        class Message:
+            content = '[{"content_type":"song","title":"A","segment_ranges":[[1,2]]}]'
+            reasoning_content = ""
+            tool_calls = None
+
+            def model_dump(self):
+                return {
+                    "content": self.content,
+                    "reasoning_content": self.reasoning_content,
+                    "tool_calls": self.tool_calls,
+                }
+
+        class Usage:
+            def model_dump(self):
+                return {"prompt_tokens": 10}
+
+        def fake_call_llm(_client, _provider, messages, **kwargs):
+            calls.append({**kwargs, "messages": messages})
+            choice = type("Choice", (), {
+                "message": Message(),
+                "finish_reason": "stop",
+            })()
+            return type("Response", (), {
+                "choices": [choice],
+                "usage": Usage(),
+                "model": "test-model",
+            })()
+
+        monkeypatch.setattr("dd_clip_miner_llm.llm.tools.call_llm", fake_call_llm)
+
+        result = run_llm_with_tools(
+            object(),
+            LLMProvider(api_key="test"),
+            [{"role": "user", "content": "test"}],
+            [{"type": "function", "function": {"name": "search", "parameters": {}}}],
+            lambda *_args: "{}",
+            {},
+            max_tool_rounds=1,
+            initial_tool_choice="none",
+        )
+
+        assert result == Message.content
+        assert len(calls) == 1
+        assert calls[0]["tool_choice"] == "none"
+
+    def test_initial_tool_choice_none_continues_on_empty_json(self, monkeypatch):
+        from dd_clip_miner_llm.llm import LLMProvider, run_llm_with_tools
+
+        calls = []
+
+        class Message:
+            reasoning_content = ""
+            tool_calls = None
+
+            def __init__(self, content):
+                self.content = content
+
+            def model_dump(self):
+                return {
+                    "content": self.content,
+                    "reasoning_content": self.reasoning_content,
+                    "tool_calls": self.tool_calls,
+                }
+
+        class Usage:
+            def model_dump(self):
+                return {"prompt_tokens": 10}
+
+        def fake_call_llm(_client, _provider, messages, **kwargs):
+            calls.append({**kwargs, "messages": messages})
+            content = "[]" if len(calls) == 1 else '[{"title":"fallback","segment_ranges":[[1,2]]}]'
+            choice = type("Choice", (), {
+                "message": Message(content),
+                "finish_reason": "stop",
+            })()
+            return type("Response", (), {
+                "choices": [choice],
+                "usage": Usage(),
+                "model": "test-model",
+            })()
+
+        debug = {}
+        monkeypatch.setattr("dd_clip_miner_llm.llm.tools.call_llm", fake_call_llm)
+
+        result = run_llm_with_tools(
+            object(),
+            LLMProvider(api_key="test"),
+            [{"role": "user", "content": "test"}],
+            [{"type": "function", "function": {"name": "search", "parameters": {}}}],
+            lambda *_args: "{}",
+            debug,
+            max_tool_rounds=2,
+            initial_tool_choice="none",
+        )
+
+        assert result == '[{"title":"fallback","segment_ranges":[[1,2]]}]'
+        assert [call["tool_choice"] for call in calls] == ["none", "auto"]
+        assert debug["tool_strategy_events"][0]["action"] == "continue_with_auto_tools"
+
+    def test_content_validator_rejects_string_array_and_continues_with_tools(self, monkeypatch):
+        from dd_clip_miner_llm.llm import LLMProvider, run_llm_with_tools
+
+        calls = []
+
+        class Message:
+            reasoning_content = ""
+            tool_calls = None
+
+            def __init__(self, content):
+                self.content = content
+
+            def model_dump(self):
+                return {
+                    "content": self.content,
+                    "reasoning_content": self.reasoning_content,
+                    "tool_calls": self.tool_calls,
+                }
+
+        class Usage:
+            def model_dump(self):
+                return {"prompt_tokens": 10}
+
+        def fake_call_llm(_client, _provider, messages, **kwargs):
+            calls.append({**kwargs, "messages": messages})
+            content = '["歌词1","歌词2"]' if len(calls) == 1 else '[{"title":"fallback","segment_ranges":[[1,2]]}]'
+            choice = type("Choice", (), {
+                "message": Message(content),
+                "finish_reason": "stop",
+            })()
+            return type("Response", (), {
+                "choices": [choice],
+                "usage": Usage(),
+                "model": "test-model",
+            })()
+
+        def validator(content):
+            if content.startswith('["'):
+                return False, {
+                    "reason": "invalid_song_match_schema",
+                    "raw_item_count": 2,
+                    "parsed_match_count": 0,
+                }
+            return True, {
+                "raw_item_count": 1,
+                "parsed_match_count": 1,
+            }
+
+        debug = {}
+        monkeypatch.setattr("dd_clip_miner_llm.llm.tools.call_llm", fake_call_llm)
+
+        result = run_llm_with_tools(
+            object(),
+            LLMProvider(api_key="test"),
+            [{"role": "user", "content": "test"}],
+            [{"type": "function", "function": {"name": "search", "parameters": {}}}],
+            lambda *_args: "{}",
+            debug,
+            max_tool_rounds=2,
+            initial_tool_choice="none",
+            content_validator=validator,
+        )
+
+        assert result == '[{"title":"fallback","segment_ranges":[[1,2]]}]'
+        assert [call["tool_choice"] for call in calls] == ["none", "auto"]
+        assert debug["content_validation"][0]["valid"] is False
+        assert debug["tool_strategy_events"][0]["reason"] == "invalid_song_match_schema"
+
+    def test_tool_role_unsupported_retries_with_user_tool_results(self, monkeypatch):
+        from dd_clip_miner_llm.llm import LLMProvider, run_llm_with_tools
+
+        calls = []
+
+        class Function:
+            name = "search_lyrics"
+            arguments = '{"query":"lyrics"}'
+
+        class ToolCall:
+            id = "call_1"
+            function = Function()
+
+        class Message:
+            reasoning_content = ""
+
+            def __init__(self, content="", tool_calls=None):
+                self.content = content
+                self.tool_calls = tool_calls
+
+            def model_dump(self):
+                return {
+                    "content": self.content,
+                    "reasoning_content": self.reasoning_content,
+                    "tool_calls": (
+                        [
+                            {
+                                "id": tc.id,
+                                "type": "function",
+                                "function": {
+                                    "name": tc.function.name,
+                                    "arguments": tc.function.arguments,
+                                },
+                            }
+                            for tc in self.tool_calls
+                        ]
+                        if self.tool_calls
+                        else None
+                    ),
+                }
+
+        class Usage:
+            def model_dump(self):
+                return {"prompt_tokens": 10}
+
+        def response(content="", tool_calls=None, finish_reason="stop"):
+            choice = type("Choice", (), {
+                "message": Message(content, tool_calls),
+                "finish_reason": finish_reason,
+            })()
+            return type("Response", (), {
+                "choices": [choice],
+                "usage": Usage(),
+                "model": "test-model",
+            })()
+
+        def fake_call_llm(_client, _provider, messages, **kwargs):
+            calls.append({**kwargs, "messages": messages})
+            if len(calls) == 1:
+                return response(tool_calls=[ToolCall()], finish_reason="tool_calls")
+            if any(message.get("role") == "tool" for message in messages):
+                raise RuntimeError("Param Incorrect: messages[2] role is not supported")
+            return response('[{"title":"A","segment_ranges":[[1,2]]}]')
+
+        monkeypatch.setattr("dd_clip_miner_llm.llm.tools.call_llm", fake_call_llm)
+        debug = {}
+
+        result = run_llm_with_tools(
+            object(),
+            LLMProvider(api_key="test"),
+            [{"role": "user", "content": "test"}],
+            [{"type": "function", "function": {"name": "search_lyrics", "parameters": {}}}],
+            lambda _name, _args: '{"results":[{"title":"A"}]}',
+            debug,
+            max_tool_rounds=1,
+        )
+
+        assert result == '[{"title":"A","segment_ranges":[[1,2]]}]'
+        assert len(calls) == 3
+        assert calls[1]["tool_choice"] == "none"
+        assert any(message.get("role") == "tool" for message in calls[1]["messages"])
+        assert calls[2]["tools"] is None
+        assert not any(message.get("role") == "tool" for message in calls[2]["messages"])
+        assert "工具调用得到的结果" in calls[2]["messages"][-1]["content"]
+        assert debug["tool_strategy_events"][-1]["reason"] == "tool_role_unsupported"
+
+    def test_tool_role_unsupported_without_tool_message_is_not_rewritten(
+        self,
+        monkeypatch,
+    ):
+        from dd_clip_miner_llm.llm.provider import LLMProvider
+        from dd_clip_miner_llm.llm.tools import run_llm_with_tools
+
+        calls = []
+
+        def fake_call_llm(_client, _provider, messages, **kwargs):
+            calls.append({**kwargs, "messages": messages})
+            raise RuntimeError("Param Incorrect: messages[0] role is not supported")
+
+        monkeypatch.setattr("dd_clip_miner_llm.llm.tools.call_llm", fake_call_llm)
+
+        with pytest.raises(RuntimeError, match="role is not supported"):
+            run_llm_with_tools(
+                object(),
+                LLMProvider(api_key="test"),
+                [{"role": "user", "content": "test"}],
+                [{"type": "function", "function": {"name": "search_lyrics", "parameters": {}}}],
+                lambda _name, _args: "{}",
+                {},
+                max_tool_rounds=0,
+            )
+
+        assert len(calls) == 1
+
+    def test_kv_v2_main_replays_invalid_song_schema(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        from dd_clip_miner_llm.llm.identify import _process_single_batch
+        from dd_clip_miner_llm.llm.provider import LLMProvider
+
+        recognizer = get_recognizer("song")
+        segments = [TranscriptSegment(0.0, 5.0, "歌词第一句")]
+        config = deepcopy(DEFAULT_CONFIG)
+        config["_profile_name"] = "kv_v2"
+        config["llm"]["debug_store_requests"] = False
+        calls = []
+
+        def fake_run_llm_with_tools(*_args, **kwargs):
+            calls.append(kwargs)
+            assert kwargs.get("content_validator") is not None
+            if len(calls) == 1:
+                return '["歌词1","歌词2"]'
+            return (
+                '[{"content_type":"song","title":"测试",'
+                '"segment_ranges":[[0,0]],"confidence":0.9,'
+                '"tags":[],"description":"","artist":""}]'
+            )
+
+        monkeypatch.setattr(
+            "dd_clip_miner_llm.llm.identify.run_llm_with_tools",
+            fake_run_llm_with_tools,
+        )
+        monkeypatch.setattr("time.sleep", lambda _seconds: None)
+        provider = LLMProvider(
+            name="test",
+            api_key="key",
+            base_url="https://api.test/v1",
+            result_retries=1,
+        )
+
+        matches = _process_single_batch(
+            batch_idx=1,
+            batch_count=1,
+            batch_start=0,
+            batch_segments=segments,
+            segments=segments,
+            config=config,
+            recognizer=recognizer,
+            providers=[provider],
+            clients={(provider.base_url, provider.api_key, provider.proxy): object()},
+            tools=[{"type": "function", "function": {"name": "search_lyrics"}}],
+            debug_path=tmp_path,
+            debug_phase="main",
+            store_requests=False,
+            reuse_valid_batches=False,
+            content_type="song",
+        )
+
+        saved = json.loads((tmp_path / "llm_batch_000000.json").read_text(encoding="utf-8"))
+        assert len(matches) == 1
+        assert len(calls) == 2
+        assert saved["schema_valid"] is True
+        assert saved["schema_validation_failures"][0]["schema_error_reason"] == "invalid_song_match_schema"
+
+    def test_kv_v2_empty_array_invalid_only_with_singing_evidence(self):
+        from dd_clip_miner_llm.llm.identify import _validate_song_match_content
+
+        recognizer = get_recognizer("song")
+        config = deepcopy(DEFAULT_CONFIG)
+        singing_segments = [
+            TranscriptSegment(0.0, 5.0, "歌词第一句"),
+            TranscriptSegment(5.0, 10.0, "歌词第二句"),
+        ]
+        chat_segments = [
+            TranscriptSegment(0.0, 5.0, "今天月亮很好看"),
+            TranscriptSegment(5.0, 10.0, "我心情不错"),
+            TranscriptSegment(10.0, 15.0, "我们继续聊天"),
+        ]
+
+        singing_valid, singing_details = _validate_song_match_content(
+            "[]", recognizer, config, segments=singing_segments,
+        )
+        chat_valid, chat_details = _validate_song_match_content(
+            "[]", recognizer, config, segments=chat_segments,
+        )
+
+        assert singing_valid is False
+        assert singing_details["schema_error_reason"] == "empty_song_match_array"
+        assert chat_valid is True
+        assert chat_details["schema_error_reason"] is None
+
+    @pytest.mark.parametrize(
+        ("profile", "debug_phase", "expected_initial_tool_choice"),
+        [
+            ("kv_v2", "main", "none"),
+            ("kv_v2", "review_before", None),
+            ("kv_v2", "missed_recheck", None),
+            ("kv_v2", "review_after", None),
+            ("kv_optimized", "main", None),
+            ("accuracy", "main", None),
+        ],
+    )
+    def test_kv_v2_main_identify_uses_initial_no_tools_only_there(
+        self,
+        tmp_path,
+        monkeypatch,
+        profile,
+        debug_phase,
+        expected_initial_tool_choice,
+    ):
+        from dd_clip_miner_llm.llm.identify import _process_single_batch
+        from dd_clip_miner_llm.llm.provider import LLMProvider
+
+        recognizer = get_recognizer("song")
+        segments = [TranscriptSegment(0.0, 5.0, "歌词第一句")]
+        config = deepcopy(DEFAULT_CONFIG)
+        config["_profile_name"] = profile
+        config["llm"]["debug_store_requests"] = False
+        captured = {}
+
+        def fake_run_llm_with_tools(*_args, **kwargs):
+            captured["initial_tool_choice"] = kwargs.get("initial_tool_choice")
+            return (
+                '[{"content_type":"song","title":"测试",'
+                '"segment_ranges":[[0,0]],"confidence":0.9,'
+                '"tags":[],"description":"","artist":""}]'
+            )
+
+        monkeypatch.setattr(
+            "dd_clip_miner_llm.llm.identify.run_llm_with_tools",
+            fake_run_llm_with_tools,
+        )
+        provider = LLMProvider(
+            name="test",
+            api_key="key",
+            base_url="https://api.test/v1",
+            result_retries=0,
+        )
+
+        matches = _process_single_batch(
+            batch_idx=1,
+            batch_count=1,
+            batch_start=0,
+            batch_segments=segments,
+            segments=segments,
+            config=config,
+            recognizer=recognizer,
+            providers=[provider],
+            clients={(provider.base_url, provider.api_key, provider.proxy): object()},
+            tools=[{"type": "function", "function": {"name": "search_lyrics"}}],
+            debug_path=tmp_path,
+            debug_phase=debug_phase,
+            store_requests=False,
+            reuse_valid_batches=False,
+            content_type="song",
+        )
+
+        assert len(matches) == 1
+        assert captured["initial_tool_choice"] == expected_initial_tool_choice
+
     def test_deepseek_uses_max_tokens_for_completion_limit(self):
         from dd_clip_miner_llm.llm import LLMProvider, call_llm
 
@@ -541,7 +986,13 @@ class TestLLM:
         class Completions:
             def create(self, **kwargs):
                 calls.append(kwargs)
-                return object()
+                choice = SimpleNamespace(
+                    delta=SimpleNamespace(content="ok", reasoning_content=None),
+                    finish_reason="stop",
+                )
+                return iter([
+                    SimpleNamespace(choices=[choice], usage=None, model="test-model"),
+                ])
 
         client = type("Client", (), {
             "chat": type("Chat", (), {"completions": Completions()})(),
@@ -572,7 +1023,18 @@ class TestLLM:
                 calls.append(kwargs)
                 if len(calls) == 1:
                     raise TimeoutError("test timeout")
-                return object()
+                choice = SimpleNamespace(
+                    delta=SimpleNamespace(content="ok", reasoning_content=None),
+                    finish_reason=None,
+                )
+                final_choice = SimpleNamespace(
+                    delta=SimpleNamespace(content=None, reasoning_content=None),
+                    finish_reason="stop",
+                )
+                return iter([
+                    SimpleNamespace(choices=[choice], usage=None, model="test-model"),
+                    SimpleNamespace(choices=[final_choice], usage=None, model="test-model"),
+                ])
 
         client = type("Client", (), {
             "chat": type("Chat", (), {"completions": Completions()})(),
@@ -592,6 +1054,8 @@ class TestLLM:
 
         assert len(calls) == 2
         assert calls[0]["timeout"] == 12
+        assert calls[0]["stream"] is True
+        assert calls[1]["stream"] is True
         assert provider.max_retries == 2
 
     def test_parse_json_array(self):

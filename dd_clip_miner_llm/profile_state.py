@@ -100,9 +100,9 @@ def _write_profile_state(
 
 _USAGE_PHASES = (
     "main",
-    "v3_discovery",
-    "v3_recall_audit",
-    "v3_adjudication",
+    "kv_discovery",
+    "kv_recall_audit",
+    "kv_adjudication",
     "temporal_adjudication",
     "review_before",
     "overlong",
@@ -113,12 +113,12 @@ _USAGE_PHASES = (
 
 def _infer_debug_phase(relative_path: str) -> str:
     normalized = relative_path.replace("\\", "/")
-    if normalized.startswith("v3/discovery/"):
-        return "v3_discovery"
-    if normalized.startswith("v3/recall_audit/"):
-        return "v3_recall_audit"
-    if normalized.startswith("v3/adjudication/"):
-        return "v3_adjudication"
+    if normalized.startswith("kv/discovery/"):
+        return "kv_discovery"
+    if normalized.startswith("kv/recall_audit/"):
+        return "kv_recall_audit"
+    if normalized.startswith("kv/adjudication/"):
+        return "kv_adjudication"
     if normalized.startswith("temporal_adjudication/"):
         return "temporal_adjudication"
     if normalized.startswith("review/before_missed_recheck/"):
@@ -390,12 +390,12 @@ def _write_valid_debug_manifest(llm_dir: Path) -> None:
             _read_active_debug_paths(anchor_root, relative_to=llm_dir)
         )
 
-    v3_root = llm_dir / "v3"
-    if v3_root.exists():
+    kv_root = llm_dir / "kv"
+    if kv_root.exists():
         for stage_name in ("discovery", "recall_audit", "adjudication"):
             paths.update(
                 _read_active_debug_paths(
-                    v3_root / stage_name,
+                    kv_root / stage_name,
                     relative_to=llm_dir,
                 )
             )
