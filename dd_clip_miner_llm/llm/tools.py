@@ -76,7 +76,7 @@ def _flatten_tool_role_messages(
             prefix = f"tool_call_id={tool_call_id}\n" if tool_call_id else ""
             tool_results.append(f"{prefix}{content}")
             continue
-        if role == "assistant" and message.get("tool_calls"):
+        if message.get("tool_calls"):
             continue
         flattened.append(message)
     if tool_results:
@@ -269,7 +269,9 @@ def run_llm_with_tools(
             return content
 
         if not tool_role_compat_active:
-            messages.append(message.model_dump())
+            assistant_message = message.model_dump()
+            assistant_message.setdefault("role", "assistant")
+            messages.append(assistant_message)
         compatible_tool_results: list[str] = []
         for tc in message.tool_calls:
             try:

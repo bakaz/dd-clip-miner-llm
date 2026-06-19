@@ -766,6 +766,9 @@ class TestLLM:
             calls.append({**kwargs, "messages": messages})
             if len(calls) == 1:
                 return response(tool_calls=[ToolCall()], finish_reason="tool_calls")
+            for index, message in enumerate(messages):
+                if "role" not in message:
+                    raise RuntimeError(f"messages[{index}]: missing field `role`")
             if any(message.get("role") == "tool" for message in messages):
                 raise RuntimeError("Param Incorrect: messages[2] role is not supported")
             return response('[{"title":"A","segment_ranges":[[1,2]]}]')
@@ -786,6 +789,7 @@ class TestLLM:
         assert result == '[{"title":"A","segment_ranges":[[1,2]]}]'
         assert len(calls) == 3
         assert calls[1]["tool_choice"] == "none"
+        assert calls[1]["messages"][1]["role"] == "assistant"
         assert any(message.get("role") == "tool" for message in calls[1]["messages"])
         assert calls[2]["tools"] is None
         assert not any(message.get("role") == "tool" for message in calls[2]["messages"])
