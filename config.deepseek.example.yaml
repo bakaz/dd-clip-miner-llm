@@ -148,6 +148,10 @@ profiles:
         strategy: full_transcript
         output_mode: matches
         fallback_strategy: windowed_on_structural_failure
+      kv_v2:
+        min_cluster_size_for_review: 2
+        deletion_confidence_threshold: 0.75
+        unknown_deletion_confidence_threshold: 0.60
   kv_optimized:
     llm:
       cache_friendly_prompt_layout: true
