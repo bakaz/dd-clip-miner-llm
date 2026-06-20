@@ -77,6 +77,7 @@ from .temporal import (
     _split_temporal_at_source_boundaries,
     run_temporal_adjudication,
 )
+from .lyrics_match import _apply_lyrics_matching
 
 __all__ = [
     # normalize
@@ -140,4 +141,6 @@ __all__ = [
     "_restore_temporal_titles",
     "_split_temporal_at_source_boundaries",
     "run_temporal_adjudication",
+    # lyrics matching
+    "_apply_lyrics_matching",
 ]

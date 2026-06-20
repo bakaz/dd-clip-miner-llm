@@ -484,6 +484,11 @@ def is_risk_routed_kv(config: dict[str, Any]) -> bool:
     return song_pipeline_strategy(config) == "risk_routed_kv"
 
 
+def is_kv_v3(config: dict[str, Any]) -> bool:
+    """Return whether the kv_v3 optimized pipeline is enabled (now in kv_v2)."""
+    return config.get("_profile_name") in {"kv_v2", "kv_v3"}
+
+
 def is_risk_routed(config: dict[str, Any]) -> bool:
     """Return whether either risk-routed song pipeline is enabled."""
     return song_pipeline_strategy(config) in {"risk_routed_v2", "risk_routed_kv"}

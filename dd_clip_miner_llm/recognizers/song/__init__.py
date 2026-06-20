@@ -3,7 +3,7 @@
 One entry point (SongRecognizer) dispatching to three pipelines:
 - acc: accuracy (legacy) pipeline with review + recheck
 - kv: risk_routed_kv three-stage pipeline
-- kv_v2: cache-optimized pipeline with initial_tool_choice
+- kv_v2: optimized pipeline with high-confidence preservation and opening humming detection
 """
 from __future__ import annotations
 
