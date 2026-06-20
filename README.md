@@ -55,17 +55,19 @@ python -m dd_clip_miner_llm run "D:\videos\live.mp4" --config config.yaml
 
 ## 安装
 
-需要 **Python 3.10–3.12**（`pyproject.toml`）。
+需要 **Python 3.10-3.12**（`pyproject.toml`）。
 
 ### 推荐：`install.py`
 
 ```powershell
-python install.py
-python install.py --config install.yaml --dev    # 含 pytest
-python install.py --check                        # 只检测环境
+python install.py                          # 自动检测并安装
+python install.py --config install.yaml    # 使用配置文件
+python install.py --check                  # 只检测环境，不安装
+python install.py --dev                    # 含 pytest
+python install.py --gpu cuda12             # 指定 GPU 类型
 ```
 
-检测 FFmpeg / mkvmerge / GPU，执行 `pip install -e .`，可选 `[funasr]`、`requirements-cu12.txt`、`[test]`。
+自动检测 FFmpeg / mkvmerge / GPU，执行 `pip install -e .`，可选安装 `[funasr]`、`requirements-cu12.txt`、`[test]`。
 
 ### 手动安装
 
@@ -73,23 +75,23 @@ python install.py --check                        # 只检测环境
 py -3.12 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -U pip
-pip install -e .
-pip install -e ".[test]"      # 可选
-pip install -e ".[funasr]"    # 可选
-pip install -r requirements-cu12.txt   # faster-whisper GPU（CUDA 12）
+pip install -e .                           # 核心依赖
+pip install -e ".[test]"                   # 可选：pytest
+pip install -e ".[funasr]"                 # 可选：FunASR
+pip install -r requirements-cu12.txt       # 可选：CUDA 12 GPU
 ```
 
 ### 系统依赖
 
-| 组件 | 用途 | Windows 示例 |
-|------|------|----------------|
+| 组件 | 用途 | Windows 安装 |
+|------|------|--------------|
 | FFmpeg + ffprobe | 抽音频、切片、探测 | `winget install Gyan.FFmpeg` |
 | mkvmerge | 多段合并（可选，更稳） | `winget install MKVToolNix` |
 | libsndfile | soundfile（Linux CI 需 `libsndfile1`） | 一般随环境已有 |
 
 无 mkvmerge 时合并回退纯 FFmpeg。无 CUDA 12 DLL 时 faster-whisper 回退 CPU。
 
-`setup.py` 仅为 setuptools 入口；交互式旧安装：`python setup_env.py`。
+`setup.py` 仅为 setuptools 入口（`pip install -e .` 需要）。
 
 ## 配置
 
