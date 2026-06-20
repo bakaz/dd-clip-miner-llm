@@ -97,6 +97,16 @@ class FasterWhisperBackend(ASRBackend):
         model_name = str(self.settings.get("model", "small"))
         device = device_override or str(self.settings.get("device", "auto"))
         compute_type = compute_type_override or str(self.settings.get("compute_type", "default"))
+
+        # Auto-detect: when device=auto and no GPU is available, default to int8
+        if device == "auto" and compute_type == "default":
+            try:
+                import ctranslate2
+                if ctranslate2.get_cuda_device_count() == 0:
+                    compute_type = "int8"
+            except Exception:
+                compute_type = "int8"
+
         cpu_threads = int(self.settings.get("cpu_threads", 4))
         num_workers = int(self.settings.get("num_workers", 1))
         kwargs: dict[str, Any] = {"device": device}

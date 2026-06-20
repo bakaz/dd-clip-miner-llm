@@ -210,11 +210,11 @@ song:
   normalization:
     force_merge_same_title: false
     chorus_aware_split: false
-    chorus_gap_seconds: 120.0
+    chorus_gap_seconds: 130.0
     chorus_similarity_threshold: 0.3
     chorus_context_segments: 3
   search:
-    enabled: false
+    enabled: true
     search_unknown_only: true
     max_searches: 25
   risk:
@@ -239,6 +239,7 @@ song:
     adaptive_max_after_seconds: 45.0
     min_song_seconds: 75.0
     merge_gap_seconds: 40.0
+    max_song_seconds: 360.0
   missed_recheck:
     fallback_strategy: windowed_on_structural_failure
     batch_size: 500
@@ -259,7 +260,7 @@ song:
     max_completion_tokens: 32768
     max_tool_rounds: 1
     fallback: local_best
-    enabled: false
+    enabled: true
     merge_policy: conservative
   naming:
     search_query_source: title

@@ -15,8 +15,8 @@ asr:
     # faster_whisper 配置（支持 gpu/cpu 自动分流，详见 config.example.yaml）
     faster_whisper:
       model: small
-      device: auto
-      compute_type: default
+      device: auto            # auto: 自动检测 GPU，无 GPU 时 compute_type 自动设为 int8
+      compute_type: default   # default=float16(GPU) / int8(CPU auto-detect)
       language: null
       beam_size: 5
       vad_filter: true

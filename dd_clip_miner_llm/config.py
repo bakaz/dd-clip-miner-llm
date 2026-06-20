@@ -572,6 +572,17 @@ def get_asr_fingerprint(config: dict[str, Any]) -> str:
                     if k not in ["faster_whisper", "funasr"]:
                         if k in ("device", "compute_type", "model"):
                             fw[k] = v
+        elif str(fw.get("device", "auto")) == "auto" and backend in ("whisper", "faster_whisper"):
+            # No gpu/cpu sections but device=auto: mirror the runtime
+            # auto-detection so the fingerprint is stable across runs.
+            current_ct = str(fw.get("compute_type", "default")).lower()
+            if current_ct in ("", "default"):
+                try:
+                    import ctranslate2
+                    if ctranslate2.get_cuda_device_count() == 0:
+                        fw["compute_type"] = "int8"
+                except Exception:
+                    fw["compute_type"] = "int8"
     inference_mode = get_asr_inference_mode(asr)
     payload = {
         "inference_mode": inference_mode,

@@ -116,6 +116,8 @@ ASR 支持两种写法（见 `config.example.yaml`）：
 - **新格式**：`asr.mode: local | remote`，`local.backend: faster_whisper | funasr`
 - **旧格式**：顶层 `asr.backend`（程序自动兼容）
 
+**faster-whisper 设备自动检测**：设置 `device: auto` + `compute_type: default` 时，系统自动检测 CUDA 可用性。有 GPU 时使用 float16，无 GPU（CPU）时自动切换 `int8` 以获得最佳性能。无需手动配置 `gpu:`/`cpu:` 分流节。
+
 LLM Key 优先环境变量：`LLM_API_KEY`、`DEEPSEEK_API_KEY`、`MIMO_API_KEY` 等，对应 `llm.api_key_env`。
 
 ### LLM Provider 路由与重试

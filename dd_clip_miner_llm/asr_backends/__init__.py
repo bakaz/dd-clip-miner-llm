@@ -21,9 +21,14 @@ def _is_gpu_available() -> bool:
 
 
 def _resolve_hardware_local_config(local_cfg: dict[str, Any]) -> dict[str, Any]:
-    """If gpu/cpu sections present, auto-select and merge the appropriate one
-    based on hardware detection. This supports user's 'auto' expectation:
-    write 'device: auto' (or omit), have gpu:/cpu: sections, code diverts.
+    """Auto-select hardware-appropriate settings based on device detection.
+
+    Two modes:
+    1. gpu/cpu sections present → explicit hardware override (merge selected section).
+    2. device=auto with no gpu/cpu sections → detect CUDA, fall back to int8 on CPU.
+
+    This supports the common 'device: auto' expectation without requiring
+    users to write gpu:/cpu: blocks.
     """
     if not isinstance(local_cfg, dict):
         return local_cfg
@@ -40,6 +45,14 @@ def _resolve_hardware_local_config(local_cfg: dict[str, Any]) -> dict[str, Any]:
     if "gpu" not in hardware_cfg and "cpu" not in hardware_cfg:
         hardware_cfg = backend_cfg
     if "gpu" not in hardware_cfg and "cpu" not in hardware_cfg:
+        # No explicit gpu/cpu sections: auto-detect hardware and set
+        # compute_type=int8 for CPU to avoid performance pitfalls.
+        if not _is_gpu_available():
+            effective = dict(backend_cfg)
+            current_ct = str(effective.get("compute_type", "default")).lower()
+            if current_ct in ("", "default"):
+                effective["compute_type"] = "int8"
+            local_cfg[backend] = effective
         return local_cfg
 
     is_gpu = _is_gpu_available()
