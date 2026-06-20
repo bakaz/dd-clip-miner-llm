@@ -1,19 +1,10 @@
-# dd-clip-miner-llm DeepSeek 配置模板
-# 复制为 config.yaml 后设置 DEEPSEEK_API_KEY 环境变量。
-
-# ─── 音频预处理 ───────────────────────────────
 audio:
   sample_rate: 16000
   channels: 1
-
-# ─── ASR 配置 ─────────────────────────────────
 asr:
   mode: local
-
   local:
     backend: funasr
-
-    # faster_whisper 配置（支持 gpu/cpu 自动分流，详见 config.example.yaml）
     faster_whisper:
       model: small
       device: auto
@@ -22,12 +13,11 @@ asr:
       beam_size: 5
       vad_filter: true
       initial_prompt: null
-      inference_mode: batched   # batched | standard
+      inference_mode: batched
       word_timestamps: true
       split_on_word_gaps: true
       word_gap_seconds: 2.0
       max_segment_seconds: 15.0
-
     funasr:
       model: iic/SenseVoiceSmall
       hub: ms
@@ -41,7 +31,6 @@ asr:
       punc_model: null
       spk_model: null
       generate_kwargs: {}
-
   remote:
     provider: mimo
     base_url: https://token-plan-cn.xiaomimimo.com/v1
@@ -50,13 +39,11 @@ asr:
     model: mimo-v2.5-asr
     timestamp_chunk_seconds: 5
     language: null
-
-# ─── LLM 配置 ─────────────────────────────────
-# active_provider 指定使用哪个 provider，切换时只需改这个值
-# provider_route 指定 fallback 顺序（优先于 active_provider）
 llm:
-  active_provider: deepseek
-  provider_route: [deepseek, opencode, mimo]
+  provider_route:
+  - deepseek
+  - opencode
+  - mimo
   providers:
     deepseek:
       api_key: null
@@ -66,36 +53,45 @@ llm:
       thinking: disabled
       temperature: 0.1
       max_tokens: 8192
-      timeout_schedule: [60, 120, 180]
-      retry_backoff_seconds: [2, 5]
+      timeout_schedule:
+      - 60
+      - 120
+      - 180
+      retry_backoff_seconds:
+      - 2
+      - 5
       retry_jitter_ratio: 0.25
       result_retries: 2
-      # proxy: http://127.0.0.1:7890
-      # stream: false                      # 流式接收，代理截断时保留部分内容
     mimo:
       api_key_env: MIMO_API_KEY
       base_url: https://token-plan-cn.xiaomimimo.com/v1
       model: mimo-v2.5-pro
       temperature: 0.1
       max_tokens: 8192
-      timeout_schedule: [60, 120, 180]
-      retry_backoff_seconds: [2, 5]
+      timeout_schedule:
+      - 60
+      - 120
+      - 180
+      retry_backoff_seconds:
+      - 2
+      - 5
       retry_jitter_ratio: 0.25
       result_retries: 2
-      # proxy: http://127.0.0.1:7890
-      # stream: false                      # 流式接收，代理截断时保留部分内容
     opencode:
       api_key_env: OPENCODE_API_KEY
       base_url: https://opencode.ai/zen/go/v1
       model: deepseek-v4-flash
       temperature: 0.1
       max_tokens: 8192
-      timeout_schedule: [60, 120, 180]
-      retry_backoff_seconds: [2, 5]
+      timeout_schedule:
+      - 60
+      - 120
+      - 180
+      retry_backoff_seconds:
+      - 2
+      - 5
       retry_jitter_ratio: 0.25
       result_retries: 2
-      # proxy: http://127.0.0.1:7890
-      # stream: false                      # 流式接收，代理截断时保留部分内容
   retry_empty_with_reasoning: true
   reasoning_followup_rounds: 5
   reasoning_followup_max_tokens: 32768
@@ -108,9 +104,7 @@ llm:
   use_tools: true
   verify_with_search: true
   json_fix_rounds: 3
-
 default_profile: accuracy
-
 profiles:
   accuracy:
     llm:
@@ -151,7 +145,7 @@ profiles:
       kv_v2:
         min_cluster_size_for_review: 2
         deletion_confidence_threshold: 0.75
-        unknown_deletion_confidence_threshold: 0.60
+        unknown_deletion_confidence_threshold: 0.6
   kv_optimized:
     llm:
       cache_friendly_prompt_layout: true
@@ -192,8 +186,6 @@ profiles:
         max_tool_rounds: 0
       review:
         enabled: false
-
-# ─── 时间 padding ─────────────────────────────
 padding:
   before_seconds: 15.0
   after_seconds: 15.0
@@ -206,8 +198,6 @@ padding:
   min_song_seconds: 75.0
   max_song_seconds: 360.0
   merge_gap_seconds: 40.0
-
-# ─── 要识别的内容类型（true/false 控制启用/禁用）──
 content_types:
   song: true
   dialogue: true
@@ -215,8 +205,6 @@ content_types:
   funny: true
   cringe: true
   daily_summary: false
-
-# ─── 歌曲识别配置 ─────────────────────────────
 song:
   enabled: true
   normalization:
@@ -235,7 +223,7 @@ song:
     overlap_weight: 2.0
     evidence_weight: 2.0
     review_threshold: 0.55
-    reject_threshold: 0.90
+    reject_threshold: 0.9
     soft_min_seconds: 150
     soft_max_seconds: 360
     boundary_gap_seconds: 20
@@ -260,6 +248,9 @@ song:
     max_tool_rounds: 1
     max_anchor_segments: 12
     anchor_max_expansion_seconds: 420
+    enabled: true
+    output_mode: matches
+    min_uncovered_seconds: 10.0
   review:
     transcript_scope: local
     context_segments: 10
@@ -268,8 +259,11 @@ song:
     max_completion_tokens: 32768
     max_tool_rounds: 1
     fallback: local_best
-
-# ─── 对话识别配置 ─────────────────────────────
+    enabled: false
+    merge_policy: conservative
+  naming:
+    search_query_source: title
+    preserve_unknown_on_weak_evidence: true
 dialogue:
   enabled: true
   min_duration: 10.0
@@ -277,38 +271,30 @@ dialogue:
   min_confidence: 0.6
   merge_gap_seconds: 10.0
   tags:
-    - 搞笑
-    - 吐槽
-    - 名场面
-    - 金句
-    - 互动
-    - 高能
-
-# ─── 高能时刻配置 ─────────────────────────────
+  - 搞笑
+  - 吐槽
+  - 名场面
+  - 金句
+  - 互动
+  - 高能
 highlight:
   enabled: true
   min_duration: 5.0
   max_duration: 120.0
   min_confidence: 0.6
   merge_gap_seconds: 15.0
-
-# ─── 搞笑片段配置 ─────────────────────────────
 funny:
   enabled: true
   min_duration: 5.0
   max_duration: 180.0
   min_confidence: 0.6
   merge_gap_seconds: 15.0
-
-# ─── 下头对话配置 ─────────────────────────────
 cringe:
   enabled: true
   min_duration: 5.0
   max_duration: 120.0
   min_confidence: 0.6
   merge_gap_seconds: 15.0
-
-# ─── 当天直播结构化总结配置 ─────────────────
 daily_summary:
   enabled: false
   summary_only: true
@@ -320,8 +306,6 @@ daily_summary:
   include_timeline: true
   include_quotes: true
   include_open_questions: true
-
-# ─── 输出 ─────────────────────────────────────
 output:
   video_clips: true
   audio_segments: true
