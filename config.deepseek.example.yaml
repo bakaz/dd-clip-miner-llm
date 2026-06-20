@@ -317,3 +317,5 @@ output:
   match_context_segments: 10
   max_export_workers: 4
   concat_videos: false
+  clip_naming:
+    enabled: true
