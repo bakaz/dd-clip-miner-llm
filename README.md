@@ -18,6 +18,7 @@
 - **智能 LLM**：reasoning followup、工具调用、JSON 修复、歌词搜索
 - **Provider 路由与重试**：`provider_route` 按名称顺序 fallback；`timeout_schedule` 逐步升级超时；传输异常与产物错误分离重试；`_call_llm_raw` 唯一底层请求入口，测试可拦截
 - **KV 缓存优化**：`cache_friendly_prompt_layout` 复用 ASR 前缀，`compact_segment_ranges` 减少输出 token
+- **kv_v2 优化流水线**：开口哼唱检测、小簇跳过、高置信度已知曲名保护、低阈值未知歌曲保留
 - **V3 三轮分段流水线**：高精度发现 → 未覆盖召回审计 → 全量时序裁决（`song_kv.py` 实现）
 - **时序裁决**：全量 ASR 二次审视，修正首轮边界，支持名称保留
 - **副歌感知拆分**：40–130 秒间隔根据文本相似度判断是否为副歌重现
@@ -287,7 +288,7 @@ dd-clip-miner-llm/
     │   └── mimo_asr_backend.py
     ├── recognizers/            # song / dialogue / highlight / funny / cringe / daily_summary
     │   ├── base.py             # BaseRecognizer + post_process 钩子
-    │   └── song.py             # SongRecognizer（legacy / V3）
+    │   └── song.py             # SongRecognizer（legacy / kv_v2）
     ├── song_postprocess/       # 歌曲后处理流水线
     │   ├── normalize.py        # 同名合并、未知歌曲合并、副歌感知拆分、通用规范化
     │   ├── review.py           # LLM 复核（local / full scope）
@@ -295,7 +296,8 @@ dd-clip-miner-llm/
     │   ├── temporal.py         # 时序裁决（全量 ASR 边界修正）
     │   ├── risk.py             # 风险评分、边界修复、anchor 扩展
     │   ├── pipeline.py         # 共享流水线组件（BoundaryRiskStage、FinalAdjudicationStage 等）
-    │   └── song_kv.py          # V3 三轮对象协议与 KV 缓存优化
+    │   ├── song_kv.py          # V3 三轮对象协议与 KV 缓存优化
+    │   └── lyrics_match.py    # 歌词匹配与标题归一化
     ├── concat/                 # 多段录像合并流水线
     │   ├── models.py           # VideoMeta, ProblemProfile, ConcatContext
     │   ├── probe.py / planner.py
