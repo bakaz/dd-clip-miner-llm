@@ -372,6 +372,7 @@ def _path_keys(path: Path, run_dir: Path) -> set[str]:
     candidates = [path]
     if not path.is_absolute():
         candidates.append(run_dir / path)
+        candidates.extend(parent / path for parent in run_dir.parents)
     keys: set[str] = set()
     for candidate in candidates:
         try:

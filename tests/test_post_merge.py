@@ -236,6 +236,35 @@ def test_post_merge_relocates_context_paths_from_current_output_dir(tmp_path, mo
     assert Path(result["video_path"]).exists()
 
 
+def test_post_merge_matches_project_relative_report_paths(tmp_path, monkeypatch):
+    from dd_clip_miner_llm import post_merge
+
+    project_root = tmp_path / "project"
+    fixture = _write_fixture_run(project_root)
+    run = project_root / "run"
+    reports_path = run / "04_reports" / "song" / "songs.json"
+    data = json.loads(reports_path.read_text(encoding="utf-8"))
+    for item in data:
+        if item.get("video_path"):
+            item["video_path"] = str(Path(item["video_path"]).relative_to(project_root))
+        if item.get("audio_path"):
+            item["audio_path"] = str(Path(item["audio_path"]).relative_to(project_root))
+    reports_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def fake_cut_video(_source, target, *_args, **_kwargs):
+        Path(target).write_bytes(b"merged video")
+
+    monkeypatch.setattr(post_merge, "cut_video", fake_cut_video)
+
+    result = post_merge.post_merge_from_context(
+        fixture["context"],
+        fixture["video_files"][0],
+        fixture["video_files"][1],
+    )
+
+    assert Path(result["video_path"]).exists()
+
+
 def test_post_merge_errors_when_dragged_file_is_not_in_report(tmp_path):
     from dd_clip_miner_llm.post_merge import PostMergeError, post_merge_from_context
 
