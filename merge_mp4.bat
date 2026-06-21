@@ -47,28 +47,7 @@ if "%~2"=="" (
 
 set "FILE1=%~1"
 set "FILE2=%~2"
-
-:: Find latest results output directory
-set "OUTPUT_DIR="
-for /f "delims=" %%d in ('dir /b /ad "%~dp0results" 2^>nul') do (
-    for /f "delims=" %%r in ('dir /b /ad "%~dp0results\%%d" 2^>nul') do (
-        if exist "%~dp0results\%%d\%%r\03_clips" (
-            for /f "delims=" %%p in ('dir /b /ad "%~dp0results\%%d\%%r\03_clips" 2^>nul') do (
-                if exist "%~dp0results\%%d\%%r\03_clips\%%p\video\song" (
-                    set "OUTPUT_DIR=%~dp0results\%%d\%%r\03_clips\%%p\video\song"
-                    goto :found
-                )
-            )
-        )
-    )
-)
-:found
-
-if "%OUTPUT_DIR%"=="" (
-    set "OUTPUT=%~dp1%~n1_merged%~x1"
-) else (
-    set "OUTPUT=%OUTPUT_DIR%\%~n1_merged%~x1"
-)
+set "OUTPUT=%~dp1%~n1_merged%~x1"
 
 echo.
 echo Input 1: %FILE1%
