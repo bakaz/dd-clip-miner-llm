@@ -1,0 +1,277 @@
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+import pytest
+
+from dd_clip_miner_llm.config import DEFAULT_CONFIG, deep_merge
+from dd_clip_miner_llm.merger import build_content_results
+from dd_clip_miner_llm.models import ContentMatch, ContentResult, TranscriptSegment
+
+
+def _post_merge_config() -> dict:
+    return deep_merge(DEFAULT_CONFIG, {
+        "padding": {
+            "before_seconds": 1.0,
+            "after_seconds": 1.0,
+            "after_next_asr_end_guard_seconds": 0.0,
+            "adaptive_silence_padding": False,
+            "min_song_seconds": 0.0,
+            "max_song_seconds": 360.0,
+            "merge_gap_seconds": 5.0,
+        },
+        "song": {
+            "padding": {
+                "before_seconds": 1.0,
+                "after_seconds": 1.0,
+                "after_next_asr_end_guard_seconds": 0.0,
+                "adaptive_silence_padding": False,
+                "min_song_seconds": 0.0,
+                "max_song_seconds": 360.0,
+                "merge_gap_seconds": 5.0,
+            },
+        },
+        "output": {
+            "video_codec": "copy",
+            "audio_bitrate_kbps": 192,
+        },
+    })
+
+
+def _write_fixture_run(tmp_path: Path) -> dict:
+    run = tmp_path / "run"
+    source = run / "00_input" / "input.mp4"
+    transcript_path = run / "02_asr" / "transcript.json"
+    matches_path = run / "02_asr" / "llm" / "song" / "matches.json"
+    reports_path = run / "04_reports" / "song" / "songs.json"
+    video_dir = run / "03_clips" / "video" / "song"
+    audio_dir = run / "03_clips" / "audio" / "song"
+    manifest_path = run / "manifest.json"
+    context_path = video_dir / "merge_recut_context.json"
+
+    for path in (source.parent, transcript_path.parent, matches_path.parent, reports_path.parent, video_dir, audio_dir):
+        path.mkdir(parents=True, exist_ok=True)
+    source.write_bytes(b"fake video")
+
+    segments = [
+        TranscriptSegment(0.0, 2.0, "intro"),
+        TranscriptSegment(10.0, 20.0, "song one"),
+        TranscriptSegment(20.0, 22.0, "talk"),
+        TranscriptSegment(60.0, 70.0, "song two"),
+        TranscriptSegment(80.0, 90.0, "outro"),
+    ]
+    matches = [
+        ContentMatch("song", "Song A", [1], 0.9, artist="Singer"),
+        ContentMatch("song", "Song B", [3], 0.8, artist="Singer"),
+    ]
+    config = _post_merge_config()
+    results = build_content_results(segments, matches, 90.0, config, "song")
+    assert len(results) == 2
+    for result in results:
+        result.video_path = video_dir / f"clip{result.index}.mp4"
+        result.audio_path = audio_dir / f"clip{result.index}.mp3"
+        result.video_path.write_bytes(b"video")
+        result.audio_path.write_bytes(b"audio")
+
+    transcript_path.write_text(json.dumps([s.to_dict() for s in segments], indent=2), encoding="utf-8")
+    matches_path.write_text(json.dumps([m.to_dict() for m in matches], indent=2), encoding="utf-8")
+    reports_path.write_text(json.dumps([r.to_dict() for r in results], indent=2), encoding="utf-8")
+    manifest_path.write_text(
+        json.dumps({"input_video": str(source), "total_duration": 90.0}, indent=2),
+        encoding="utf-8",
+    )
+    context = {
+        "run_dir": str(run),
+        "content_type": "song",
+        "manifest_path": str(manifest_path),
+        "reports_path": str(reports_path),
+        "llm_dir": str(matches_path.parent),
+        "matches_path": str(matches_path),
+        "transcript_path": str(transcript_path),
+        "input_video": str(source),
+        "total_duration": 90.0,
+        "config": config,
+    }
+    context_path.write_text(json.dumps(context, indent=2), encoding="utf-8")
+    return {
+        "context": context_path,
+        "source": source,
+        "video_files": [r.video_path for r in results],
+        "audio_files": [r.audio_path for r in results],
+    }
+
+
+def test_post_merge_recuts_two_mp4_files(tmp_path, monkeypatch):
+    from dd_clip_miner_llm import post_merge
+
+    fixture = _write_fixture_run(tmp_path)
+    calls = []
+
+    def fake_cut_video(source, target, start, end, **kwargs):
+        calls.append(("video", Path(source), Path(target), start, end, kwargs))
+        Path(target).write_bytes(b"merged video")
+
+    def fake_cut_audio(source, target, start, end, **kwargs):
+        calls.append(("audio", Path(source), Path(target), start, end, kwargs))
+        Path(target).write_bytes(b"merged audio")
+
+    monkeypatch.setattr(post_merge, "cut_video", fake_cut_video)
+    monkeypatch.setattr(post_merge, "cut_audio", fake_cut_audio)
+
+    result = post_merge.post_merge_from_context(
+        fixture["context"],
+        fixture["video_files"][0],
+        fixture["video_files"][1],
+    )
+
+    assert Path(result["video_path"]).exists()
+    assert result["audio_path"] is None
+    assert result["output_path"] == result["video_path"]
+    assert result["output_type"] == "mp4"
+    assert Path(result["video_path"]).parent == fixture["video_files"][0].parent
+    assert [(kind, start, end) for kind, _, _, start, end, _ in calls] == [
+        ("video", 9.0, 71.0),
+    ]
+
+
+def test_post_merge_recuts_two_mp3_files(tmp_path, monkeypatch):
+    from dd_clip_miner_llm import post_merge
+
+    fixture = _write_fixture_run(tmp_path)
+
+    def fake_cut_video(_source, target, *_args, **_kwargs):
+        Path(target).write_bytes(b"merged video")
+
+    def fake_cut_audio(_source, target, *_args, **_kwargs):
+        Path(target).write_bytes(b"merged audio")
+
+    monkeypatch.setattr(post_merge, "cut_video", fake_cut_video)
+    monkeypatch.setattr(post_merge, "cut_audio", fake_cut_audio)
+
+    result = post_merge.post_merge_from_context(
+        fixture["context"],
+        fixture["audio_files"][0],
+        fixture["audio_files"][1],
+    )
+
+    assert result["video_path"] is None
+    assert Path(result["audio_path"]).suffix == ".mp3"
+    assert result["output_path"] == result["audio_path"]
+    assert result["output_type"] == "mp3"
+    assert Path(result["audio_path"]).parent == fixture["audio_files"][0].parent
+
+
+def test_post_merge_rejects_mixed_extensions(tmp_path):
+    from dd_clip_miner_llm.post_merge import PostMergeError, post_merge_from_context
+
+    fixture = _write_fixture_run(tmp_path)
+
+    with pytest.raises(PostMergeError, match="same extension"):
+        post_merge_from_context(
+            fixture["context"],
+            fixture["video_files"][0],
+            fixture["audio_files"][1],
+        )
+
+
+def test_post_merge_falls_back_from_mojibake_report_paths(tmp_path, monkeypatch):
+    from dd_clip_miner_llm import post_merge
+
+    fixture = _write_fixture_run(tmp_path)
+    reports_path = fixture["context"].parent.parent.parent.parent / "04_reports" / "song" / "songs.json"
+    data = json.loads(reports_path.read_text(encoding="utf-8"))
+    data[0]["video_path"] = r"results_v2\bad_mojibake\03_clips\video\song\bad_name.mp4"
+    data[1]["video_path"] = r"results_v2\bad_mojibake\03_clips\video\song\bad_name_002.mp4"
+    data[0]["title"] = "mojibake-title"
+    data[1]["title"] = "mojibake-title"
+    reports_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    actual_dir = fixture["video_files"][0].parent
+    first = actual_dir / "正确中文名.mp4"
+    second = actual_dir / "正确中文名_002.mp4"
+    first.write_bytes(b"video")
+    second.write_bytes(b"video")
+
+    def fake_cut_video(_source, target, *_args, **_kwargs):
+        Path(target).write_bytes(b"merged video")
+
+    monkeypatch.setattr(post_merge, "cut_video", fake_cut_video)
+
+    result = post_merge.post_merge_from_context(fixture["context"], first, second)
+
+    assert Path(result["video_path"]).exists()
+    assert result["segment_indices"] == [1, 2, 3]
+
+
+def test_post_merge_errors_when_dragged_file_is_not_in_report(tmp_path):
+    from dd_clip_miner_llm.post_merge import PostMergeError, post_merge_from_context
+
+    fixture = _write_fixture_run(tmp_path)
+    unknown = tmp_path / "unknown.mp4"
+    unknown.write_bytes(b"unknown")
+
+    with pytest.raises(PostMergeError, match="not listed"):
+        post_merge_from_context(fixture["context"], unknown, fixture["video_files"][1])
+
+
+def test_export_results_writes_merge_recut_assets(tmp_path, monkeypatch):
+    from dd_clip_miner_llm.pipeline import export
+
+    def fake_cut_audio(_input, target, *_args, **_kwargs):
+        Path(target).parent.mkdir(parents=True, exist_ok=True)
+        Path(target).write_text("audio", encoding="utf-8")
+
+    def fake_cut_video(_input, target, *_args, **_kwargs):
+        Path(target).parent.mkdir(parents=True, exist_ok=True)
+        Path(target).write_text("video", encoding="utf-8")
+
+    monkeypatch.setattr(export, "cut_audio", fake_cut_audio)
+    monkeypatch.setattr(export, "cut_video", fake_cut_video)
+
+    run_dir = tmp_path / "run"
+    clips_dir = run_dir / "03_clips"
+    llm_dir = run_dir / "02_asr" / "llm" / "song"
+    reports_dir = run_dir / "04_reports" / "song"
+    transcript_path = run_dir / "02_asr" / "transcript.json"
+    manifest_path = run_dir / "manifest.json"
+    result = ContentResult(
+        index=1,
+        content_type="song",
+        title="Song",
+        start=1.0,
+        end=5.0,
+        duration=4.0,
+        transcript="lyrics",
+        confidence=0.9,
+    )
+
+    export._export_results(
+        [result],
+        tmp_path / "input.mp4",
+        clips_dir,
+        _post_merge_config(),
+        "song",
+        run_dir=run_dir,
+        llm_dir=llm_dir,
+        reports_dir=reports_dir,
+        transcript_path=transcript_path,
+        manifest_path=manifest_path,
+        total_duration=10.0,
+    )
+
+    for target_dir in (clips_dir / "audio" / "song", clips_dir / "video" / "song"):
+        bat_content = (target_dir / "merge_mp4.bat").read_text(encoding="utf-8")
+        assert str(Path(sys.executable).resolve()) in bat_content
+        assert str(Path.cwd().resolve()) in bat_content
+        assert 'set "WORK_DIR=%~dp0"' in bat_content
+        assert 'if not exist "%PROJECT_ROOT%\\dd_clip_miner_llm\\__init__.py"' in bat_content
+        assert 'set "PROJECT_ROOT=%~dp0..\\..\\..\\..\\..\\..\\.."' in bat_content
+        assert 'set "PYTHONPATH=%PROJECT_ROOT%;%PYTHONPATH%"' in bat_content
+        assert 'pushd "%WORK_DIR%"' in bat_content
+        context = json.loads((target_dir / "merge_recut_context.json").read_text(encoding="utf-8"))
+        assert context["content_type"] == "song"
+        assert context["python_executable"] == str(Path(sys.executable).resolve())
+        assert context["project_root"] == str(Path.cwd().resolve())
+        assert context["config"]["output"]["video_codec"] == "copy"

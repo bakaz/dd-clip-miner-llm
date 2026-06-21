@@ -68,6 +68,12 @@ def build_parser() -> argparse.ArgumentParser:
     manual_parser.add_argument("--video-codec", default=None, help="视频编码器")
     manual_parser.add_argument("--audio-bitrate-kbps", type=int, default=None, help="音频码率")
 
+    # post-merge 命令：拖拽两个已导出片段后，从原始输入重新切为一个片段
+    post_merge_parser = subparsers.add_parser("post-merge", help="从两个已导出歌曲片段反查 ASR 并重新切为一个片段")
+    post_merge_parser.add_argument("file1", help="第一个已导出 MP4/MP3")
+    post_merge_parser.add_argument("file2", help="第二个已导出 MP4/MP3")
+    post_merge_parser.add_argument("--context", required=True, help="merge_recut_context.json 路径")
+
     # init-config 命令
     init_parser = subparsers.add_parser("init-config", help="生成默认配置文件")
     init_parser.add_argument("--out", default="config.yaml", help="输出路径")
@@ -247,7 +253,7 @@ def _generate_config_yaml() -> str:
         "        search_query_source: lyric_anchors",
         "        preserve_unknown_on_weak_evidence: true",
         "      search:",
-        "        enabled: false",
+        "        enabled: true",
         "        search_unknown_only: true",
         "        max_searches: 25",
         "      missed_recheck:",
@@ -292,7 +298,7 @@ def _generate_config_yaml() -> str:
         "    chorus_similarity_threshold: 0.3",
         "    chorus_context_segments: 3",
         "  search:",
-        "    enabled: false",
+        "    enabled: true",
         "    search_unknown_only: true",
         "    max_searches: 25",
         "  risk:",
@@ -400,7 +406,7 @@ def _generate_config_yaml() -> str:
         "  max_export_workers: 4",
         "  concat_videos: false  # 合并目录下的多个视频后再处理（ConcatPipeline + pre-sanitize + ProblemProfile 智能 fallback）",
         "  clip_naming:",
-        "    enabled: false",
+        "    enabled: true",
         "    dictionary_path: streamer_dictionary.json",
         "    default_streamer: StreamerName",
         "    min_score: 0.65",
@@ -659,6 +665,19 @@ def main(argv: list[str] | None = None) -> int:
             config_path=args.config,
         )
         print(f"\nDone! Manual cut produced {len(results)} clips.")
+        return 0
+
+    if args.command == "post-merge":
+        from .post_merge import PostMergeError, post_merge_from_context
+
+        try:
+            result = post_merge_from_context(args.context, args.file1, args.file2)
+        except PostMergeError as exc:
+            print(f"Error: {exc}")
+            return 1
+        print("Post-merge recut complete:")
+        print(f"  Output: {result['output_path']}")
+        print(f"  Range: {result['start']:.3f}s - {result['end']:.3f}s")
         return 0
 
     parser.error(f"Unknown command: {args.command}")

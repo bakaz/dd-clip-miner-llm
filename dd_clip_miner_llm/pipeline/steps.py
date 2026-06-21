@@ -151,6 +151,9 @@ def _run_recognition_loop(
     llm_base_dir: Path,
     clips_dir: Path,
     reports_dir: Path,
+    run_dir: Path,
+    asr_dir: Path,
+    manifest_path: Path,
     input_path: Path,
     total_duration: float,
     naming_profile: Any,
@@ -230,7 +233,20 @@ def _run_recognition_loop(
         print(f"  Found {len(matches)} {content_type} matches")
 
         results = build_content_results(segments, matches, total_duration, config, content_type)
-        _export_results(results, input_path, clips_dir, config, content_type, naming_profile)
+        _export_results(
+            results,
+            input_path,
+            clips_dir,
+            config,
+            content_type,
+            naming_profile,
+            run_dir=run_dir,
+            llm_dir=llm_dir,
+            reports_dir=reports_dir / content_type,
+            transcript_path=asr_dir / "transcript.json",
+            manifest_path=manifest_path,
+            total_duration=total_duration,
+        )
 
         # 导出 sus 文件夹（被合并的未知歌曲原始片段）
         merge_events_path = llm_dir / "merge_events.json"

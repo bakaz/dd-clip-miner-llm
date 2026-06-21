@@ -153,7 +153,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "chorus_context_segments": 3,
         },
         "search": {
-            "enabled": False,
+            "enabled": True,
             "search_unknown_only": True,
             "max_searches": 25,
         },
@@ -263,7 +263,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "single_file_policy": "copy",
         "concat_force_normalize": False,  # 新 pipeline 下仍先做 health probe + pre-sanitize + ProblemProfile 分类
         "clip_naming": {
-            "enabled": False,
+            "enabled": True,
             "dictionary_path": "streamer_dictionary.json",
             "default_streamer": "StreamerName",
             "min_score": 0.65,

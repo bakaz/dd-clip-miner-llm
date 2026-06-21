@@ -161,7 +161,7 @@ profiles:
         search_query_source: lyric_anchors
         preserve_unknown_on_weak_evidence: true
       search:
-        enabled: false
+        enabled: true
         search_unknown_only: true
         max_searches: 25
       missed_recheck:

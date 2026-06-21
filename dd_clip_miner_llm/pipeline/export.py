@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
+from importlib import resources
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +13,60 @@ from ..models import ContentMatch, ContentResult, TranscriptSegment
 from ..ffmpeg import cut_audio, cut_video
 from ..clip_naming import ClipNamingProfile, resolve_export_stem
 from .utils import _safe_filename
+
+
+def _write_merge_tool(target_dir: Path) -> None:
+    """Write a drag-drop bat with absolute Python and project paths."""
+    package_dir = Path(__file__).parent.parent.parent.resolve()
+    python_exe = Path(sys.executable).resolve()
+    target = target_dir / "merge_mp4.bat"
+    try:
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            _merge_tool_script(python_exe=python_exe, project_root=package_dir),
+            encoding="utf-8",
+        )
+        logger.debug("Wrote merge_mp4.bat to %s", target_dir)
+    except OSError as exc:
+        logger.debug("Failed to write merge_mp4.bat: %s", exc)
+
+
+def _merge_tool_script(*, python_exe: Path, project_root: Path) -> str:
+    template = resources.files("dd_clip_miner_llm.assets").joinpath("merge_mp4.bat").read_text(
+        encoding="utf-8"
+    )
+    return template.format(
+        python_exe=str(python_exe),
+        project_root=str(project_root),
+    )
+
+
+def _post_merge_config_snapshot(config: dict[str, Any]) -> dict[str, Any]:
+    """Store only the config keys needed for deterministic post-merge recuts."""
+    song_config = config.get("song", {})
+    snapshot = {
+        "output": {
+            "video_codec": config.get("output", {}).get("video_codec", "copy"),
+            "audio_bitrate_kbps": config.get("output", {}).get("audio_bitrate_kbps", 320),
+        },
+        "padding": dict(config.get("padding", {})),
+        "song": {
+            "padding": dict(song_config.get("padding", {})),
+            "min_duration": song_config.get("min_duration"),
+            "max_duration": song_config.get("max_duration"),
+            "merge_gap_seconds": song_config.get("merge_gap_seconds"),
+        },
+    }
+    return snapshot
+
+
+def _write_merge_recut_assets(target_dir: Path, context: dict[str, Any]) -> None:
+    target_dir.mkdir(parents=True, exist_ok=True)
+    _write_merge_tool(target_dir)
+    (target_dir / "merge_recut_context.json").write_text(
+        json.dumps(context, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
 
 
 def _write_structured_summary(
@@ -50,6 +106,13 @@ def _export_results(
     config: dict[str, Any],
     content_type: str,
     naming_profile: ClipNamingProfile | None = None,
+    *,
+    run_dir: Path | None = None,
+    llm_dir: Path | None = None,
+    reports_dir: Path | None = None,
+    transcript_path: Path | None = None,
+    manifest_path: Path | None = None,
+    total_duration: float | None = None,
 ) -> None:
     """导出音视频片段（并行执行）"""
     from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -71,6 +134,37 @@ def _export_results(
         for stale_file in target_dir.iterdir():
             if stale_file.is_file():
                 stale_file.unlink()
+
+    merge_context: dict[str, Any] | None = None
+    if (
+        content_type == "song"
+        and run_dir is not None
+        and llm_dir is not None
+        and reports_dir is not None
+        and transcript_path is not None
+        and manifest_path is not None
+    ):
+        merge_context = {
+            "run_dir": str(Path(run_dir).resolve()),
+            "content_type": content_type,
+            "profile": config.get("_profile_name"),
+            "python_executable": str(Path(sys.executable).resolve()),
+            "project_root": str(Path(__file__).parent.parent.parent.resolve()),
+            "manifest_path": str(Path(manifest_path).resolve()),
+            "reports_path": str((Path(reports_dir) / f"{content_type}s.json").resolve()),
+            "llm_dir": str(Path(llm_dir).resolve()),
+            "matches_path": str((Path(llm_dir) / "matches.json").resolve()),
+            "transcript_path": str(Path(transcript_path).resolve()),
+            "input_video": str(Path(input_path).resolve()),
+            "total_duration": total_duration,
+            "config": _post_merge_config_snapshot(config),
+        }
+
+    if merge_context is not None:
+        if do_audio:
+            _write_merge_recut_assets(audio_dir_out, merge_context)
+        if do_video:
+            _write_merge_recut_assets(video_dir_out, merge_context)
 
     stem_counts: dict[str, int] = {}
     tasks: list[tuple[ContentResult, str, str]] = []

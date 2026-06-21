@@ -14,7 +14,7 @@ from typing import Any
 
 from ..clip_naming import resolve_clip_naming_profile
 from ..config import get_asr_inference_mode
-from ..ffmpeg import get_duration
+from ..ffmpeg import cut_audio, cut_video, get_duration
 from ..paths import stage_input_for_ffmpeg
 from ..profile_state import (
     _config_fingerprint,
@@ -128,9 +128,10 @@ def run_pipeline(
         )
 
     print("[3/3] Identifying content with LLM...", flush=True)
+    manifest_path = out / (f"manifest.{profile_name}.json" if profile_enabled else "manifest.json")
     all_results = _run_recognition_loop(
         segments, config, content_types, llm_base_dir, clips_dir, reports_dir,
-        input_path, total_duration, naming_profile, prev_progress,
+        out, asr_dir, manifest_path, input_path, total_duration, naming_profile, prev_progress,
         profile_enabled, profile_reusable,
     )
 
@@ -158,7 +159,23 @@ def run_pipeline_songs(
     return results.get("song", [])
 
 
+def _export_results(*args: Any, **kwargs: Any) -> None:
+    """Backward-compatible shim for callers that patched the old pipeline module."""
+    from . import export as export_module
+
+    original_cut_audio = export_module.cut_audio
+    original_cut_video = export_module.cut_video
+    export_module.cut_audio = cut_audio
+    export_module.cut_video = cut_video
+    try:
+        export_module._export_results(*args, **kwargs)
+    finally:
+        export_module.cut_audio = original_cut_audio
+        export_module.cut_video = original_cut_video
+
+
 __all__ = [
     "run_pipeline",
     "run_pipeline_songs",
+    "_export_results",
 ]
