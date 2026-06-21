@@ -406,6 +406,9 @@ def _resolve_llm_provider(config: dict[str, Any]) -> dict[str, Any]:
     # 将 provider 配置合并到 llm 顶层（provider 优先，但保留共享参数）
     resolved = {k: v for k, v in llm.items() if k not in {"providers", "active_provider"}}
     for key, value in provider_cfg.items():
+        # provider 的 None 值不覆盖顶层已有的非 None 共享参数
+        if value is None and resolved.get(key) is not None:
+            continue
         resolved[key] = value
     config["llm"] = resolved
     config["llm"]["_active_provider"] = active

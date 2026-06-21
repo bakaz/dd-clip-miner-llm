@@ -586,7 +586,7 @@ class TestSongMissedRecheck:
         }
         assert config["song"]["pipeline"]["continuation_overlap_segments"] == 50
         assert config["song"]["pipeline"]["anchor_boundary_expansion"] is False
-        assert config["song"]["search"]["enabled"] is False
+        assert config["song"]["search"]["enabled"] is True
         assert config["song"]["missed_recheck"]["enabled"] is True
         assert config["song"]["review"]["enabled"] is False
         assert config["song"]["review"]["transcript_scope"] == "local"
@@ -2909,9 +2909,10 @@ class TestCLI:
         assert common_llm["continuation_on_length"] is True
         assert common_llm["max_continuation_rounds"] == 8
         assert "pipeline" not in common_song
-        assert "naming" not in common_song
-        assert "enabled" not in common_song["review"]
-        assert "enabled" not in common_song["missed_recheck"]
+        assert "naming" in common_song
+        assert common_song["naming"]["search_query_source"] == "title"
+        assert "enabled" in common_song["review"]
+        assert "enabled" in common_song["missed_recheck"]
         assert "strategy" not in common_song["missed_recheck"]
 
         accuracy = load_config(path, profile="accuracy")
