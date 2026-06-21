@@ -23,7 +23,8 @@ def post_merge_from_context(
 ) -> dict[str, Any]:
     context_file = Path(context_path)
     context = _load_json_object(context_file)
-    run_dir = _context_path(context, "run_dir", base=context_file.parent)
+    context_run_dir = _context_path(context, "run_dir", base=context_file.parent)
+    run_dir = _portable_run_dir(context_file.parent, context_run_dir)
     content_type = str(context.get("content_type") or "song")
     if content_type != "song":
         raise PostMergeError(f"post-merge currently supports song clips only, got: {content_type}")
@@ -39,9 +40,9 @@ def post_merge_from_context(
         raise PostMergeError("Dragged files must have the same extension (.mp4 with .mp4, or .mp3 with .mp3)")
 
     config = _load_config_snapshot(context)
-    transcript_path = _context_path(context, "transcript_path", base=run_dir)
-    matches_path = _context_path(context, "matches_path", base=run_dir)
-    reports_path = _context_path(context, "reports_path", base=run_dir)
+    transcript_path = _context_path(context, "transcript_path", base=run_dir, original_run_dir=context_run_dir)
+    matches_path = _context_path(context, "matches_path", base=run_dir, original_run_dir=context_run_dir)
+    reports_path = _context_path(context, "reports_path", base=run_dir, original_run_dir=context_run_dir)
 
     segments = _load_transcript(transcript_path)
     matches = _load_matches(matches_path)
@@ -56,7 +57,7 @@ def post_merge_from_context(
         run_dir,
     )
 
-    total_duration, source_video = _source_video_and_duration(context, run_dir)
+    total_duration, source_video = _source_video_and_duration(context, run_dir, original_run_dir=context_run_dir)
     source_by_index = _source_indices_by_result_index(segments, matches, total_duration, config, content_type)
     first_indices = source_by_index.get(first_result.index)
     second_indices = source_by_index.get(second_result.index)
@@ -160,14 +161,48 @@ def _load_json_list(path: Path) -> list[Any]:
     return data
 
 
-def _context_path(context: dict[str, Any], key: str, *, base: Path) -> Path:
+def _context_path(
+    context: dict[str, Any],
+    key: str,
+    *,
+    base: Path,
+    original_run_dir: Path | None = None,
+) -> Path:
     value = context.get(key)
     if not value:
         raise PostMergeError(f"merge context is missing {key!r}")
     path = Path(str(value))
     if not path.is_absolute():
         path = base / path
+    elif original_run_dir is not None:
+        path = _relocate_from_original_run(path, original_run_dir, base)
     return path
+
+
+def _portable_run_dir(context_dir: Path, configured_run_dir: Path) -> Path:
+    if configured_run_dir.exists():
+        return configured_run_dir
+    derived_run_dir = _derive_run_dir_from_output_dir(context_dir)
+    return derived_run_dir if derived_run_dir is not None else configured_run_dir
+
+
+def _derive_run_dir_from_output_dir(path: Path) -> Path | None:
+    current = path
+    for parent in (current, *current.parents):
+        if parent.name == "03_clips":
+            return parent.parent
+    return None
+
+
+def _relocate_from_original_run(path: Path, original_run_dir: Path, current_run_dir: Path) -> Path:
+    if path.exists():
+        return path
+    try:
+        relative = path.relative_to(original_run_dir)
+    except ValueError:
+        return path
+    relocated = current_run_dir / relative
+    return relocated if relocated.exists() else path
 
 
 def _load_config_snapshot(context: dict[str, Any]) -> dict[str, Any]:
@@ -347,13 +382,20 @@ def _path_keys(path: Path, run_dir: Path) -> set[str]:
     return keys
 
 
-def _source_video_and_duration(context: dict[str, Any], run_dir: Path) -> tuple[float, Path]:
+def _source_video_and_duration(
+    context: dict[str, Any],
+    run_dir: Path,
+    *,
+    original_run_dir: Path | None = None,
+) -> tuple[float, Path]:
     manifest_path_value = context.get("manifest_path")
     manifest: dict[str, Any] = {}
     if manifest_path_value:
         manifest_path = Path(str(manifest_path_value))
         if not manifest_path.is_absolute():
             manifest_path = run_dir / manifest_path
+        elif original_run_dir is not None:
+            manifest_path = _relocate_from_original_run(manifest_path, original_run_dir, run_dir)
         if manifest_path.exists():
             manifest = _load_json_object(manifest_path)
 
@@ -363,6 +405,8 @@ def _source_video_and_duration(context: dict[str, Any], run_dir: Path) -> tuple[
     source_video = Path(str(input_video_value))
     if not source_video.is_absolute():
         source_video = run_dir / source_video
+    elif original_run_dir is not None:
+        source_video = _relocate_from_original_run(source_video, original_run_dir, run_dir)
     if not source_video.exists():
         raise PostMergeError(f"Source input video not found: {source_video}")
 

@@ -205,6 +205,37 @@ def test_post_merge_falls_back_from_mojibake_report_paths(tmp_path, monkeypatch)
     assert result["segment_indices"] == [1, 2, 3]
 
 
+def test_post_merge_relocates_context_paths_from_current_output_dir(tmp_path, monkeypatch):
+    from dd_clip_miner_llm import post_merge
+
+    fixture = _write_fixture_run(tmp_path)
+    context_path = fixture["context"]
+    actual_run = context_path.parents[3]
+    stale_run = tmp_path / "stale_machine" / "results" / actual_run.name
+    context = json.loads(context_path.read_text(encoding="utf-8"))
+    for key in ("run_dir", "manifest_path", "reports_path", "matches_path", "transcript_path", "input_video"):
+        context[key] = str(stale_run / Path(context[key]).relative_to(actual_run))
+    context_path.write_text(json.dumps(context, indent=2), encoding="utf-8")
+
+    calls = []
+
+    def fake_cut_video(source, target, start, end, **kwargs):
+        calls.append((Path(source), Path(target), start, end, kwargs))
+        Path(target).write_bytes(b"merged video")
+
+    monkeypatch.setattr(post_merge, "cut_video", fake_cut_video)
+
+    result = post_merge.post_merge_from_context(
+        context_path,
+        fixture["video_files"][0],
+        fixture["video_files"][1],
+    )
+
+    assert Path(result["source_video"]) == fixture["source"]
+    assert calls[0][0] == fixture["source"]
+    assert Path(result["video_path"]).exists()
+
+
 def test_post_merge_errors_when_dragged_file_is_not_in_report(tmp_path):
     from dd_clip_miner_llm.post_merge import PostMergeError, post_merge_from_context
 
