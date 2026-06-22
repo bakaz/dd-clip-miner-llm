@@ -68,9 +68,9 @@ class TestConfig:
         ct = DEFAULT_CONFIG["content_types"]
         assert isinstance(ct, dict)
         assert ct["song"] is True
-        assert ct["dialogue"] is True
-        assert ct["cringe"] is True
-        assert ct["daily_summary"] is False
+        assert ct["dialogue"] is False
+        assert ct["cringe"] is False
+        assert ct["daily_summary"] is True
 
     def test_load_config_yaml(self, tmp_path):
         """应能加载 YAML 配置"""

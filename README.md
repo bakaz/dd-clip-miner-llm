@@ -9,27 +9,30 @@
 - 下头对话
 - 当天直播结构化总结（仅报告，不切片）
 
+默认配置偏向歌曲切片和当天总结：`content_types.song: true`、`daily_summary: true`，对话/高能/搞笑/下头片段默认关闭，需要时可在配置或 `--content-types` 中开启。
+
 **完全兼容** [dd-song-miner-llm](https://github.com/bakaz/dd-song-miner-llm) 的配置和工作流程。
 
 ## 特性
 
 - **可插拔识别器**：每种内容类型独立实现（`recognizers/`）
 - **多 ASR 后端**：faster-whisper（批量推理 `BatchedInferencePipeline`）、FunASR / Qwen3-ASR、远程 MiMo ASR
-- **智能 LLM**：reasoning followup、工具调用、JSON 修复、歌词搜索
+- **智能 LLM**：reasoning followup、工具调用、JSON 修复，可选歌词搜索
 - **Provider 路由与重试**：`provider_route` 按名称顺序 fallback；`timeout_schedule` 逐步升级超时；传输异常与产物错误分离重试；`_call_llm_raw` 唯一底层请求入口，测试可拦截
 - **KV 缓存优化**：`cache_friendly_prompt_layout` 复用 ASR 前缀，`compact_segment_ranges` 减少输出 token
 - **kv_v2 优化流水线**：开口哼唱检测、小簇跳过、高置信度已知曲名保护、低阈值未知歌曲保留
-- **V3 三轮分段流水线**：高精度发现 → 未覆盖召回审计 → 全量时序裁决（`song_kv.py` 实现）
+- **三轮分段流水线**：高精度发现 → 未覆盖召回审计 → 全量时序裁决（`song_postprocess/song_kv/` 实现）
 - **时序裁决**：全量 ASR 二次审视，修正首轮边界，支持名称保留
 - **副歌感知拆分**：40–130 秒间隔根据文本相似度判断是否为副歌重现
 - **同名相邻合并**：排序后字面相邻、标题相同且间隔 ≤ 40 秒的候选自动合并
-- **搜索验证命名**：对未知歌曲用歌词锚点搜索，需歌词证据才更新名称
+- **搜索验证命名**：可对未知歌曲用歌词锚点搜索，需歌词证据才更新名称；默认关闭
 - **未知歌曲合并**：相邻未知歌曲按时间间隔（≤ 40 秒）和 ASR 文本相似度（≥ 0.3）自动合并，被合并的原始片段导出到 `sus/` 文件夹供人工审核
-- **锚点漏检审计**：可选的 anchor-based 补查，单次 LLM 调用，默认关闭
+- **锚点漏检审计**：可选的 anchor-based 补查，`kv_optimized` 可用作未覆盖区间召回审计
 - **断点续传**：复用 `01_audio`、`02_asr`、LLM 结果（`progress.json`）
 - **批量 + 多段合并**：`ConcatPipeline` 处理直播分段 H.264 损坏（mkvmerge 优先 + 6 策略 fallback）
 - **切片命名**：主播词典 + 路径日期 → `【主播】歌名-歌手-YYMMDD`
 - **手动重切**：改 CSV 后 `manual-cut`
+- **拖拽重切合并**：歌曲导出目录内的 `merge_mp4.bat` 可把两个已导出片段从原始 input/concat 重新切成一个片段
 
 ## 工作流程
 
@@ -46,7 +49,7 @@ cd path\to\dd-clip-miner-llm
 python install.py
 
 copy config.example.yaml config.yaml
-$env:LLM_API_KEY = "<your-api-key>"
+$env:OPENCODE_API_KEY = "<your-api-key>"      # 或设置 DEEPSEEK_API_KEY / MIMO_API_KEY
 
 python -m dd_clip_miner_llm run "D:\videos\live.mp4" --config config.yaml
 ```
@@ -118,7 +121,7 @@ ASR 支持两种写法（见 `config.example.yaml`）：
 
 **faster-whisper 设备自动检测**：设置 `device: auto` + `compute_type: default` 时，系统自动检测 CUDA 可用性。有 GPU 时使用 float16，无 GPU（CPU）时自动切换 `int8` 以获得最佳性能。无需手动配置 `gpu:`/`cpu:` 分流节。
 
-LLM Key 优先环境变量：`LLM_API_KEY`、`DEEPSEEK_API_KEY`、`MIMO_API_KEY` 等，对应 `llm.api_key_env`。
+LLM Key 优先环境变量：默认模板使用 `OPENCODE_API_KEY`、`DEEPSEEK_API_KEY`、`MIMO_API_KEY`，也可在 provider 的 `api_key_env` 中改成自己的变量名。
 
 ### LLM Provider 路由与重试
 
@@ -178,6 +181,8 @@ python -m dd_clip_miner_llm run "D:\videos\live.mp4" --config config.yaml --prof
 python -m dd_clip_miner_llm run "D:\videos\live.mp4" --config config.yaml --profile kv_optimized
 ```
 
+`config.example.yaml` 默认使用 `kv_optimized` profile，并默认启用 `song` 与 `daily_summary`。其他内容类型可通过配置或 `--content-types song,dialogue` 临时开启。
+
 ### 批量
 
 ```powershell
@@ -188,13 +193,13 @@ python -m dd_clip_miner_llm batch-run "D:\input" --config config.yaml --profile 
 
 配置包含 `profiles` 时，音频和 ASR 由两个 profile 共享，LLM、切片和报告分别写入
 `02_asr/llm/<profile>`、`03_clips/<profile>`、`04_reports/<profile>`。
-`accuracy` 保留 task-first 和 `segment_indices`；`kv_optimized` 使用
+默认 `kv_optimized` 使用
 `risk_routed_kv`、缓存友好布局和三轮对象协议。时长、边界膨胀和重叠只作为复核风险，
-不会被当作全局硬过滤条件。两套 profile 共享歌曲 padding，默认
-`merge_gap_seconds: 40`。`accuracy` 显式使用本地 review 和 windowed missed-recheck；
-`kv_optimized` 固定执行 Precision Discovery、Recall Audit 和 Segmentation Adjudication。
+不会被当作全局硬过滤条件。`accuracy` 保留 task-first 和 `segment_indices`，适合做对照。
+两套 profile 共享歌曲 padding，默认 `merge_gap_seconds: 40`。`accuracy` 显式使用本地 review 和 windowed missed-recheck；
+`kv_optimized` 执行 Precision Discovery、Recall Audit 和 Segmentation Adjudication。
 第一轮只保留明确演唱，第二轮只输出未覆盖区间的短证据，第三轮统一修边界并可有限补漏。
-三轮都不搜索歌词；分段稳定后才可独立命名。
+默认 `song.search.enabled: false`，不会联网搜索歌词；需要搜索验证命名时可打开 `song.search.enabled` 或 profile 内的 `song.search.enabled`。
 两个 profile 都完成后会生成
 `02_asr/llm/profile_comparison.json` 和 `profile_comparison.md`。
 
@@ -226,6 +231,16 @@ python scripts/evaluate_song_pipeline_v2.py "results\<date>\<run>" --output ".tm
 python -m dd_clip_miner_llm manual-cut "D:\runs\某次运行" --config config.yaml
 ```
 
+### 拖拽重切合并
+
+歌曲导出目录会自动写入 `merge_mp4.bat` 和 `merge_recut_context.json`。把同一目录下两个 `.mp4` 拖到 bat 上，会从原始 input/concat 重新切出一个 `.mp4`；把两个 `.mp3` 拖到 bat 上，会重新切出一个 `.mp3`。输出写回拖入文件所在目录并自动避让重名，不会覆盖原片段。
+
+也可以直接调用：
+
+```powershell
+python -m dd_clip_miner_llm post-merge --context "...\merge_recut_context.json" "clip1.mp4" "clip2.mp4"
+```
+
 ### 常用参数
 
 | 参数 | 说明 |
@@ -245,6 +260,7 @@ python -m dd_clip_miner_llm manual-cut "D:\runs\某次运行" --config config.ya
 | `run` | 单视频流水线 |
 | `batch-run` | 批量目录 |
 | `manual-cut` | 从 CSV 重切 |
+| `post-merge` | 从两个已导出歌曲片段反查 ASR 并重新切为一个片段 |
 | `init-config` | 生成默认 YAML |
 | `ffmpeg-info` | GPU / 硬件编码器探测 |
 
@@ -268,6 +284,7 @@ dd-clip-miner-llm/
 ├── rename_drag_drop.bat
 ├── scripts/
 │   ├── rename_drag_drop.py
+│   ├── fix_garbled_clip_names.py
 │   ├── evaluate_song_pipeline_v2.py
 │   ├── adaptive_cost_probe.py
 │   ├── review_scope_ab.py
@@ -276,10 +293,11 @@ dd-clip-miner-llm/
 ├── .github/workflows/tests.yml
 └── dd_clip_miner_llm/
     ├── cli.py / __main__.py    # python -m dd_clip_miner_llm
-    ├── pipeline.py             # 主流水线
+    ├── pipeline/               # 主流水线
     ├── batch.py / manual.py
     ├── config.py               # 配置加载、profile 管理、歌曲 pipeline 选择
-    ├── models.py / llm.py / report.py / merger.py
+    ├── models.py / report.py / merger.py / post_merge.py
+    ├── llm/                    # Provider、transport、prompt、parse、tools
     ├── profile_state.py        # profile 指纹、usage 汇总、对比报告
     ├── song_adaptive.py        # 自适应策略选择（review scope / missed strategy）
     ├── song_adaptive_cost.py   # 自适应成本估算
@@ -292,7 +310,7 @@ dd-clip-miner-llm/
     │   └── mimo_asr_backend.py
     ├── recognizers/            # song / dialogue / highlight / funny / cringe / daily_summary
     │   ├── base.py             # BaseRecognizer + post_process 钩子
-    │   └── song.py             # SongRecognizer（legacy / kv_v2）
+    │   └── song/               # SongRecognizer（accuracy / kv / kv_v2）
     ├── song_postprocess/       # 歌曲后处理流水线
     │   ├── normalize.py        # 同名合并、未知歌曲合并、副歌感知拆分、通用规范化
     │   ├── review.py           # LLM 复核（local / full scope）
@@ -300,7 +318,7 @@ dd-clip-miner-llm/
     │   ├── temporal.py         # 时序裁决（全量 ASR 边界修正）
     │   ├── risk.py             # 风险评分、边界修复、anchor 扩展
     │   ├── pipeline.py         # 共享流水线组件（BoundaryRiskStage、FinalAdjudicationStage 等）
-    │   ├── song_kv.py          # V3 三轮对象协议与 KV 缓存优化
+    │   ├── song_kv/            # 三轮对象协议与 KV 缓存优化
     │   └── lyrics_match.py    # 歌词匹配与标题归一化
     ├── concat/                 # 多段录像合并流水线
     │   ├── models.py           # VideoMeta, ProblemProfile, ConcatContext
@@ -334,10 +352,12 @@ runs/<run_name>/
 ├── 00_input/                   # 输入（合并后为 concat.mp4）
 ├── 01_audio/source.wav
 ├── 02_asr/transcript.json
-├── 02_asr/llm/<type>/          # matches.json, llm_batch_*.json, ...
-├── 03_clips/audio|video/<type>/
-│   └── sus/                    # 被合并的未知歌曲原始片段（供人工审核）
-├── 04_reports/<type>/          # songs.csv, dialogues.csv, ...
+├── 02_asr/llm/<profile>/<type>/ # matches.json, llm_batch_*.json, ...
+├── 03_clips/<profile>/
+│   ├── audio/song/merge_mp4.bat # 歌曲拖拽重切合并工具
+│   ├── video/song/merge_mp4.bat
+│   └── video/song/sus/         # 被合并的未知歌曲原始片段（供人工审核）
+├── 04_reports/<profile>/<type>/ # songs.csv, dialogues.csv, ...
 ├── manifest.json / progress.json
 ├── clip_naming.json            # 可选
 └── 05_manual/                  # manual-cut 输出

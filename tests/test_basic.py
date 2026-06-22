@@ -172,7 +172,7 @@ class TestConfig:
         assert "funny" in content_types
         assert "daily_summary" in content_types
         assert content_types["song"] is True
-        assert content_types["daily_summary"] is False
+        assert content_types["daily_summary"] is True
 
     def test_deep_merge(self):
         base = {"a": 1, "b": {"c": 2, "d": 3}}

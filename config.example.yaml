@@ -43,28 +43,49 @@ asr:
     timestamp_chunk_seconds: 5
     language: null
 llm:
+  provider_route:
+  - opencode
+  - deepseek
+  - mimo
   providers:
-    openai:
-      api_key: null
-      api_key_env: LLM_API_KEY
-      base_url: null
-      model: gpt-4o
-      temperature: 0.1
-      max_tokens: 8192
-      timeout: 300
-      max_retries: 3
-    mimo:
-      api_key_env: MIMO_API_KEY
-      base_url: https://token-plan-cn.xiaomimimo.com/v1
-      model: mimo-v2.5-pro
-      temperature: 0.1
-      max_tokens: 8192
-      timeout: 300
-      max_retries: 3
     opencode:
+      api_key: null
       api_key_env: OPENCODE_API_KEY
       base_url: https://opencode.ai/zen/go/v1
       model: deepseek-v4-flash
+      temperature: 0.1
+      max_tokens: 8192
+      timeout_schedule:
+      - 60
+      - 120
+      - 180
+      retry_backoff_seconds:
+      - 2
+      - 5
+      retry_jitter_ratio: 0.25
+      result_retries: 2
+    deepseek:
+      api_key: null
+      api_key_env: DEEPSEEK_API_KEY
+      base_url: https://api.deepseek.com
+      model: deepseek-v4-flash
+      thinking: disabled
+      temperature: 0.1
+      max_tokens: 8192
+      timeout_schedule:
+      - 60
+      - 120
+      - 180
+      retry_backoff_seconds:
+      - 2
+      - 5
+      retry_jitter_ratio: 0.25
+      result_retries: 2
+    mimo:
+      api_key: null
+      api_key_env: MIMO_API_KEY
+      base_url: https://token-plan-cn.xiaomimimo.com/v1
+      model: mimo-v2.5-pro
       temperature: 0.1
       max_tokens: 8192
       timeout_schedule:
@@ -90,7 +111,7 @@ llm:
   use_tools: true
   verify_with_search: true
   json_fix_rounds: 3
-default_profile: accuracy
+default_profile: kv_optimized
 profiles:
   accuracy:
     llm:
@@ -161,7 +182,7 @@ profiles:
         search_query_source: lyric_anchors
         preserve_unknown_on_weak_evidence: true
       search:
-        enabled: true
+        enabled: false
         search_unknown_only: true
         max_searches: 25
       missed_recheck:
@@ -186,11 +207,11 @@ padding:
   merge_gap_seconds: 40.0
 content_types:
   song: true
-  dialogue: true
+  dialogue: false
   highlight: false
   funny: false
-  cringe: true
-  daily_summary: false
+  cringe: false
+  daily_summary: true
 song:
   enabled: true
   normalization:
@@ -200,7 +221,7 @@ song:
     chorus_similarity_threshold: 0.3
     chorus_context_segments: 3
   search:
-    enabled: true
+    enabled: false
     search_unknown_only: true
     max_searches: 25
   risk:
@@ -283,7 +304,7 @@ cringe:
   min_confidence: 0.6
   merge_gap_seconds: 15.0
 daily_summary:
-  enabled: false
+  enabled: true
   summary_only: true
   language: zh-CN
   title: 当天直播内容总结
@@ -302,7 +323,7 @@ output:
   video_codec: copy
   match_context_segments: 10
   max_export_workers: 4
-  concat_videos: false
+  concat_videos: true
   single_file_policy: copy
   concat_force_normalize: false
   # 歌曲导出目录会自动写入 merge_mp4.bat 和 merge_recut_context.json。

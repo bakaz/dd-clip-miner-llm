@@ -97,11 +97,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # 内容识别类型（true/false 控制启用/禁用）
     "content_types": {
         "song": True,
-        "dialogue": True,
+        "dialogue": False,
         "highlight": False,
         "funny": False,
-        "cringe": True,
-        "daily_summary": False,
+        "cringe": False,
+        "daily_summary": True,
     },
     # 歌曲识别配置
     "song": {
@@ -153,7 +153,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "chorus_context_segments": 3,
         },
         "search": {
-            "enabled": True,
+            "enabled": False,
             "search_unknown_only": True,
             "max_searches": 25,
         },
@@ -240,7 +240,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "merge_gap_seconds": 15.0,
     },
     "daily_summary": {
-        "enabled": False,
+        "enabled": True,
         "summary_only": True,
         "language": "zh-CN",
         "title": "当天直播内容总结",
@@ -260,7 +260,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "video_codec": "copy",
         "match_context_segments": 10,
         "max_export_workers": 4,
-        "concat_videos": False,
+        "concat_videos": True,
         "single_file_policy": "copy",
         "concat_force_normalize": False,  # 新 pipeline 下仍先做 health probe + pre-sanitize + ProblemProfile 分类
         "clip_naming": {
