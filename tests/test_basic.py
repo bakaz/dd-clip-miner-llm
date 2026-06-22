@@ -586,7 +586,7 @@ class TestSongMissedRecheck:
         }
         assert config["song"]["pipeline"]["continuation_overlap_segments"] == 50
         assert config["song"]["pipeline"]["anchor_boundary_expansion"] is False
-        assert config["song"]["search"]["enabled"] is True
+        assert config["song"]["search"]["enabled"] is False
         assert config["song"]["missed_recheck"]["enabled"] is True
         assert config["song"]["review"]["enabled"] is False
         assert config["song"]["review"]["transcript_scope"] == "local"
