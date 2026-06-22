@@ -1,13 +1,17 @@
-"""Manual cut from context JSON — like post-merge but for arbitrary time ranges."""
+"""Manual cut from context JSON — reuses post_merge path resolution."""
 
 from __future__ import annotations
 
-import json
 import re
 from pathlib import Path
 from typing import Any
 
 from .ffmpeg import cut_audio, cut_video
+from .post_merge import (
+    _load_json_object,
+    _portable_run_dir,
+    _source_video_and_duration,
+)
 
 
 class ManualCutContextError(RuntimeError):
@@ -22,8 +26,12 @@ def manual_cut_from_context(
 ) -> dict[str, Any]:
     context_file = Path(context_path)
     context = _load_json_object(context_file)
+    context_run_dir = _resolve_run_dir(context, context_file.parent)
+    run_dir = _portable_run_dir(context_file.parent, context_run_dir)
 
-    input_video = _resolve_input_video(context, context_file.parent)
+    total_duration, input_video = _source_video_and_duration(
+        context, run_dir, original_run_dir=context_run_dir,
+    )
     output_dir = context_file.parent
     output_suffix = _determine_output_suffix(context)
 
@@ -60,50 +68,11 @@ def manual_cut_from_context(
     }
 
 
-def _load_json_object(path: Path) -> dict[str, Any]:
-    try:
-        data = json.loads(path.read_text(encoding="utf-8-sig"))
-    except FileNotFoundError as exc:
-        raise ManualCutContextError(f"Context file not found: {path}") from exc
-    except json.JSONDecodeError as exc:
-        raise ManualCutContextError(f"Invalid JSON: {path}") from exc
-    if not isinstance(data, dict):
-        raise ManualCutContextError(f"Expected JSON object in: {path}")
-    return data
-
-
-def _resolve_input_video(context: dict[str, Any], context_dir: Path) -> Path:
-    value = context.get("input_video")
+def _resolve_run_dir(context: dict[str, Any], context_dir: Path) -> Path:
+    value = context.get("run_dir")
     if not value:
-        raise ManualCutContextError("Context is missing 'input_video'")
-    path = Path(str(value))
-    if path.is_absolute():
-        if path.exists():
-            return path
-        # 尝试从 context 目录回推 run_dir 下的 00_input
-        fallback = _fallback_input_video(context_dir)
-        if fallback is not None:
-            return fallback
-        raise ManualCutContextError(f"Input video not found: {path}")
-    candidate = context_dir / path
-    if candidate.exists():
-        return candidate.resolve()
-    raise ManualCutContextError(f"Input video not found: {candidate}")
-
-
-def _fallback_input_video(context_dir: Path) -> Path | None:
-    """从 context 目录回推 run_dir/00_input 下的视频文件。"""
-    current = context_dir
-    for _ in range(10):
-        input_dir = current / "00_input"
-        if input_dir.exists():
-            videos = list(input_dir.glob("*.mp4")) + list(input_dir.glob("*.mkv")) + list(input_dir.glob("*.flv"))
-            if videos:
-                return videos[0].resolve()
-        if current == current.parent:
-            break
-        current = current.parent
-    return None
+        raise ManualCutContextError("Context is missing 'run_dir'")
+    return Path(str(value))
 
 
 def _determine_output_suffix(context: dict[str, Any]) -> str:
