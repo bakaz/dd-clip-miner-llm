@@ -267,7 +267,7 @@ profiles:
             load_config(config_file, profile="missing")
 
     def test_shipped_accuracy_profile_keeps_legacy_layout_with_review(self):
-        config = load_config("config.deepseek.example.yaml", profile="accuracy")
+        config = load_config("config.example.yaml", profile="accuracy")
 
         assert config["llm"]["cache_friendly_prompt_layout"] is False
         assert config["llm"]["compact_segment_ranges"] is False
@@ -2890,7 +2890,7 @@ class TestCLI:
 
     @pytest.mark.parametrize(
         "path",
-        ["config.example.yaml", "config.deepseek.example.yaml"],
+        ["config.example.yaml"],
     )
     def test_shipped_profile_configs_keep_only_shared_values_common(self, path):
         import yaml

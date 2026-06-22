@@ -108,7 +108,6 @@ python -m dd_clip_miner_llm init-config --out config.yaml
 | 文件 | 说明 |
 |------|------|
 | `config.example.yaml` | 主配置模板（含注释） |
-| `config.deepseek.example.yaml` | DeepSeek |
 | `config.daily-summary.example.yaml` | 仅当天总结 |
 | `streamer_dictionary.example.json` | 主播词典 |
 
