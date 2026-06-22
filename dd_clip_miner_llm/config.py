@@ -98,8 +98,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "content_types": {
         "song": True,
         "dialogue": True,
-        "highlight": True,
-        "funny": True,
+        "highlight": False,
+        "funny": False,
         "cringe": True,
         "daily_summary": False,
     },
@@ -259,6 +259,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "video_extension": "mp4",
         "video_codec": "copy",
         "match_context_segments": 10,
+        "max_export_workers": 4,
         "concat_videos": False,
         "single_file_policy": "copy",
         "concat_force_normalize": False,  # 新 pipeline 下仍先做 health probe + pre-sanitize + ProblemProfile 分类

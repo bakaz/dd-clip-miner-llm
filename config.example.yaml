@@ -187,8 +187,8 @@ padding:
 content_types:
   song: true
   dialogue: true
-  highlight: true
-  funny: true
+  highlight: false
+  funny: false
   cringe: true
   daily_summary: false
 song:
@@ -303,6 +303,11 @@ output:
   match_context_segments: 10
   max_export_workers: 4
   concat_videos: false
+  single_file_policy: copy
+  concat_force_normalize: false
+  # 歌曲导出目录会自动写入 merge_mp4.bat 和 merge_recut_context.json。
+  # 将同一目录下两个已导出的 .mp4 拖到 bat 上会从原始 input/concat 重新切出一个 .mp4；
+  # 将两个 .mp3 拖到 bat 上会重新切出一个 .mp3。不会覆盖原文件。
   clip_naming:
     enabled: true
     dictionary_path: streamer_dictionary.json
