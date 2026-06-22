@@ -8,7 +8,7 @@ if "%~1"=="" (
     echo Drag one or more video files onto this .bat file.
     echo.
     echo Default output format:
-    echo   【StreamerName】歌曲名-歌手名-250101.mp4
+    echo   【StreamerName】001-歌曲名-歌手名-250101.mp4
     pause
     exit /b 1
 )

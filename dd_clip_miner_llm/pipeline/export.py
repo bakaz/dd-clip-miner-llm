@@ -166,12 +166,18 @@ def _export_results(
         if do_video:
             _write_merge_recut_assets(video_dir_out, merge_context)
 
+    # 按 start time 排序生成序号
+    sorted_results = sorted(results, key=lambda r: r.start)
+    result_to_sequence = {id(r): i + 1 for i, r in enumerate(sorted_results)}
+
     stem_counts: dict[str, int] = {}
     tasks: list[tuple[ContentResult, str, str]] = []
     for result in results:
+        sequence_number = result_to_sequence.get(id(result), 0)
         stem = resolve_export_stem(
             result, config, content_type, naming_profile,
             legacy_safe_filename=_safe_filename,
+            sequence_number=sequence_number,
         )
         seen_count = stem_counts.get(stem, 0)
         stem_counts[stem] = seen_count + 1

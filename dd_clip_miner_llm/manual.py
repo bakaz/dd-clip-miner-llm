@@ -59,13 +59,20 @@ def manual_cut(
         config_path=Path(config_path).parent if config_path else None,
         extra_texts=[run.name],
     )
+
+    # 按 start time 排序生成序号
+    sorted_results = sorted(results, key=lambda r: r.start)
+    result_to_sequence = {id(r): i + 1 for i, r in enumerate(sorted_results)}
+
     for result in results:
+        sequence_number = result_to_sequence.get(id(result), 0)
         stem = resolve_export_stem(
             result,
             config,
             content_type,
             naming_profile,
             legacy_safe_filename=_safe_manual_filename,
+            sequence_number=sequence_number,
         )
         if config["output"].get("audio_segments", True):
             target = audio_out / f"{stem}.{audio_ext}"

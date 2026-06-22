@@ -23,7 +23,7 @@ class RenamePlan:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Rename dragged clip files to: 【主播】歌名-歌手-YYMMDD.ext",
+        description="Rename dragged clip files to: 【主播】序号-歌名-歌手-YYMMDD.ext",
     )
     parser.add_argument("paths", nargs="+", help="Files or directories to rename")
     parser.add_argument(

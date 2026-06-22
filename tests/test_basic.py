@@ -4086,8 +4086,9 @@ class TestClipNaming:
             end=10.0,
             duration=10.0,
         )
-        stem = build_clip_export_stem(result, profile)
+        stem = build_clip_export_stem(result, profile, sequence_number=1)
         assert stem.startswith("【示例主播】")
+        assert "001" in stem
         assert "示例歌曲" in stem
         assert "260603" in stem
 

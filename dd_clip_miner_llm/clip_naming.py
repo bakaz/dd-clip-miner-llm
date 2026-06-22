@@ -1,4 +1,4 @@
-"""切片导出命名：JSON 词典匹配主播，路径严格解析 YYMMDD，输出【主播】歌名-歌手-YYMMDD。"""
+"""切片导出命名：JSON 词典匹配主播，路径严格解析 YYMMDD，输出【主播】序号-歌名-歌手-YYMMDD。"""
 from __future__ import annotations
 
 import json
@@ -173,9 +173,10 @@ def resolve_export_stem(
     naming_profile: ClipNamingProfile | None,
     *,
     legacy_safe_filename: Any,
+    sequence_number: int = 0,
 ) -> str:
     if naming_profile is not None and should_apply_clip_naming(content_type, config):
-        return build_clip_export_stem(result, naming_profile)
+        return build_clip_export_stem(result, naming_profile, sequence_number)
     name_bits = [f"{result.index:03d}", result.title]
     if result.artist:
         name_bits.append(result.artist)
@@ -185,16 +186,18 @@ def resolve_export_stem(
 def build_clip_export_stem(
     result: ContentResult,
     profile: ClipNamingProfile,
+    sequence_number: int = 0,
 ) -> str:
     title = _clean_name_part(result.title)
     artist = _clean_name_part(result.artist)
     streamer = _clean_name_part(profile.streamer)
     date_text = profile.date
+    seq = f"{sequence_number:03d}" if sequence_number > 0 else "001"
 
     if artist and artist != "untitled":
-        raw = f"【{streamer}】{title}-{artist}-{date_text}"
+        raw = f"【{streamer}】{seq}-{title}-{artist}-{date_text}"
     else:
-        raw = f"【{streamer}】{title}-{date_text}"
+        raw = f"【{streamer}】{seq}-{title}-{date_text}"
     stem = safe_path_part(raw, fallback=f"clip_{result.index:03d}")
     # Final guard: never emit replacement char in a filename
     stem = stem.replace("\ufffd", "")
