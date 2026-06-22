@@ -60,9 +60,36 @@ def _post_merge_config_snapshot(config: dict[str, Any]) -> dict[str, Any]:
     return snapshot
 
 
+def _write_manual_cut_tool(target_dir: Path) -> None:
+    """Write a manual cut bat with absolute Python and project paths."""
+    package_dir = Path(__file__).parent.parent.parent.resolve()
+    python_exe = Path(sys.executable).resolve()
+    target = target_dir / "manual_cut.bat"
+    try:
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            _manual_cut_tool_script(python_exe=python_exe, project_root=package_dir),
+            encoding="utf-8",
+        )
+        logger.debug("Wrote manual_cut.bat to %s", target_dir)
+    except OSError as exc:
+        logger.debug("Failed to write manual_cut.bat: %s", exc)
+
+
+def _manual_cut_tool_script(*, python_exe: Path, project_root: Path) -> str:
+    template = resources.files("dd_clip_miner_llm.assets").joinpath("manual_cut.bat").read_text(
+        encoding="utf-8"
+    )
+    return template.format(
+        python_exe=str(python_exe),
+        project_root=str(project_root),
+    )
+
+
 def _write_merge_recut_assets(target_dir: Path, context: dict[str, Any]) -> None:
     target_dir.mkdir(parents=True, exist_ok=True)
     _write_merge_tool(target_dir)
+    _write_manual_cut_tool(target_dir)
     (target_dir / "merge_recut_context.json").write_text(
         json.dumps(context, ensure_ascii=False, indent=2),
         encoding="utf-8",
