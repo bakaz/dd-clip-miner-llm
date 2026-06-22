@@ -74,6 +74,13 @@ def build_parser() -> argparse.ArgumentParser:
     post_merge_parser.add_argument("file2", help="第二个已导出 MP4/MP3")
     post_merge_parser.add_argument("--context", required=True, help="merge_recut_context.json 路径")
 
+    # manual-cut-context 命令：从 context JSON 读取视频路径，手动切片到同目录
+    mcc_parser = subparsers.add_parser("manual-cut-context", help="从 context JSON 手动切片到同目录")
+    mcc_parser.add_argument("--context", required=True, help="manual_cut_context.json 路径")
+    mcc_parser.add_argument("--start", required=True, help="开始时间 (如 10:30 或 630)")
+    mcc_parser.add_argument("--end", required=True, help="结束时间 (如 15:45 或 945)")
+    mcc_parser.add_argument("--filename", default=None, help="输出文件名（不含扩展名，留空自动生成）")
+
     # init-config 命令
     init_parser = subparsers.add_parser("init-config", help="生成默认配置文件")
     init_parser.add_argument("--out", default="config.yaml", help="输出路径")
@@ -713,6 +720,19 @@ def main(argv: list[str] | None = None) -> int:
         print("Post-merge recut complete:")
         print(f"  Output: {result['output_path']}")
         print(f"  Range: {result['start']:.3f}s - {result['end']:.3f}s")
+        return 0
+
+    if args.command == "manual-cut-context":
+        from .manual_cut_context import manual_cut_from_context, ManualCutContextError
+
+        try:
+            result = manual_cut_from_context(args.context, args.start, args.end, args.filename)
+        except ManualCutContextError as exc:
+            print(f"Error: {exc}")
+            return 1
+        print("Manual cut complete:")
+        print(f"  Output: {result['output_path']}")
+        print(f"  Range: {result['start']} - {result['end']}")
         return 0
 
     parser.error(f"Unknown command: {args.command}")

@@ -94,6 +94,10 @@ def _write_merge_recut_assets(target_dir: Path, context: dict[str, Any]) -> None
         json.dumps(context, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    (target_dir / "manual_cut_context.json").write_text(
+        json.dumps(context, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
 
 
 def _write_structured_summary(
