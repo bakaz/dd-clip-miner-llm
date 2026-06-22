@@ -350,3 +350,17 @@ output:
     min_score: 0.65
     apply_to:
     - song
+
+# ─── cut-copy 工作流（录播自动处理 + 远程归档 + 关机）─────────
+# 启用后，GPU 机器通过 Windows 计划任务自动执行：
+# 1. 扫描 DDTV 输出目录（SMB）查找新视频
+# 2. 运行 dd-clip-miner-llm 处理
+# 3. 复制结果到目标 SMB 共享
+# 4. 验证后删除源文件和工作目录
+# 5. 关机
+#
+# 配置详情见 cut_copy.example.conf
+# 计划任务设置: scripts/setup_cut_copy_task.ps1
+cut_copy:
+  enabled: false
+  conf_path: "cut_copy.conf"

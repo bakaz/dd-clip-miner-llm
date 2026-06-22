@@ -89,6 +89,24 @@ def build_parser() -> argparse.ArgumentParser:
     info_parser = subparsers.add_parser("ffmpeg-info", help="显示 GPU 和 FFmpeg 编码器信息")
     info_parser.add_argument("--ffmpeg", default=None, help="FFmpeg 路径")
 
+    # cut-copy 命令
+    cc_parser = subparsers.add_parser(
+        "cut-copy",
+        help="录播自动处理工作流：扫描 DDTV 输出 → 处理 → 复制到 SMB → 关机",
+    )
+    cc_parser.add_argument(
+        "--conf", default="cut_copy.conf",
+        help="cut_copy 配置文件路径 (默认: cut_copy.conf)",
+    )
+    cc_parser.add_argument(
+        "--dry-run", action="store_true",
+        help="只显示待处理文件，不执行处理/复制/关机",
+    )
+    cc_parser.add_argument(
+        "--no-shutdown", action="store_true",
+        help="本次运行不关机（覆盖配置文件设置）",
+    )
+
     return parser
 
 
@@ -613,6 +631,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "ffmpeg-info":
         _print_ffmpeg_info(args.ffmpeg)
         return 0
+
+    if args.command == "cut-copy":
+        from .cut_copy import run_cut_copy
+        return run_cut_copy(args.conf, dry_run=args.dry_run, no_shutdown=args.no_shutdown)
 
     if args.command == "run":
         from .pipeline import run_pipeline
