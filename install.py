@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import os
 import platform
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -239,6 +240,77 @@ def _detect_ram() -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# Linux system dependency helpers
+# ---------------------------------------------------------------------------
+
+_LINUX_SYSTEM_DEPS: dict[str, str] = {
+    "ffmpeg": "ffmpeg",
+    "mkvmerge": "mkvtoolnix",
+    "libsndfile": "libsndfile1",
+}
+
+
+def _detect_apt() -> bool:
+    """检测 apt-get 是否可用（Debian / Ubuntu 系）。"""
+    return shutil.which("apt-get") is not None
+
+
+def _detect_linux_system_deps_installed() -> bool:
+    """检查所有 Linux 系统依赖是否已安装。"""
+    for cmd in ("ffmpeg", "ffprobe", "mkvmerge"):
+        if shutil.which(cmd) is None:
+            return False
+    try:
+        result = subprocess.run(
+            ["dpkg", "-s", "libsndfile1"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            return False
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+    return True
+
+
+def _sudo_prefix() -> list[str]:
+    """需要 sudo 且当前非 root 时返回 ['sudo']，否则空列表。"""
+    if os.geteuid() == 0:
+        return []
+    if shutil.which("sudo") is None:
+        return []
+    return ["sudo"]
+
+
+def _install_system_deps_linux() -> bool:
+    """通过 apt-get 安装 ffmpeg / mkvtoolnix / libsndfile1。"""
+    if not _detect_apt():
+        print("  未检测到 apt-get，请手动安装: ffmpeg, mkvtoolnix, libsndfile1")
+        return False
+
+    print("  通过 apt-get 安装系统依赖...")
+    packages = list(_LINUX_SYSTEM_DEPS.values())
+    cmd = [*_sudo_prefix(), "apt-get", "install", "-y", *packages]
+    print(f"  命令: {' '.join(cmd)}")
+    try:
+        result = subprocess.run(cmd, capture_output=False, text=True, timeout=600)
+        if result.returncode != 0:
+            print(f"  ✗ apt-get 安装失败 (返回码: {result.returncode})")
+            return False
+    except subprocess.TimeoutExpired:
+        print("  ✗ apt-get 安装超时")
+        return False
+    except Exception as exc:
+        print(f"  ✗ apt-get 安装异常: {exc}")
+        return False
+
+    if _detect_linux_system_deps_installed():
+        print("  ✓ 系统依赖安装成功")
+        return True
+    print("  ✗ 安装后验证失败，请检查 apt 输出")
+    return False
+
+
 def load_install_config(config_path: str | Path) -> InstallConfig:
     """加载安装配置文件"""
     config = InstallConfig()
@@ -285,6 +357,15 @@ def _install_mkvmerge() -> bool:
         print("  请手动安装: winget install MoritzBunkus.MKVToolNix")
         print("  下载: https://mkvtoolnix.download/downloads.html#windows")
     else:
+        if _detect_apt():
+            print("  尝试通过 apt-get 安装 mkvtoolnix...")
+            cmd = [*_sudo_prefix(), "apt-get", "install", "-y", "mkvtoolnix"]
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+                if result.returncode == 0 and _detect_mkvmerge():
+                    return True
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                pass
         print("  请通过系统包管理器安装 mkvtoolnix，例如:")
         print("    Debian/Ubuntu: sudo apt install mkvtoolnix")
         print("    macOS: brew install mkvtoolnix")
@@ -294,6 +375,14 @@ def _install_mkvmerge() -> bool:
 def generate_install_plan(info: SystemInfo, config: InstallConfig) -> list[dict[str, Any]]:
     """生成安装计划"""
     steps = []
+
+    # Linux 系统依赖（apt-get: ffmpeg + mkvtoolnix + libsndfile1）
+    if platform.system() != "Windows" and _detect_apt():
+        steps.append({
+            "name": "系统依赖 (ffmpeg / mkvtoolnix / libsndfile1)",
+            "check": _detect_linux_system_deps_installed,
+            "custom_install": _install_system_deps_linux,
+        })
 
     if config.install_mkvmerge:
         steps.append({
@@ -497,8 +586,12 @@ def main():
     if success:
         print("\n✓ 所有组件安装成功！")
         print("\n下一步：")
-        print("  1. 复制配置文件: copy config.example.yaml config.yaml")
-        print("  2. 设置 API key: $env:LLM_API_KEY='your-key'")
+        if platform.system() == "Windows":
+            print("  1. 复制配置文件: copy config.example.yaml config.yaml")
+            print("  2. 设置 API key: $env:LLM_API_KEY='your-key'")
+        else:
+            print("  1. 复制配置文件: cp config.example.yaml config.yaml")
+            print("  2. 设置 API key: export LLM_API_KEY='your-key'")
         print("  3. 运行: python -m dd_clip_miner_llm run video.mp4 --config config.yaml")
     else:
         print("\n✗ 安装过程中出现错误，请检查日志。")
