@@ -119,7 +119,7 @@ def _generate_config_yaml() -> str:
         "      word_gap_seconds: 2.0",
         "      max_segment_seconds: 15.0",
         "      batch:",
-        "        model: turbo",
+        "        model: small",
         "        inference_mode: batched",
         "        batch_size: 8",
         "        vad_filter: true",

@@ -116,7 +116,7 @@ python -m dd_clip_miner_llm init-config --out config.yaml
 ASR 使用 `asr.mode: local | remote` 新结构（见 `config.example.yaml`）：
 
 - 本地：`local.backend: faster_whisper | funasr`
-- faster-whisper 默认拆成 `batch` 和 `standard` 两个模式：先用 `turbo + batched + vad_filter=true` 跑完整音频，再对 `>= 4s` 的 ASR 空洞用 `turbo + standard + vad_filter=false` 补漏。
+- faster-whisper 默认拆成 `batch` 和 `standard` 两个模式：先用 `small + batched + vad_filter=true` 跑完整音频，再对 `>= 4s` 的 ASR 空洞用 `turbo + standard + vad_filter=false` 补漏。
 - 补漏结果会写回最终 `02_asr/transcript.json`，并额外保留 `transcript_primary.json`、`fallback_ranges.json`、`fallback_segments.json` 供审计。
 
 **faster-whisper 设备自动检测**：设置 `device: auto` + `compute_type: default` 时，系统自动检测 CUDA 可用性。有 GPU 时使用 float16，无 GPU（CPU）时自动切换 `int8` 以获得最佳性能。无需手动配置 `gpu:`/`cpu:` 分流节。

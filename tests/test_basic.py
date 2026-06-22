@@ -155,7 +155,7 @@ class TestConfig:
         assert "asr" in DEFAULT_CONFIG
         assert DEFAULT_CONFIG["asr"]["mode"] == "local"
         fw = DEFAULT_CONFIG["asr"]["local"]["faster_whisper"]
-        assert fw["batch"]["model"] == "turbo"
+        assert fw["batch"]["model"] == "small"
         assert fw["batch"]["inference_mode"] == "batched"
         assert fw["standard"]["model"] == "turbo"
         assert fw["standard"]["vad_filter"] is False
@@ -348,7 +348,7 @@ class TestASRBackends:
     def test_build_default_backend(self):
         backend = build_asr_backend(DEFAULT_CONFIG["asr"])
         assert isinstance(backend, FasterWhisperBackend)
-        assert backend.settings["model"] == "turbo"
+        assert backend.settings["model"] == "small"
         assert backend.inference_mode == "batched"
 
     def test_build_faster_whisper_backend(self):
@@ -386,7 +386,7 @@ class TestASRBackends:
         batch = resolve_faster_whisper_mode_settings(DEFAULT_CONFIG["asr"], "batch")
         standard = resolve_faster_whisper_mode_settings(DEFAULT_CONFIG["asr"], "standard")
 
-        assert batch["model"] == "turbo"
+        assert batch["model"] == "small"
         assert batch["inference_mode"] == "batched"
         assert batch["batch_size"] == 8
         assert batch["vad_filter"] is True
