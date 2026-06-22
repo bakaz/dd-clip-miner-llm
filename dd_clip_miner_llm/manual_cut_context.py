@@ -62,7 +62,7 @@ def manual_cut_from_context(
 
 def _load_json_object(path: Path) -> dict[str, Any]:
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
     except FileNotFoundError as exc:
         raise ManualCutContextError(f"Context file not found: {path}") from exc
     except json.JSONDecodeError as exc:
