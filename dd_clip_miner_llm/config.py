@@ -13,33 +13,55 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "channels": 1,
     },
     "asr": {
-        "backend": "funasr",
-        "model": "small",
-        "device": "auto",  # auto + gpu/cpu 节支持硬件自动分流（见 asr_backends/__init__.py）
-        "compute_type": "default",
-        "inference_mode": "batched",
-        "cpu_threads": 8,
-        "num_workers": 1,
-        "batch_size": 8,
-        "language": None,
-        "beam_size": 5,
-        "vad_filter": True,
-        "initial_prompt": None,
-        "word_timestamps": True,
-        "split_on_word_gaps": True,
-        "word_gap_seconds": 2.0,
-        "max_segment_seconds": 15.0,
-        "funasr": {
-            "model": "Qwen/Qwen3-ASR-0.6B",
-            "hub": "hf",
-            "trust_remote_code": True,
-            "device": "auto",
-            "batch_size": 1,
-            "language": None,
-            "vad_model": None,
-            "punc_model": None,
-            "spk_model": None,
-            "generate_kwargs": {},
+        "mode": "local",
+        "local": {
+            "backend": "faster_whisper",
+            "faster_whisper": {
+                "device": "auto",
+                "compute_type": "default",
+                "cpu_threads": 8,
+                "num_workers": 1,
+                "language": None,
+                "beam_size": 5,
+                "initial_prompt": None,
+                "word_timestamps": True,
+                "split_on_word_gaps": True,
+                "word_gap_seconds": 2.0,
+                "max_segment_seconds": 15.0,
+                "batch": {
+                    "model": "turbo",
+                    "inference_mode": "batched",
+                    "batch_size": 8,
+                    "vad_filter": True,
+                },
+                "standard": {
+                    "model": "turbo",
+                    "inference_mode": "standard",
+                    "batch_size": 0,
+                    "vad_filter": False,
+                },
+                "fallback": {
+                    "enabled": True,
+                    "primary_mode": "batch",
+                    "fallback_mode": "standard",
+                    "min_gap_seconds": 4.0,
+                    "padding_seconds": 2.0,
+                    "max_workers": 1,
+                    "merge_policy": "fill_gaps",
+                },
+            },
+            "funasr": {
+                "model": "Qwen/Qwen3-ASR-0.6B",
+                "hub": "hf",
+                "trust_remote_code": True,
+                "device": "auto",
+                "batch_size": 1,
+                "language": None,
+                "vad_model": None,
+                "punc_model": None,
+                "spk_model": None,
+                "generate_kwargs": {},
+            },
         },
     },
     "llm": {
@@ -509,22 +531,18 @@ def get_song_search_config(config: dict[str, Any]) -> dict[str, Any]:
 
 
 def get_asr_inference_mode(settings: dict[str, Any]) -> str:
-    """Resolve effective inference_mode for faster_whisper (with legacy batch_size compat).
-    Returns 'batched' or 'standard'.
-    """
+    """Resolve the primary ASR inference mode."""
     mode = str(settings.get("mode", "")).lower()
     if mode == "local":
         local_cfg = settings.get("local", {}) or {}
         backend = str(local_cfg.get("backend", "faster_whisper")).lower().replace("-", "_")
         if backend in ("faster_whisper", "whisper"):
             fw = local_cfg.get("faster_whisper", {}) or local_cfg
-            return _resolve_inference_mode(fw)
+            fallback = fw.get("fallback", {}) if isinstance(fw, dict) else {}
+            primary_mode = str(fallback.get("primary_mode") or "batch")
+            mode_cfg = fw.get(primary_mode, {}) if isinstance(fw, dict) else {}
+            return _resolve_inference_mode(mode_cfg)
         return "standard"
-    # old/flat format
-    backend = str(settings.get("backend", "faster_whisper")).lower().replace("-", "_")
-    if backend in ("faster_whisper", "whisper"):
-        fw = settings.get("faster_whisper", {}) or settings
-        return _resolve_inference_mode(fw)
     return "standard"
 
 
@@ -541,44 +559,12 @@ def _resolve_inference_mode(fw: dict[str, Any]) -> str:
 
 
 def get_asr_fingerprint(config: dict[str, Any]) -> str:
-    """Fingerprint of ASR-relevant settings (incl. resolved inference_mode, model, device etc.).
-    Used for transcript reuse decision. Independent of LLM config.
-    If gpu/cpu sections present, uses the hardware-selected values for the fp.
-    """
-    asr = config.get("asr", {}) or {}
-    # determine base
-    mode = str(asr.get("mode", "")).lower()
-    if mode == "local":
-        local = asr.get("local", {}) or {}
-        backend = str(local.get("backend", "faster_whisper")).lower().replace("-", "_")
-        fw = local.get(backend, {}) or local if backend in local else {}
-    else:
-        backend = str(asr.get("backend", "faster_whisper")).lower().replace("-", "_")
-        fw = asr.get(backend, {}) or asr if backend in asr else asr
-    # apply hw selection for effective values in fp
-    if isinstance(local if mode == "local" else asr, dict):
-        lbase = local if mode == "local" else asr
-        if "gpu" in lbase or "cpu" in lbase:
-            is_gpu = False
-            try:
-                import torch
-                is_gpu = torch.cuda.is_available()
-            except Exception:
-                pass
-            hw = "gpu" if is_gpu else "cpu"
-            if hw in lbase and isinstance(lbase[hw], dict):
-                hwsec = lbase[hw]
-                for bk in ["faster_whisper", "funasr"]:
-                    if bk in hwsec and isinstance(hwsec[bk], dict):
-                        if bk == backend or bk in (backend,):
-                            fw = {**fw, **hwsec[bk]}
-                for k, v in hwsec.items():
-                    if k not in ["faster_whisper", "funasr"]:
-                        if k in ("device", "compute_type", "model"):
-                            fw[k] = v
-        elif str(fw.get("device", "auto")) == "auto" and backend in ("whisper", "faster_whisper"):
-            # No gpu/cpu sections but device=auto: mirror the runtime
-            # auto-detection so the fingerprint is stable across runs.
+    """Fingerprint of ASR-relevant settings used for transcript reuse."""
+    payload = deepcopy(config.get("asr", {}) or {})
+    local = payload.get("local", {}) if isinstance(payload, dict) else {}
+    if isinstance(local, dict):
+        fw = local.get("faster_whisper", {})
+        if isinstance(fw, dict) and str(fw.get("device", "auto")).lower() == "auto":
             current_ct = str(fw.get("compute_type", "default")).lower()
             if current_ct in ("", "default"):
                 try:
@@ -587,23 +573,6 @@ def get_asr_fingerprint(config: dict[str, Any]) -> str:
                         fw["compute_type"] = "int8"
                 except Exception:
                     fw["compute_type"] = "int8"
-    inference_mode = get_asr_inference_mode(asr)
-    payload = {
-        "inference_mode": inference_mode,
-        "backend": backend,
-        "model": fw.get("model") or asr.get("model"),
-        "device": fw.get("device") or asr.get("device"),
-        "compute_type": fw.get("compute_type") or asr.get("compute_type"),
-        "language": fw.get("language") or asr.get("language"),
-        "beam_size": fw.get("beam_size") or asr.get("beam_size"),
-        "vad_filter": fw.get("vad_filter") or asr.get("vad_filter"),
-        "batch_size": fw.get("batch_size") or asr.get("batch_size"),
-        "word_timestamps": fw.get("word_timestamps", True),
-        "split_on_word_gaps": fw.get("split_on_word_gaps", True),
-        "word_gap_seconds": fw.get("word_gap_seconds", 2.0),
-        "max_segment_seconds": fw.get("max_segment_seconds", 15.0),
-        "initial_prompt": fw.get("initial_prompt"),
-    }
     return _fingerprint_payload(payload)
 
 

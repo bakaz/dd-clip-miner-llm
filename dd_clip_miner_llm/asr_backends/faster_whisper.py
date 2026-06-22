@@ -5,7 +5,6 @@ import os
 from pathlib import Path
 from typing import Any
 
-from ..config import get_asr_inference_mode
 from ..models import TranscriptSegment
 from .base import ASRBackend
 
@@ -77,7 +76,12 @@ class FasterWhisperBackend(ASRBackend):
         super().__init__(settings)
         self._model: Any = None
         self._batched_model: Any = None
-        self.inference_mode = get_asr_inference_mode(settings)
+        self.inference_mode = str(settings.get("inference_mode", "standard")).lower().strip()
+        if self.inference_mode not in {"batched", "standard"}:
+            raise ValueError(
+                f"Invalid inference_mode '{self.inference_mode}' for faster_whisper. "
+                "Must be 'batched' or 'standard'."
+            )
 
     def _load_model(
         self,

@@ -6,21 +6,35 @@ asr:
   local:
     backend: faster_whisper
     faster_whisper:
-      model: small
       device: auto
       compute_type: default
       cpu_threads: 8
       num_workers: 1
-      batch_size: 8
-      inference_mode: batched
       language: null
       beam_size: 5
-      vad_filter: true
       initial_prompt: null
       word_timestamps: true
       split_on_word_gaps: true
       word_gap_seconds: 2.0
       max_segment_seconds: 15.0
+      batch:
+        model: turbo
+        inference_mode: batched
+        batch_size: 8
+        vad_filter: true
+      standard:
+        model: turbo
+        inference_mode: standard
+        batch_size: 0
+        vad_filter: false
+      fallback:
+        enabled: true
+        primary_mode: batch
+        fallback_mode: standard
+        min_gap_seconds: 4.0
+        padding_seconds: 2.0
+        max_workers: 1
+        merge_policy: fill_gaps
     funasr:
       model: iic/SenseVoiceSmall
       hub: ms

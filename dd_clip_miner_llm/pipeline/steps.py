@@ -131,14 +131,29 @@ def _run_asr_step(
             do_reuse = False
 
     if not do_reuse:
-        transcriber = Transcriber(config)
-        print(f"[2/3] Running Whisper ASR... (inference_mode: {transcriber.inference_mode})", flush=True)
-        segments = transcriber.transcribe(source_wav)
+        from ..asr_fallback import is_faster_whisper_fallback_enabled, transcribe_with_fallback
+
+        if is_faster_whisper_fallback_enabled(config.get("asr", {})):
+            print("[2/3] Running Whisper ASR... (batch + standard fallback)", flush=True)
+            segments, fallback_meta = transcribe_with_fallback(source_wav, config["asr"], asr_dir)
+            inference_mode = f"{fallback_meta['primary_mode']}+fallback:{fallback_meta['fallback_mode']}"
+            print(
+                "  ASR fallback ranges: "
+                f"{fallback_meta['fallback_range_count']}, "
+                f"fallback segments: {fallback_meta['fallback_segment_count']}, "
+                f"merged: {fallback_meta['merged_segment_count']}",
+                flush=True,
+            )
+        else:
+            transcriber = Transcriber(config)
+            inference_mode = transcriber.inference_mode
+            print(f"[2/3] Running Whisper ASR... (inference_mode: {transcriber.inference_mode})", flush=True)
+            segments = transcriber.transcribe(source_wav)
         transcript_path.write_text(
             json.dumps([s.to_dict() for s in segments], ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-        _write_asr_state(asr_dir, source_wav, config, transcriber.inference_mode, segments)
+        _write_asr_state(asr_dir, source_wav, config, inference_mode, segments)
     _save_progress(out, input_path, "asr")
     print(f"  Transcribed {len(segments)} segments", flush=True)
     return segments

@@ -276,6 +276,54 @@ def test_post_merge_errors_when_dragged_file_is_not_in_report(tmp_path):
         post_merge_from_context(fixture["context"], unknown, fixture["video_files"][1])
 
 
+def test_manual_cut_context_recuts_with_relocated_source_video(tmp_path, monkeypatch):
+    from dd_clip_miner_llm import manual_cut_context
+
+    fixture = _write_fixture_run(tmp_path)
+    context_path = fixture["context"].with_name("manual_cut_context.json")
+    context_path.write_text(fixture["context"].read_text(encoding="utf-8"), encoding="utf-8")
+    actual_run = context_path.parents[3]
+    stale_run = tmp_path / "stale_machine" / "results" / actual_run.name
+    context = json.loads(context_path.read_text(encoding="utf-8"))
+    for key in ("run_dir", "manifest_path", "input_video"):
+        context[key] = str(stale_run / Path(context[key]).relative_to(actual_run))
+    context_path.write_text(json.dumps(context, indent=2), encoding="utf-8")
+
+    calls = []
+
+    def fake_cut_video(source, target, start, end, **kwargs):
+        calls.append((Path(source), Path(target), start, end, kwargs))
+        Path(target).write_bytes(b"manual video")
+
+    monkeypatch.setattr(manual_cut_context, "cut_video", fake_cut_video)
+
+    result = manual_cut_context.manual_cut_from_context(context_path, "10", "12", "manual")
+
+    assert Path(result["input_video"]) == fixture["source"]
+    assert Path(result["output_path"]).exists()
+    assert calls == [(fixture["source"], context_path.parent / "manual.mp4", 10.0, 12.0, {"video_codec": "copy"})]
+
+
+def test_manual_cut_context_wraps_shared_path_errors(tmp_path):
+    from dd_clip_miner_llm.manual_cut_context import ManualCutContextError, manual_cut_from_context
+
+    missing_context = tmp_path / "missing" / "manual_cut_context.json"
+
+    with pytest.raises(ManualCutContextError, match="Required file not found"):
+        manual_cut_from_context(missing_context, "10", "12")
+
+
+def test_manual_cut_context_rejects_bad_time_as_manual_error(tmp_path):
+    from dd_clip_miner_llm.manual_cut_context import ManualCutContextError, manual_cut_from_context
+
+    fixture = _write_fixture_run(tmp_path)
+    context_path = fixture["context"].with_name("manual_cut_context.json")
+    context_path.write_text(fixture["context"].read_text(encoding="utf-8"), encoding="utf-8")
+
+    with pytest.raises(ManualCutContextError, match="Invalid time format"):
+        manual_cut_from_context(context_path, "bad", "12")
+
+
 def test_export_results_writes_merge_recut_assets(tmp_path, monkeypatch):
     from dd_clip_miner_llm.pipeline import export
 

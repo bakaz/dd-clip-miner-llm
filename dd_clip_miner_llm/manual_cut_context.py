@@ -8,6 +8,7 @@ from typing import Any
 
 from .ffmpeg import cut_audio, cut_video
 from .post_merge import (
+    PostMergeError,
     _load_json_object,
     _portable_run_dir,
     _source_video_and_duration,
@@ -25,13 +26,16 @@ def manual_cut_from_context(
     filename: str | None = None,
 ) -> dict[str, Any]:
     context_file = Path(context_path)
-    context = _load_json_object(context_file)
-    context_run_dir = _resolve_run_dir(context, context_file.parent)
-    run_dir = _portable_run_dir(context_file.parent, context_run_dir)
+    try:
+        context = _load_json_object(context_file)
+        context_run_dir = _resolve_run_dir(context, context_file.parent)
+        run_dir = _portable_run_dir(context_file.parent, context_run_dir)
 
-    total_duration, input_video = _source_video_and_duration(
-        context, run_dir, original_run_dir=context_run_dir,
-    )
+        _total_duration, input_video = _source_video_and_duration(
+            context, run_dir, original_run_dir=context_run_dir,
+        )
+    except PostMergeError as exc:
+        raise ManualCutContextError(str(exc)) from exc
     output_dir = context_file.parent
     output_suffix = _determine_output_suffix(context)
 
@@ -89,8 +93,14 @@ def _parse_time(value: str) -> float:
     if not text:
         raise ManualCutContextError("Time value is empty")
     if ":" not in text:
-        return float(text)
-    parts = [float(part) for part in text.split(":")]
+        try:
+            return float(text)
+        except ValueError as exc:
+            raise ManualCutContextError(f"Invalid time format: {value}") from exc
+    try:
+        parts = [float(part) for part in text.split(":")]
+    except ValueError as exc:
+        raise ManualCutContextError(f"Invalid time format: {value}") from exc
     if len(parts) == 3:
         return parts[0] * 3600 + parts[1] * 60 + parts[2]
     if len(parts) == 2:

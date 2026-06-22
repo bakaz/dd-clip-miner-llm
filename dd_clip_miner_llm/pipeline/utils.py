@@ -53,6 +53,7 @@ def _write_asr_state(
     """Write asr_state.json with audio identity, ASR fingerprint, mode, model, transcript fp."""
     from ..config import get_asr_fingerprint
     from ..profile_state import _transcript_fingerprint
+    from ..asr_backends import resolve_asr_model_name
 
     state_path = asr_dir / "asr_state.json"
     try:
@@ -65,7 +66,7 @@ def _write_asr_state(
             **audio_info,
             "asr_fingerprint": get_asr_fingerprint(config),
             "inference_mode": inference_mode,
-            "model": str(config.get("asr", {}).get("model") or "unknown"),
+            "model": resolve_asr_model_name(config.get("asr", {})),
             "transcript_fingerprint": _transcript_fingerprint(segments),
         }
         state_path.write_text(

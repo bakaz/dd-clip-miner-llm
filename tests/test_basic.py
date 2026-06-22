@@ -153,8 +153,13 @@ class TestConfig:
     def test_default_config_structure(self):
         assert "audio" in DEFAULT_CONFIG
         assert "asr" in DEFAULT_CONFIG
-        assert DEFAULT_CONFIG["asr"]["backend"] == "funasr"
-        assert DEFAULT_CONFIG["asr"]["funasr"]["model"] == "Qwen/Qwen3-ASR-0.6B"
+        assert DEFAULT_CONFIG["asr"]["mode"] == "local"
+        fw = DEFAULT_CONFIG["asr"]["local"]["faster_whisper"]
+        assert fw["batch"]["model"] == "turbo"
+        assert fw["batch"]["inference_mode"] == "batched"
+        assert fw["standard"]["model"] == "turbo"
+        assert fw["standard"]["vad_filter"] is False
+        assert fw["fallback"]["enabled"] is True
         assert "llm" in DEFAULT_CONFIG
         assert "padding" in DEFAULT_CONFIG
         assert "song" in DEFAULT_CONFIG
@@ -342,10 +347,12 @@ profiles:
 class TestASRBackends:
     def test_build_default_backend(self):
         backend = build_asr_backend(DEFAULT_CONFIG["asr"])
-        assert isinstance(backend, FunASRBackend)
+        assert isinstance(backend, FasterWhisperBackend)
+        assert backend.settings["model"] == "turbo"
+        assert backend.inference_mode == "batched"
 
     def test_build_faster_whisper_backend(self):
-        backend = build_asr_backend({"backend": "faster_whisper"})
+        backend = build_asr_backend(DEFAULT_CONFIG["asr"]["local"])
         assert isinstance(backend, FasterWhisperBackend)
 
     def test_build_funasr_backend_for_qwen3_alias(self):
@@ -372,6 +379,22 @@ class TestASRBackends:
         apply_asr_model_override(asr, "new-model")
         assert asr["model"] == "new-model"
         assert asr["local"]["funasr"]["model"] == "new-model"
+
+    def test_resolve_faster_whisper_batch_and_standard_modes(self):
+        from dd_clip_miner_llm.asr_backends import resolve_faster_whisper_mode_settings
+
+        batch = resolve_faster_whisper_mode_settings(DEFAULT_CONFIG["asr"], "batch")
+        standard = resolve_faster_whisper_mode_settings(DEFAULT_CONFIG["asr"], "standard")
+
+        assert batch["model"] == "turbo"
+        assert batch["inference_mode"] == "batched"
+        assert batch["batch_size"] == 8
+        assert batch["vad_filter"] is True
+        assert standard["model"] == "turbo"
+        assert standard["inference_mode"] == "standard"
+        assert standard["batch_size"] == 0
+        assert standard["vad_filter"] is False
+        assert standard["word_gap_seconds"] == 2.0
 
     def test_funasr_timestamp_result_to_segments(self):
         result = [
@@ -453,11 +476,15 @@ class TestASRBackends:
             "mode": "local",
             "local": {
                 "backend": "faster_whisper",
-                "faster_whisper": {"model": "small", "device": "auto"},
+                "faster_whisper": {
+                    "device": "auto",
+                    "batch": {"model": "small", "inference_mode": "batched", "batch_size": 8},
+                    "standard": {"model": "small", "inference_mode": "standard", "batch_size": 0},
+                },
                 "cpu": {"faster_whisper": {"device": "cpu", "compute_type": "int8"}},
             }
         }
-        backend = build_asr_backend(cfg["local"])
+        backend = build_asr_backend(cfg)
         assert isinstance(backend, FasterWhisperBackend)
         # after resolution in build, settings should have cpu values
         assert backend.settings.get("device") == "cpu"
@@ -465,6 +492,7 @@ class TestASRBackends:
 
     def test_batched_transcription_requests_timestamps_and_splits_word_gaps(self):
         backend = FasterWhisperBackend({
+            "inference_mode": "batched",
             "batch_size": 8,
             "word_gap_seconds": 2.0,
             "max_segment_seconds": 15.0,
@@ -493,6 +521,131 @@ class TestASRBackends:
             TranscriptSegment(start=1.0, end=2.0, text="你好"),
             TranscriptSegment(start=10.0, end=11.0, text="下句"),
         ]
+
+    def test_asr_fingerprint_includes_fallback_config(self):
+        from copy import deepcopy
+        from dd_clip_miner_llm.config import get_asr_fingerprint
+
+        first = deepcopy(DEFAULT_CONFIG)
+        second = deepcopy(DEFAULT_CONFIG)
+        second["asr"]["local"]["faster_whisper"]["fallback"]["min_gap_seconds"] = 8.0
+
+        assert get_asr_fingerprint(first) != get_asr_fingerprint(second)
+
+
+class TestASRFallback:
+    def test_non_faster_whisper_does_not_enable_fallback(self):
+        from dd_clip_miner_llm.asr_fallback import is_faster_whisper_fallback_enabled
+
+        assert is_faster_whisper_fallback_enabled({
+            "mode": "local",
+            "local": {"backend": "funasr", "funasr": {"model": "x"}},
+        }) is False
+
+    def test_detect_transcript_gaps_includes_edges(self):
+        from dd_clip_miner_llm.asr_fallback import detect_transcript_gaps
+
+        gaps = detect_transcript_gaps(
+            [
+                TranscriptSegment(5.0, 10.0, "a"),
+                TranscriptSegment(20.0, 25.0, "b"),
+            ],
+            total_duration=40.0,
+            min_gap_seconds=4.0,
+        )
+
+        assert [(g["start"], g["end"], g["duration"]) for g in gaps] == [
+            (0.0, 5.0, 5.0),
+            (10.0, 20.0, 10.0),
+            (25.0, 40.0, 15.0),
+        ]
+
+    def test_fallback_audio_ranges_pad_and_clamp(self):
+        from dd_clip_miner_llm.asr_fallback import fallback_audio_ranges
+
+        ranges = fallback_audio_ranges(
+            [
+                {"index": 0, "start": 0.0, "end": 5.0, "duration": 5.0},
+                {"index": 1, "start": 35.0, "end": 40.0, "duration": 5.0},
+            ],
+            total_duration=40.0,
+            padding_seconds=2.0,
+        )
+
+        assert [(r["padded_start"], r["padded_end"]) for r in ranges] == [
+            (0.0, 7.0),
+            (33.0, 40.0),
+        ]
+
+    def test_merge_fill_gaps_only_inserts_gap_midpoints(self):
+        from dd_clip_miner_llm.asr_fallback import merge_fill_gaps
+
+        merged = merge_fill_gaps(
+            [
+                TranscriptSegment(0.0, 10.0, "before"),
+                TranscriptSegment(20.0, 30.0, "after"),
+            ],
+            [{
+                "start": 10.0,
+                "end": 20.0,
+                "segments": [
+                    {"start": 9.0, "end": 11.0, "text": "edge"},
+                    {"start": 12.0, "end": 18.0, "text": "fill"},
+                    {"start": 19.0, "end": 23.0, "text": "outside"},
+                ],
+            }],
+        )
+
+        assert merged == [
+            TranscriptSegment(0.0, 10.0, "before"),
+            TranscriptSegment(10.0, 11.0, "edge"),
+            TranscriptSegment(12.0, 18.0, "fill"),
+            TranscriptSegment(20.0, 30.0, "after"),
+        ]
+
+    def test_transcribe_with_fallback_writes_audit_files(self, tmp_path, monkeypatch):
+        from copy import deepcopy
+        from dd_clip_miner_llm import asr_fallback
+
+        source = tmp_path / "source.wav"
+        source.write_bytes(b"fake")
+        asr_dir = tmp_path / "02_asr"
+        config = deepcopy(DEFAULT_CONFIG["asr"])
+
+        class Backend:
+            def __init__(self, mode):
+                self.mode = mode
+
+            def transcribe(self, _path):
+                if self.mode == "batched":
+                    return [
+                        TranscriptSegment(0.0, 5.0, "first"),
+                        TranscriptSegment(15.0, 20.0, "last"),
+                    ]
+                return [TranscriptSegment(2.0, 4.0, "fallback")]
+
+        def fake_build_backend(settings):
+            return Backend(settings["inference_mode"])
+
+        def fake_cut_audio(_source, target, _start, _end):
+            Path(target).write_bytes(b"range")
+            return Path(target)
+
+        monkeypatch.setattr(asr_fallback, "build_asr_backend", fake_build_backend)
+        monkeypatch.setattr(asr_fallback, "cut_audio", fake_cut_audio)
+        monkeypatch.setattr(asr_fallback, "get_duration", lambda _path: 20.0)
+
+        segments, metadata = asr_fallback.transcribe_with_fallback(source, config, asr_dir)
+
+        assert metadata["fallback_range_count"] == 1
+        assert segments == [
+            TranscriptSegment(0.0, 5.0, "first"),
+            TranscriptSegment(5.0, 7.0, "fallback"),
+            TranscriptSegment(15.0, 20.0, "last"),
+        ]
+        assert (asr_dir / "transcript_primary.json").exists()
+        assert (asr_dir / "fallback_ranges.json").exists()
+        assert (asr_dir / "fallback_segments.json").exists()
 
 
 class TestSongMissedRecheck:
