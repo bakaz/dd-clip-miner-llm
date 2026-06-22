@@ -80,11 +80,30 @@ def _resolve_input_video(context: dict[str, Any], context_dir: Path) -> Path:
     if path.is_absolute():
         if path.exists():
             return path
+        # 尝试从 context 目录回推 run_dir 下的 00_input
+        fallback = _fallback_input_video(context_dir)
+        if fallback is not None:
+            return fallback
         raise ManualCutContextError(f"Input video not found: {path}")
     candidate = context_dir / path
     if candidate.exists():
         return candidate.resolve()
     raise ManualCutContextError(f"Input video not found: {candidate}")
+
+
+def _fallback_input_video(context_dir: Path) -> Path | None:
+    """从 context 目录回推 run_dir/00_input 下的视频文件。"""
+    current = context_dir
+    for _ in range(10):
+        input_dir = current / "00_input"
+        if input_dir.exists():
+            videos = list(input_dir.glob("*.mp4")) + list(input_dir.glob("*.mkv")) + list(input_dir.glob("*.flv"))
+            if videos:
+                return videos[0].resolve()
+        if current == current.parent:
+            break
+        current = current.parent
+    return None
 
 
 def _determine_output_suffix(context: dict[str, Any]) -> str:
