@@ -1,6 +1,27 @@
 audio:
   sample_rate: 16000
   channels: 1
+# Qwen3-ASR 歌词识别推荐配置：
+# asr:
+#   mode: local
+#   local:
+#     backend: qwen3_asr
+#     funasr:
+#       model: Qwen/Qwen3-ASR-1.7B
+#       hub: hf
+#       device: cuda:0
+#       dtype: bf16
+#       batch_size: null
+#       language: null
+#       timestamp_chunk_seconds: 60
+#       max_workers: 1
+#       generate_kwargs: {}
+#       lyrics:
+#         enabled: true
+#         max_line_chars: 24
+#         sentence_punctuation: "。！？.!?\n"
+#         max_sentence_duration_ms: 5000
+
 asr:
   mode: local
   local:
@@ -48,6 +69,23 @@ asr:
       punc_model: null
       spk_model: null
       generate_kwargs: {}
+
+      # Qwen3-ASR 歌词识别示例：
+      # backend 可设置为 qwen3_asr，仍然复用 FunASRBackend。
+      # model: Qwen/Qwen3-ASR-1.7B
+      # hub: hf
+      # device: cuda:0
+      # dtype: bf16
+      # batch_size: null
+      # language: null
+      # timestamp_chunk_seconds: 60
+      # max_workers: 1
+      # generate_kwargs: {}
+      # lyrics:
+      #   enabled: true
+      #   max_line_chars: 24
+      #   sentence_punctuation: "。！？.!?\n"
+      #   max_sentence_duration_ms: 5000
   remote:
     provider: mimo
     base_url: https://token-plan-cn.xiaomimimo.com/v1
