@@ -38,12 +38,18 @@ runs/
 results/
 results*/
 dd_clip_miner_llm/concat.zip
+*.zip
+dd-clip-miner-llm.zip
+
+# Test results
+test_result/
 
 # Config (with API keys)
 config.yaml
 config.yaml.bak
 config.yaml.bak.*
 streamer_dictionary.json
+cut_copy.conf
 
 # Logs
 *.log
@@ -52,6 +58,9 @@ batch_run_*.log
 # OS
 .DS_Store
 Thumbs.db
+
+# Tool generated
+.codegraph/
 
 # Agent / local tooling
 agent-tools/

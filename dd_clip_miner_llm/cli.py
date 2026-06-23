@@ -735,10 +735,25 @@ def main(argv: list[str] | None = None) -> int:
         print("\nDone! Batch run completed.")
 
         # Cut-copy post-processing
-        if args.cut_copy_conf:
+        cut_copy_conf = args.cut_copy_conf
+        # Auto-detect from config if not specified via CLI
+        if not cut_copy_conf:
+            try:
+                main_config = load_config(args.config)
+                cc_cfg = main_config.get("cut_copy", {})
+                if cc_cfg.get("enabled", False):
+                    cut_copy_conf = cc_cfg.get("conf_path", "cut_copy.conf")
+                    # Resolve relative path against config file directory
+                    config_dir = Path(args.config).parent
+                    cut_copy_conf = str(config_dir / cut_copy_conf)
+                    print(f"[cut-copy] Auto-detected from config: {cut_copy_conf}")
+            except Exception:
+                pass  # Ignore config loading errors here
+
+        if cut_copy_conf:
             from .cut_copy import load_cut_copy_config, run_batch_cut_copy
             try:
-                cc_config = load_cut_copy_config(args.cut_copy_conf)
+                cc_config = load_cut_copy_config(cut_copy_conf)
                 rc = run_batch_cut_copy(cc_config, all_runs, no_shutdown=False)
                 if rc != 0:
                     print("[error] Cut-copy post-processing failed.")
