@@ -54,7 +54,16 @@ class FunASRBackend(ASRBackend):
             "model": model_name,
             "device": _resolve_device(str(cfg.get("device", self.settings.get("device", "auto")))),
         }
-        for key in ("hub", "trust_remote_code", "vad_model", "punc_model", "spk_model"):
+        for key in (
+            "hub",
+            "trust_remote_code",
+            "vad_model",
+            "punc_model",
+            "spk_model",
+            "dtype",
+            "model_revision",
+            "disable_update",
+        ):
             if key in cfg and cfg[key] is not None:
                 kwargs[key] = cfg[key]
         for key in ("vad_kwargs", "punc_kwargs", "spk_kwargs", "model_kwargs"):
@@ -88,10 +97,10 @@ class FunASRBackend(ASRBackend):
         cfg: dict[str, Any],
     ) -> list[TranscriptSegment]:
         model = self._load_model()
-        generate_kwargs: dict[str, Any] = {
-            "input": str(audio_path),
-            "batch_size": int(cfg.get("batch_size", 1)),
-        }
+        generate_kwargs: dict[str, Any] = {"input": str(audio_path)}
+
+        if cfg.get("batch_size") is not None:
+            generate_kwargs["batch_size"] = int(cfg.get("batch_size", 1))
         language = cfg.get("language", self.settings.get("language"))
         if language:
             generate_kwargs["language"] = language
