@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
@@ -107,6 +108,7 @@ def transcribe_with_fallback(
     source_wav: Path,
     asr_config: dict[str, Any],
     asr_dir: Path,
+    cleanup_fallback_audio: bool = True,
 ) -> tuple[list[TranscriptSegment], dict[str, Any]]:
     fallback = faster_whisper_fallback_config(asr_config)
     primary_mode = str(fallback.get("primary_mode") or "batch")
@@ -147,6 +149,16 @@ def transcribe_with_fallback(
         json.dumps(fallback_segments, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+
+    # Cleanup fallback audio files (they're no longer needed after merging)
+    if cleanup_fallback_audio:
+        fallback_audio_dir = asr_dir / "fallback_audio"
+        if fallback_audio_dir.exists():
+            try:
+                shutil.rmtree(fallback_audio_dir)
+                print(f"  Cleaned up fallback audio: {fallback_audio_dir}")
+            except Exception as exc:
+                print(f"  Warning: failed to cleanup fallback audio: {exc}")
 
     merged = merge_fill_gaps(primary_segments, fallback_segments)
     metadata = {
