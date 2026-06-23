@@ -56,6 +56,7 @@ def build_parser() -> argparse.ArgumentParser:
     batch_parser.add_argument("--concat", action="store_true", help="合并目录下的多个视频后再处理")
     batch_parser.add_argument("--video-codec", default=None, help="视频编码器")
     batch_parser.add_argument("--audio-bitrate-kbps", type=int, default=None, help="音频码率")
+    batch_parser.add_argument("--cut-copy-conf", default=None, help="cut_copy 配置文件路径，batch-run 完成后自动执行 cut_copy 后处理")
 
     # manual-cut 命令（兼容旧项目）
     manual_parser = subparsers.add_parser("manual-cut", help="从编辑后的 CSV 重新切割片段")
@@ -696,6 +697,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.extensions:
             extensions = {item.strip() for item in args.extensions.split(",") if item.strip()}
 
+        all_runs: list[dict] = []
         for profile_name in profile_names:
             label = profile_name or "default"
             try:
@@ -718,6 +720,7 @@ def main(argv: list[str] | None = None) -> int:
                     extensions=extensions,
                     config_path=args.config,
                 )
+                all_runs.extend(runs)
                 print(f"Profile {label}: {len(runs)} run records.")
             except Exception as exc:
                 failures.append((label, exc))
@@ -730,6 +733,20 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
         print("\nDone! Batch run completed.")
+
+        # Cut-copy post-processing
+        if args.cut_copy_conf:
+            from .cut_copy import load_cut_copy_config, run_batch_cut_copy
+            try:
+                cc_config = load_cut_copy_config(args.cut_copy_conf)
+                rc = run_batch_cut_copy(cc_config, all_runs, no_shutdown=False)
+                if rc != 0:
+                    print("[error] Cut-copy post-processing failed.")
+                    return rc
+            except Exception as exc:
+                print(f"[error] Cut-copy post-processing failed: {exc}")
+                return 1
+
         return 0
 
     if args.command == "manual-cut":
