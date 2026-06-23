@@ -66,6 +66,10 @@ Thumbs.db
 agent-tools/
 terminals/
 
+# Local ASR benchmark outputs (may contain real transcript text)
+asr_benchmark*.json
+asr_largev3*.json
+
 # Testing
 .tmp/
 .pytest_cache/

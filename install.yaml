@@ -7,8 +7,9 @@
 asr_backend: faster_whisper
 
 # GPU 类型
-# auto: 自动检测
-# cuda12: 强制使用 CUDA 12
+# auto: 自动检测（Blackwell/CC≥12 走 cuda13，否则 cuda12）
+# cuda13: CUDA 13 (Blackwell RTX 50xx, CC ≥ 12.0, cu130 PyTorch)
+# cuda12: CUDA 12 (Ampere/Ada, CC 8.x-9.x)
 # cpu: 强制使用 CPU
 gpu_type: auto
 

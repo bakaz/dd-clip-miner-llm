@@ -8,7 +8,6 @@
 from __future__ import annotations
 
 import re
-import tempfile
 import threading
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -24,11 +23,12 @@ _SENSEVOICE_TAG_RE = re.compile(r"<\|[^|]*\|>")
 # 默认配置
 _DEFAULT_TIMESTAMP_CHUNK = 5  # 5 秒一个 chunk，用于细粒度时间戳
 _DEFAULT_MAX_WORKERS = 4      # 默认并发数
+_DEFAULT_QWEN3_FORCED_ALIGNER = "Qwen/Qwen3-ForcedAligner-0.6B"
 
 
 class FunASRBackend(ASRBackend):
-    def __init__(self, settings: dict[str, Any]) -> None:
-        super().__init__(settings)
+    def __init__(self, settings: dict[str, Any], runtime_context: dict[str, Any] | None = None) -> None:
+        super().__init__(settings, runtime_context=runtime_context)
         self._model: Any = None
         self._model_lock = threading.Lock()
 
@@ -64,10 +64,19 @@ class FunASRBackend(ASRBackend):
             "dtype",
             "model_revision",
             "disable_update",
+            "forced_aligner",
+            "max_inference_batch_size",
+            "max_new_tokens",
         ):
             if key in cfg and cfg[key] is not None:
                 kwargs[key] = cfg[key]
-        for key in ("vad_kwargs", "punc_kwargs", "spk_kwargs", "model_kwargs"):
+        if (
+            _is_qwen3_model(model_name)
+            and _wants_timestamps(cfg)
+            and not kwargs.get("forced_aligner")
+        ):
+            kwargs["forced_aligner"] = _DEFAULT_QWEN3_FORCED_ALIGNER
+        for key in ("vad_kwargs", "punc_kwargs", "spk_kwargs", "model_kwargs", "forced_aligner_kwargs"):
             if isinstance(cfg.get(key), dict):
                 kwargs[key] = cfg[key]
 
@@ -105,13 +114,23 @@ class FunASRBackend(ASRBackend):
         language = cfg.get("language", self.settings.get("language"))
         if language:
             generate_kwargs["language"] = language
+        for key in ("return_time_stamps", "output_timestamp"):
+            if key in cfg and cfg[key] is not None:
+                generate_kwargs[key] = bool(cfg[key])
         extra = cfg.get("generate_kwargs", {})
         if isinstance(extra, dict):
             generate_kwargs.update(extra)
 
         with self._model_lock:
             result = model.generate(**generate_kwargs)
-        segments = funasr_result_to_segments(result, audio_path)
+        if _wants_timestamps(cfg) and _missing_requested_timestamps(result):
+            raise RuntimeError(
+                "Qwen3-ASR timestamp output was requested, but FunASR returned text without timestamps. "
+                "Configure a working funasr.forced_aligner (default: "
+                f"{_DEFAULT_QWEN3_FORCED_ALIGNER}) and keep generate_kwargs.return_time_stamps=true "
+                "or generate_kwargs.output_timestamp=true."
+            )
+        segments = funasr_result_to_segments(result, audio_path, cfg=cfg)
 
         # 添加时间偏移
         if time_offset > 0:
@@ -146,11 +165,16 @@ class FunASRBackend(ASRBackend):
             chunk_index += 1
             chunk_start = chunk_end
 
-        # 切割所有 chunk 到临时目录
-        with tempfile.TemporaryDirectory(prefix="funasr_chunk_") as tmp_dir:
+        chunk_dir = self._resolve_chunk_dir(audio_path, cfg)
+        from ..ffmpeg.fsutil import safe_rmtree
+
+        safe_rmtree(chunk_dir)
+        chunk_dir.mkdir(parents=True, exist_ok=True)
+        keep_chunk_audio = bool(cfg.get("keep_chunk_audio", False))
+        try:
             chunk_paths: list[tuple[int, Path, float]] = []
             for idx, start, end in chunks:
-                chunk_path = Path(tmp_dir) / f"chunk_{idx:04d}.wav"
+                chunk_path = chunk_dir / f"chunk_{idx:04d}.wav"
                 cut_audio(audio_path, chunk_path, start, end)
                 chunk_paths.append((idx, chunk_path, start))
 
@@ -171,6 +195,12 @@ class FunASRBackend(ASRBackend):
                     idx, segs = future.result()
                     all_segments.append((idx, segs))
                     print(f"  [asr] Chunk {idx + 1}/{len(chunks)}: {len(segs)} segments")
+        except Exception:
+            print(f"  [asr] FunASR chunk audio preserved for debugging: {chunk_dir}")
+            raise
+        else:
+            if not keep_chunk_audio:
+                safe_rmtree(chunk_dir)
 
         # 按 chunk 顺序排列
         all_segments.sort(key=lambda x: x[0])
@@ -179,6 +209,15 @@ class FunASRBackend(ASRBackend):
             result.extend(segs)
 
         return result
+
+    def _resolve_chunk_dir(self, audio_path: Path, cfg: dict[str, Any]) -> Path:
+        configured = cfg.get("chunk_dir")
+        if configured:
+            return Path(str(configured)).expanduser()
+        asr_dir = self.runtime_context.get("asr_dir")
+        if asr_dir:
+            return Path(asr_dir) / "funasr_chunks"
+        return Path(audio_path).parent / "funasr_chunks"
 
 
 def is_punctuation(char: str) -> bool:
@@ -292,17 +331,60 @@ def postprocess_qwen3_asr(
     ]
 
 
-def funasr_result_to_segments(result: Any, audio_path: str | Path) -> list[TranscriptSegment]:
+def funasr_result_to_segments(
+    result: Any,
+    audio_path: str | Path,
+    cfg: dict[str, Any] | None = None,
+) -> list[TranscriptSegment]:
     items = result if isinstance(result, list) else [result]
     segments: list[TranscriptSegment] = []
     fallback_texts: list[str] = []
+
+    # Extract lyrics config
+    lyrics_cfg: dict[str, Any] = {}
+    if isinstance(cfg, dict) and isinstance(cfg.get("lyrics"), dict):
+        lyrics_cfg = cfg["lyrics"]
+    lyrics_enabled = bool(lyrics_cfg.get("enabled", False))
 
     for item in items:
         text = _value(item, "text", "sentence", "transcript")
         if text:
             text = _clean_sensevoice_text(str(text))
             fallback_texts.append(text.strip())
+
+        # Check for structured timestamps first
         timestamps = _value(item, "timestamp", "timestamps", "time_stamps", "sentence_info", "segments")
+
+        # Detect Qwen3-ASR format: text + timestamp (list of [start, end] pairs)
+        if text and timestamps and isinstance(timestamps, list) and len(timestamps) > 0:
+            first_ts = timestamps[0]
+            if isinstance(first_ts, (list, tuple)) and len(first_ts) == 2:
+                # Qwen3-ASR format: align text with timestamps
+                max_duration_ms = int(lyrics_cfg.get("max_sentence_duration_ms", 5000))
+                timestamp_ms = _timestamp_pairs_to_milliseconds(timestamps, audio_path)
+                aligned_segments = postprocess_qwen3_asr(str(text), timestamp_ms, max_duration_ms)
+
+                if lyrics_enabled:
+                    # Apply lyrics splitting to each segment
+                    max_line_chars = int(lyrics_cfg.get("max_line_chars", 24))
+                    sentence_punctuation = str(lyrics_cfg.get("sentence_punctuation", "。！？.!?\n"))
+                    for seg in aligned_segments:
+                        lyrics_text = split_lyrics_text(seg.text, max_line_chars, sentence_punctuation)
+                        # Split lyrics_text by newlines and create segments
+                        lines = lyrics_text.split("\n")
+                        line_duration = (seg.end - seg.start) / len(lines) if lines else 0
+                        for i, line in enumerate(lines):
+                            if line.strip():
+                                segments.append(TranscriptSegment(
+                                    start=seg.start + i * line_duration,
+                                    end=seg.start + (i + 1) * line_duration,
+                                    text=line.strip(),
+                                ))
+                else:
+                    segments.extend(aligned_segments)
+                continue
+
+        # Existing logic for other formats (SenseVoice/Paraformer)
         segments.extend(_timestamps_to_segments(timestamps, fallback_text=str(text or "")))
 
     if segments:
@@ -317,6 +399,63 @@ def funasr_result_to_segments(result: Any, audio_path: str | Path) -> list[Trans
     except Exception:
         duration = 0.0
     return [TranscriptSegment(start=0.0, end=float(duration), text=text)]
+
+
+def _is_qwen3_model(model_name: str) -> bool:
+    return "qwen3-asr" in str(model_name).lower()
+
+
+def _wants_timestamps(cfg: dict[str, Any]) -> bool:
+    if bool(cfg.get("return_time_stamps") or cfg.get("output_timestamp")):
+        return True
+    extra = cfg.get("generate_kwargs", {})
+    if not isinstance(extra, dict):
+        return False
+    return bool(extra.get("return_time_stamps") or extra.get("output_timestamp"))
+
+
+def _missing_requested_timestamps(result: Any) -> bool:
+    items = result if isinstance(result, list) else [result]
+    saw_text = False
+    for item in items:
+        text = _value(item, "text", "sentence", "transcript")
+        if not text or not str(text).strip():
+            continue
+        saw_text = True
+        timestamps = _value(item, "timestamp", "timestamps", "time_stamps", "sentence_info", "segments")
+        if not timestamps:
+            return True
+    return False
+
+
+def _timestamp_pairs_to_milliseconds(timestamps: list, audio_path: str | Path) -> list[tuple[int, int]]:
+    pairs: list[tuple[float, float]] = []
+    for item in timestamps:
+        if not isinstance(item, (list, tuple)) or len(item) < 2:
+            continue
+        start = _float_or_none(item[0])
+        end = _float_or_none(item[1])
+        if start is None or end is None:
+            continue
+        pairs.append((start, end))
+    if not pairs:
+        return []
+
+    max_end = max(end for _, end in pairs)
+    duration = _duration_or_none(audio_path)
+    # Qwen forced aligner in qwen-asr 0.0.6 returns seconds through FunASR;
+    # other FunASR timestamp formats commonly use milliseconds.
+    if duration is not None and max_end <= duration + 1.0:
+        return [(int(round(start * 1000)), int(round(end * 1000))) for start, end in pairs]
+    return [(int(round(start)), int(round(end))) for start, end in pairs]
+
+
+def _duration_or_none(audio_path: str | Path) -> float | None:
+    try:
+        from ..ffmpeg import get_duration
+        return float(get_duration(audio_path))
+    except Exception:
+        return None
 
 
 def _clean_sensevoice_text(text: str) -> str:

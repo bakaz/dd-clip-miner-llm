@@ -44,6 +44,12 @@ funasr = [
     "torch>=2.7",
     "torchaudio>=2.7",
 ]
+# NOTE: [funasr] 会从 PyPI 拉 CPU-only torch。
+# 若需 GPU 支持，使用 install.py（自动处理安装顺序：先装 CUDA torch，再装 funasr）。
+# 或手动：
+#   pip install -e ".[funasr]"
+#   pip install -r requirements-cu13.txt   # Blackwell / CUDA 13
+#   pip install -r requirements-cu12.txt   # Ampere/Ada / CUDA 12
 
 [project.urls]
 Homepage = "https://github.com/bakaz/dd-clip-miner-llm"

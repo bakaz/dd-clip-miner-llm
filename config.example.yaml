@@ -1,7 +1,9 @@
 audio:
   sample_rate: 16000
   channels: 1
-# Qwen3-ASR 歌词识别推荐配置：
+# Qwen3-ASR 歌词识别推荐配置（Blackwell/RTX 50xx 需要 CUDA 13 + cu130 PyTorch）：
+# 先安装 GPU 依赖：python install.py --gpu cuda13 --funasr
+# 或手动：pip install -e ".[funasr]" && pip install -r requirements-cu13.txt
 # asr:
 #   mode: local
 #   local:
@@ -13,11 +15,14 @@ audio:
 #       dtype: bf16
 #       batch_size: null
 #       language: null
-#       timestamp_chunk_seconds: 60
+#       timestamp_chunk_seconds: 300
 #       max_workers: 1
-#       generate_kwargs: {}
+#       forced_aligner: Qwen/Qwen3-ForcedAligner-0.6B
+#       forced_aligner_kwargs: {}
+#       generate_kwargs:
+#         return_time_stamps: true
 #       lyrics:
-#         enabled: true
+#         enabled: false
 #         max_line_chars: 24
 #         sentence_punctuation: "。！？.!?\n"
 #         max_sentence_duration_ms: 5000
@@ -72,17 +77,21 @@ asr:
 
       # Qwen3-ASR 歌词识别示例：
       # backend 可设置为 qwen3_asr，仍然复用 FunASRBackend。
+      # Blackwell/RTX 50xx 需要 CUDA 13 + cu130 PyTorch（install.py --gpu cuda13）。
       # model: Qwen/Qwen3-ASR-1.7B
       # hub: hf
       # device: cuda:0
       # dtype: bf16
       # batch_size: null
       # language: null
-      # timestamp_chunk_seconds: 60
+      # timestamp_chunk_seconds: 300
       # max_workers: 1
-      # generate_kwargs: {}
+      # forced_aligner: Qwen/Qwen3-ForcedAligner-0.6B
+      # forced_aligner_kwargs: {}
+      # generate_kwargs:
+      #   return_time_stamps: true
       # lyrics:
-      #   enabled: true
+      #   enabled: false
       #   max_line_chars: 24
       #   sentence_punctuation: "。！？.!?\n"
       #   max_sentence_duration_ms: 5000

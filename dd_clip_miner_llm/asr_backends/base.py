@@ -8,8 +8,9 @@ from ..models import TranscriptSegment
 
 
 class ASRBackend(ABC):
-    def __init__(self, settings: dict[str, Any]) -> None:
+    def __init__(self, settings: dict[str, Any], runtime_context: dict[str, Any] | None = None) -> None:
         self.settings = settings
+        self.runtime_context = runtime_context or {}
 
     @abstractmethod
     def transcribe(self, audio_path: str | Path) -> list[TranscriptSegment]:

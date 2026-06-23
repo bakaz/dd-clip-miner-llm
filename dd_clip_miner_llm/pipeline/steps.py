@@ -145,9 +145,9 @@ def _run_asr_step(
                 flush=True,
             )
         else:
-            transcriber = Transcriber(config)
+            transcriber = Transcriber(config, asr_dir=asr_dir)
             inference_mode = transcriber.inference_mode
-            print(f"[2/3] Running Whisper ASR... (inference_mode: {transcriber.inference_mode})", flush=True)
+            print(f"[2/3] Running ASR... (inference_mode: {transcriber.inference_mode})", flush=True)
             segments = transcriber.transcribe(source_wav)
         transcript_path.write_text(
             json.dumps([s.to_dict() for s in segments], ensure_ascii=False, indent=2),

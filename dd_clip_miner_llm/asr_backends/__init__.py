@@ -117,7 +117,10 @@ def resolve_faster_whisper_mode_settings(
     return resolved
 
 
-def build_asr_backend(settings: dict[str, Any]) -> ASRBackend:
+def build_asr_backend(
+    settings: dict[str, Any],
+    runtime_context: dict[str, Any] | None = None,
+) -> ASRBackend:
     """构建 ASR 后端，支持 local/remote 配置格式，以及 gpu/cpu 硬件自动分流。
 
     新格式支持 gpu/cpu 分流（当存在 gpu: 或 cpu: 节时，基于硬件检测自动选择并合并）：
@@ -165,7 +168,7 @@ def build_asr_backend(settings: dict[str, Any]) -> ASRBackend:
         flat = {**local_cfg}
         if backend in flat:
             flat = {**flat, **flat[backend]}
-        return _build_local_backend(backend, flat)
+        return _build_local_backend(backend, flat, runtime_context)
 
     if mode == "remote":
         remote_cfg = settings.get("remote", {})
@@ -183,14 +186,18 @@ def build_asr_backend(settings: dict[str, Any]) -> ASRBackend:
     flat = {**settings}
     if isinstance(flat.get(backend), dict):
         flat = {**flat, **flat[backend]}
-    return _build_local_backend(backend, flat)
+    return _build_local_backend(backend, flat, runtime_context)
 
 
-def _build_local_backend(backend: str, settings: dict[str, Any]) -> ASRBackend:
+def _build_local_backend(
+    backend: str,
+    settings: dict[str, Any],
+    runtime_context: dict[str, Any] | None = None,
+) -> ASRBackend:
     if backend in {"whisper", "faster_whisper"}:
         return FasterWhisperBackend(settings)
     if backend in {"funasr", "fun_asr", "qwen3", "qwen3_asr", "sensevoice"}:
-        return FunASRBackend(settings)
+        return FunASRBackend(settings, runtime_context=runtime_context)
     raise ValueError(f"Unsupported local ASR backend: {backend}")
 
 

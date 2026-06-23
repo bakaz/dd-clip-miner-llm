@@ -1,0 +1,24 @@
+# CUDA 13 support for FunASR / Qwen3-ASR (Blackwell GPUs, CC >= 12.0)
+# Install AFTER base and funasr to ensure CUDA torch replaces CPU torch:
+#   pip install -e .
+#   pip install -e ".[funasr]"
+#   pip install -r requirements-cu13.txt
+#
+# Requires CUDA 13.x driver (nvidia-smi shows "CUDA Version: 13.x")
+# and a Blackwell (RTX 50xx) GPU or newer. Older GPUs (Ampere/Ada, CC 8.x-9.x)
+# should use requirements-cu12.txt instead.
+#
+# NOTE: This replaces the CPU-only torch/torchaudio pulled by [funasr] extra
+# with cu130 (CUDA 13.0) builds from the PyTorch nightly/index.
+# PyTorch wheels are pinned to the cu130 index; pin adjusts as needed.
+
+--extra-index-url https://download.pytorch.org/whl/cu130
+torch>=2.12.0
+torchaudio>=2.12.0
+
+# faster-whisper GPU support (ctranslate2 需要这些 CUDA 12 DLLs)
+# NOTE: 不要装 nvidia-cudnn-cu12，PyTorch cu130 自带 cuDNN，混装会导致版本冲突
+ctranslate2>=4.0,<5
+nvidia-cublas-cu12>=12.0
+nvidia-cuda-runtime-cu12>=12.0
+nvidia-cuda-nvrtc-cu12>=12.0
