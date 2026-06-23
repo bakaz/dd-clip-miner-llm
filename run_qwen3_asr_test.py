@@ -24,7 +24,7 @@ config = {
         "dtype": "bf16",
         "batch_size": None,
         "timestamp_chunk_seconds": 300,
-        "max_workers": 1,
+        "max_workers": 2,
         "forced_aligner": "Qwen/Qwen3-ForcedAligner-0.6B",
         "forced_aligner_kwargs": {},
         "generate_kwargs": {"return_time_stamps": True},

@@ -16,7 +16,7 @@ audio:
 #       batch_size: null
 #       language: null
 #       timestamp_chunk_seconds: 180
-#       max_workers: 1
+#       max_workers: 2
 #       forced_aligner: Qwen/Qwen3-ForcedAligner-0.6B
 #       forced_aligner_kwargs: {}
 #       generate_kwargs:
@@ -33,7 +33,7 @@ audio:
 #         sparse_chars_per_sec: 1.0
 #         repeat_threshold: 3
 #         padding_seconds: 2.0
-#         max_workers: 1
+#         max_workers: 2
 #         merge_policy: replace_ranges
 #         zero_duration_policy: merge_adjacent
 
@@ -95,7 +95,7 @@ asr:
       # batch_size: null
       # language: null
       # timestamp_chunk_seconds: 180
-      # max_workers: 1
+      # max_workers: 2
       # forced_aligner: Qwen/Qwen3-ForcedAligner-0.6B
       # forced_aligner_kwargs: {}
       # generate_kwargs:
@@ -112,7 +112,7 @@ asr:
       #   sparse_chars_per_sec: 1.0
       #   repeat_threshold: 3
       #   padding_seconds: 2.0
-      #   max_workers: 1
+      #   max_workers: 2
       #   merge_policy: replace_ranges
       #   zero_duration_policy: merge_adjacent
   remote:
