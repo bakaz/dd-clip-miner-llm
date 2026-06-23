@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 import tempfile
 import threading
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
@@ -178,6 +179,117 @@ class FunASRBackend(ASRBackend):
             result.extend(segs)
 
         return result
+
+
+def is_punctuation(char: str) -> bool:
+    """判断是否是标点符号"""
+    if unicodedata.category(char).startswith('P'):
+        return True
+    if char in '。！？.!?\n；;，,':
+        return True
+    return False
+
+
+def align_text_with_timestamps(
+    text: str,
+    timestamps: list,
+) -> list[tuple[str, int, int]]:
+    """将含标点的文本与不含标点的时间戳对齐
+
+    标点不消耗时间戳，复用前一个字符的结束时间。
+    正常字符每个消耗一个时间戳。
+    """
+    result: list[tuple[str, int, int]] = []
+    ts_idx = 0
+
+    for char in text:
+        if is_punctuation(char):
+            if result:
+                prev_end = result[-1][2]
+                result.append((char, prev_end, prev_end))
+            else:
+                result.append((char, 0, 0))
+        else:
+            if ts_idx < len(timestamps):
+                start, end = timestamps[ts_idx]
+                result.append((char, int(start), int(end)))
+                ts_idx += 1
+            else:
+                if result:
+                    prev_end = result[-1][2]
+                    result.append((char, prev_end, prev_end))
+
+    return result
+
+
+def merge_to_sentences(
+    aligned: list[tuple[str, int, int]],
+    punctuation: str = '。！？.!?\n',
+    max_duration_ms: int = 5000,
+) -> list[dict[str, Any]]:
+    """将对齐后的字符合并为句子
+
+    遇到标点或超过 max_duration_ms 时断句。
+    """
+    sentences: list[dict[str, Any]] = []
+    current_text = ""
+    current_start: int | None = None
+    current_end = 0
+
+    for char, start, end in aligned:
+        if current_start is None:
+            current_start = start
+
+        current_text += char
+        current_end = end
+
+        if char in punctuation:
+            sentences.append({
+                "text": current_text.strip(),
+                "start": current_start,
+                "end": current_end,
+            })
+            current_text = ""
+            current_start = None
+        elif current_end - current_start >= max_duration_ms:
+            sentences.append({
+                "text": current_text.strip(),
+                "start": current_start,
+                "end": current_end,
+            })
+            current_text = ""
+            current_start = None
+
+    if current_text.strip() and current_start is not None:
+        sentences.append({
+            "text": current_text.strip(),
+            "start": current_start,
+            "end": current_end,
+        })
+
+    return sentences
+
+
+def postprocess_qwen3_asr(
+    text: str,
+    timestamps: list,
+    max_sentence_duration_ms: int = 5000,
+) -> list[TranscriptSegment]:
+    """将 Qwen3-ASR 输出转换为句子级别 TranscriptSegment
+
+    完整后处理流水线：对齐文本+时间戳 → 合并句子 → 转为 TranscriptSegment。
+    """
+    aligned = align_text_with_timestamps(text, timestamps)
+    sentences = merge_to_sentences(aligned, max_duration_ms=max_sentence_duration_ms)
+
+    return [
+        TranscriptSegment(
+            start=s["start"] / 1000.0,
+            end=s["end"] / 1000.0,
+            text=s["text"],
+        )
+        for s in sentences
+    ]
 
 
 def funasr_result_to_segments(result: Any, audio_path: str | Path) -> list[TranscriptSegment]:
