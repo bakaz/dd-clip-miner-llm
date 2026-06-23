@@ -74,11 +74,7 @@ def load_cut_copy_config(path: str | Path) -> dict:
     cfg["behavior"].setdefault("max_files", 0)
     cfg["behavior"].setdefault("max_runtime", 0)
 
-    cfg["processing"].setdefault("max_workers", 1)
     cfg["processing"].setdefault("skip_on_failure", True)
-    cfg["processing"].setdefault("profile", None)
-    cfg["processing"].setdefault("content_types", None)
-    cfg["processing"].setdefault("video_codec", None)
 
     cfg["source"].setdefault("pattern", "*_fix.mp4")
     cfg["source"].setdefault("done_marker", ".dd_clip_miner_cut_copy_done.json")
@@ -216,13 +212,6 @@ def process_video(
         "--config",
         str(proc["config_path"]),
     ]
-
-    if proc.get("profile"):
-        cmd += ["--profile", str(proc["profile"])]
-    if proc.get("content_types"):
-        cmd += ["--content-types", str(proc["content_types"])]
-    if proc.get("video_codec"):
-        cmd += ["--video-codec", str(proc["video_codec"])]
 
     _log(f"  CMD: {' '.join(cmd)}", log_file)
 
