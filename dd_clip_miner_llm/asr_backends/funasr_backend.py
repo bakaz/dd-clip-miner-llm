@@ -389,6 +389,116 @@ def _float_or_none(value: Any) -> float | None:
         return None
 
 
+# ---------------------------------------------------------------------------
+# 歌词文本切分工具
+# ---------------------------------------------------------------------------
+
+
+def _split_by_sentence_punctuation(text: str, punctuation: str) -> list[str]:
+    """按句末标点切分文本，保留标点与前文。
+
+    连续标点（如 ``啊！？``）保持在同一段。
+    小数点 ``.`` 在 ``v2.5`` / ``3.14`` 等数字上下文中不作为句末标点。
+    """
+    # Separate '.' from other punctuation to handle v2.5, 3.14 etc.
+    has_dot = "." in punctuation
+    other_punct = punctuation.replace(".", "")
+
+    if has_dot and other_punct:
+        other_escaped = re.escape(other_punct)
+        pattern = f"([{other_escaped}]+|(?<!\\d)\\.(?!\\d))"
+    elif has_dot:
+        pattern = r"((?<!\d)\.(?!\d))"
+    else:
+        pattern = f"([{re.escape(punctuation)}]+)"
+
+    parts = re.split(pattern, text)
+
+    # Recombine: merge punctuation with preceding text
+    result: list[str] = []
+    current = ""
+    for part in parts:
+        current += part
+        if part and any(p in part for p in punctuation):
+            stripped = current.strip()
+            if stripped:
+                result.append(stripped)
+            current = ""
+    stripped = current.strip()
+    if stripped:
+        result.append(stripped)
+
+    return result
+
+
+def _soft_wrap_lyric_line(line: str, max_line_chars: int) -> list[str]:
+    """软切分歌词行：中文按字数、英文按空格断行。"""
+    if len(line) <= max_line_chars:
+        return [line]
+
+    # Check if line contains CJK characters
+    has_cjk = any(0x4E00 <= ord(c) <= 0x9FFF for c in line)
+
+    if has_cjk:
+        # Chinese: split by character count
+        lines: list[str] = []
+        current = ""
+        for char in line:
+            current += char
+            if len(current) >= max_line_chars:
+                lines.append(current)
+                current = ""
+        if current:
+            lines.append(current)
+        return lines
+    else:
+        # English: split by spaces
+        words = line.split()
+        lines = []
+        current = ""
+        for word in words:
+            if current and len(current) + len(word) + 1 > max_line_chars:
+                lines.append(current)
+                current = word
+            else:
+                current = f"{current} {word}" if current else word
+        if current:
+            lines.append(current)
+        return lines
+
+
+def split_lyrics_text(
+    text: str,
+    max_line_chars: int = 24,
+    sentence_punctuation: str = "。！？.!?\n",
+) -> str:
+    """将歌词文本切分为多行，适合字幕/歌词显示。
+
+    1. 文本已含换行 → 保留原换行
+    2. 否则按句末标点切分
+    3. 超长行软切分（中文按字数、英文按空格）
+    """
+    if not text:
+        return ""
+
+    # If text already has newlines, respect them
+    if "\n" in text:
+        lines = text.split("\n")
+    else:
+        # Split by sentence punctuation
+        lines = _split_by_sentence_punctuation(text, sentence_punctuation)
+
+    # Soft wrap each line
+    result_lines: list[str] = []
+    for line in lines:
+        if len(line) > max_line_chars:
+            result_lines.extend(_soft_wrap_lyric_line(line, max_line_chars))
+        else:
+            result_lines.append(line)
+
+    return "\n".join(result_lines)
+
+
 def _resolve_device(device: str) -> str:
     value = (device or "auto").lower()
     if value == "auto":
