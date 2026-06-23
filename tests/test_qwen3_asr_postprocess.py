@@ -19,6 +19,7 @@ import pytest
 from dd_clip_miner_llm.asr_backends.funasr_backend import (
     FunASRBackend,
     funasr_result_to_segments,
+    repair_qwen3_zero_duration_segments,
     split_lyrics_text,
 )
 from dd_clip_miner_llm.ffmpeg.fsutil import safe_rmtree
@@ -103,6 +104,20 @@ class TestLyricSplitter:
 # ---------------------------------------------------------------------------
 # Group B — Result conversion
 # ---------------------------------------------------------------------------
+
+class TestZeroDurationRepair:
+    def test_postprocess_merges_trailing_punctuation_segment(self):
+        result = [
+            {
+                "text": "你好。",
+                "timestamp": [[0, 1000], [1000, 2000], [2000, 2000]],
+            }
+        ]
+        segments = funasr_result_to_segments(result, "test.wav", cfg={"lyrics": {"enabled": False}})
+        assert len(segments) == 1
+        assert segments[0].text == "你好。"
+        assert segments[0].end > segments[0].start
+
 
 class TestResultConversion:
     """funasr_result_to_segments: routing by result format & cfg."""

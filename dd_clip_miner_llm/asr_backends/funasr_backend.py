@@ -309,6 +309,48 @@ def merge_to_sentences(
     return sentences
 
 
+def repair_qwen3_zero_duration_segments(
+    segments: list[TranscriptSegment],
+) -> tuple[list[TranscriptSegment], dict[str, int]]:
+    """Merge zero-duration Qwen3 segments into adjacent segments (scheme C)."""
+    sorted_segments = sorted(segments, key=lambda item: (item.start, item.end))
+    result: list[TranscriptSegment] = []
+    pending_prefix = ""
+    stats = {"merged_count": 0, "dropped_empty_count": 0, "dropped_orphan_count": 0}
+
+    for segment in sorted_segments:
+        text = segment.text
+        stripped = text.strip()
+        is_zero_duration = segment.end <= segment.start
+
+        if not is_zero_duration:
+            if pending_prefix:
+                text = pending_prefix + text
+                pending_prefix = ""
+                stats["merged_count"] += 1
+            if stripped:
+                result.append(TranscriptSegment(segment.start, segment.end, text))
+            elif text:
+                stats["dropped_empty_count"] += 1
+            continue
+
+        if not stripped:
+            stats["dropped_empty_count"] += 1
+            continue
+
+        if result:
+            previous = result[-1]
+            result[-1] = TranscriptSegment(previous.start, previous.end, previous.text + text)
+            stats["merged_count"] += 1
+        else:
+            pending_prefix += text
+
+    if pending_prefix:
+        stats["dropped_orphan_count"] += 1
+
+    return result, stats
+
+
 def postprocess_qwen3_asr(
     text: str,
     timestamps: list,
@@ -321,14 +363,17 @@ def postprocess_qwen3_asr(
     aligned = align_text_with_timestamps(text, timestamps)
     sentences = merge_to_sentences(aligned, max_duration_ms=max_sentence_duration_ms)
 
-    return [
+    segments = [
         TranscriptSegment(
             start=s["start"] / 1000.0,
             end=s["end"] / 1000.0,
             text=s["text"],
         )
         for s in sentences
+        if s.get("text", "").strip()
     ]
+    repaired, _ = repair_qwen3_zero_duration_segments(segments)
+    return repaired
 
 
 def funasr_result_to_segments(
@@ -345,6 +390,7 @@ def funasr_result_to_segments(
     if isinstance(cfg, dict) and isinstance(cfg.get("lyrics"), dict):
         lyrics_cfg = cfg["lyrics"]
     lyrics_enabled = bool(lyrics_cfg.get("enabled", False))
+    qwen3_processed = False
 
     for item in items:
         text = _value(item, "text", "sentence", "transcript")
@@ -382,10 +428,21 @@ def funasr_result_to_segments(
                                 ))
                 else:
                     segments.extend(aligned_segments)
+                qwen3_processed = True
                 continue
 
         # Existing logic for other formats (SenseVoice/Paraformer)
         segments.extend(_timestamps_to_segments(timestamps, fallback_text=str(text or "")))
+
+    if qwen3_processed and segments:
+        segments, stats = repair_qwen3_zero_duration_segments(segments)
+        if any(stats.values()):
+            print(
+                "  [asr] Qwen3 zero-duration repair:"
+                f" merged={stats['merged_count']},"
+                f" dropped_empty={stats['dropped_empty_count']},"
+                f" dropped_orphan={stats['dropped_orphan_count']}",
+            )
 
     if segments:
         return segments

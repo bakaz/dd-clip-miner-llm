@@ -9,11 +9,11 @@ asr:
     funasr:
       model: Qwen/Qwen3-ASR-1.7B
       hub: hf
-      device: auto
+      device: cuda:0
       dtype: bf16
       batch_size: null
       language: null
-      timestamp_chunk_seconds: 300
+      timestamp_chunk_seconds: 180
       max_workers: 1
       forced_aligner: Qwen/Qwen3-ForcedAligner-0.6B
       forced_aligner_kwargs: {}
@@ -24,6 +24,16 @@ asr:
         max_line_chars: 24
         sentence_punctuation: "。！？.!?\n"
         max_sentence_duration_ms: 5000
+      fallback:
+        enabled: true
+        chunk_seconds: 5
+        max_segment_seconds: 15
+        sparse_chars_per_sec: 1.0
+        repeat_threshold: 3
+        padding_seconds: 2.0
+        max_workers: 1
+        merge_policy: replace_ranges
+        zero_duration_policy: merge_adjacent
     faster_whisper:
       device: auto
       compute_type: default
