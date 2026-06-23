@@ -44,12 +44,13 @@ dd-clip-miner-llm.zip
 # Test results
 test_result/
 
-# Config (with API keys)
+# Config (with API keys / private paths)
 config.yaml
 config.yaml.bak
 config.yaml.bak.*
 streamer_dictionary.json
 cut_copy.conf
+wol_webhook.py
 
 # Logs
 *.log
