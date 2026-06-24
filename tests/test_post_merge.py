@@ -236,6 +236,67 @@ def test_post_merge_relocates_context_paths_from_current_output_dir(tmp_path, mo
     assert Path(result["video_path"]).exists()
 
 
+def test_post_merge_matches_clip_naming_paths_from_relocated_run(tmp_path, monkeypatch):
+    from dd_clip_miner_llm import post_merge
+
+    project_root = tmp_path / "project"
+    fixture = _write_fixture_run(project_root)
+    run = project_root / "run"
+    reports_path = run / "04_reports" / "song" / "songs.json"
+    data = json.loads(reports_path.read_text(encoding="utf-8"))
+    clip_name = "【Streamer】014-未知歌曲_我一个人在家里看了半天-260624.mp4"
+    data[0]["video_path"] = (
+        "runs\\batch\\2026_06_24\\demo_fix\\03_clips\\kv_optimized\\video\\song\\" + clip_name
+    )
+    data[1]["video_path"] = (
+        "runs\\batch\\2026_06_24\\demo_fix\\03_clips\\kv_optimized\\video\\song\\"
+        "【Streamer】013-未知歌曲_嘿,未-260624.mp4"
+    )
+    reports_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    output_dir = tmp_path / "nas" / "result" / "demo_fix" / "03_clips" / "kv_optimized" / "video" / "song"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    first = output_dir / clip_name
+    second = output_dir / "【Streamer】013-未知歌曲_嘿,未-260624.mp4"
+    first.write_bytes(b"video")
+    second.write_bytes(b"video")
+
+    context_path = output_dir / "merge_recut_context.json"
+    stale_run = tmp_path / "stale" / "runs" / "batch" / "2026_06_24" / "demo_fix"
+    context = {
+        "run_dir": str(stale_run),
+        "content_type": "song",
+        "manifest_path": str(stale_run / "manifest.json"),
+        "reports_path": str(stale_run / "04_reports" / "song" / "songs.json"),
+        "llm_dir": str(stale_run / "02_asr" / "llm" / "song"),
+        "matches_path": str(stale_run / "02_asr" / "llm" / "song" / "matches.json"),
+        "transcript_path": str(stale_run / "02_asr" / "transcript.json"),
+        "input_video": str(stale_run / "00_input" / "input.mp4"),
+        "total_duration": 90.0,
+        "config": _post_merge_config(),
+    }
+    context_path.write_text(json.dumps(context, indent=2), encoding="utf-8")
+
+    for src, dest in (
+        (run / "manifest.json", stale_run / "manifest.json"),
+        (reports_path, stale_run / "04_reports" / "song" / "songs.json"),
+        (run / "02_asr" / "transcript.json", stale_run / "02_asr" / "transcript.json"),
+        (run / "02_asr" / "llm" / "song" / "matches.json", stale_run / "02_asr" / "llm" / "song" / "matches.json"),
+        (fixture["source"], stale_run / "00_input" / "input.mp4"),
+    ):
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+
+    def fake_cut_video(_source, target, *_args, **_kwargs):
+        Path(target).write_bytes(b"merged video")
+
+    monkeypatch.setattr(post_merge, "cut_video", fake_cut_video)
+
+    result = post_merge.post_merge_from_context(context_path, first, second)
+
+    assert Path(result["video_path"]).exists()
+
+
 def test_post_merge_matches_project_relative_report_paths(tmp_path, monkeypatch):
     from dd_clip_miner_llm import post_merge
 

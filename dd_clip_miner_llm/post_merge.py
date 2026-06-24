@@ -283,6 +283,11 @@ def _find_report_result(path: Path, results: list[ContentResult], run_dir: Path)
         for candidate in (result.video_path, result.audio_path):
             if candidate is not None and needle_keys & _path_keys(candidate, run_dir):
                 return result
+    export_sequence = _export_sequence_number(path)
+    if export_sequence is not None:
+        for result in results:
+            if _result_export_sequence(result, path.suffix) == export_sequence:
+                return result
     suffix_index = _export_index_suffix(path)
     if suffix_index is not None:
         for result in results:
@@ -329,6 +334,28 @@ def _export_index_suffix(path: Path) -> int | None:
     if not match:
         return None
     return int(match.group(1))
+
+
+def _export_sequence_number(path: Path) -> int | None:
+    import re
+
+    match = re.search(r"】\s*(\d{3})\s*-", path.stem)
+    if match:
+        return int(match.group(1))
+    match = re.search(r"(?:^|[_-])(\d{3})-", path.stem)
+    if match:
+        return int(match.group(1))
+    return None
+
+
+def _result_export_sequence(result: ContentResult, suffix: str) -> int | None:
+    suffix = suffix.lower()
+    for candidate in (result.video_path, result.audio_path):
+        if candidate is not None and candidate.suffix.lower() == suffix:
+            sequence = _export_sequence_number(candidate)
+            if sequence is not None:
+                return sequence
+    return None
 
 
 def _result_has_extension(result: ContentResult, suffix: str) -> bool:
@@ -380,6 +407,7 @@ def _path_keys(path: Path, run_dir: Path) -> set[str]:
         except OSError:
             resolved = candidate.absolute()
         keys.add(os.path.normcase(os.path.abspath(str(resolved))))
+        keys.add(os.path.normcase(resolved.name))
     return keys
 
 
