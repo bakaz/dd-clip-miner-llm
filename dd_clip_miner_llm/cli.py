@@ -6,6 +6,43 @@ from pathlib import Path
 from .config import DEFAULT_CONFIG, PROFILE_ALL, list_profile_names, load_config
 from .ffmpeg import detect_ffmpeg_environment
 
+_CUT_COPY_CONF_FROM_CONFIG = object()
+
+
+def _cut_copy_conf_path_from_config(config_path: str | Path | None) -> str | None:
+    if not config_path:
+        return None
+    main_config = load_config(config_path)
+    cc_cfg = main_config.get("cut_copy", {})
+    conf_path = cc_cfg.get("conf_path", "cut_copy.conf")
+    return str(Path(config_path).resolve().parent / conf_path)
+
+
+def resolve_batch_cut_copy_conf(
+    config_path: str | Path | None,
+    cut_copy_conf_arg: object,
+) -> str | None:
+    """Resolve cut_copy.conf for batch-run post-processing.
+
+    - ``None``: flag omitted → use config only when ``cut_copy.enabled`` is true
+    - ``_CUT_COPY_CONF_FROM_CONFIG``: ``--cut-copy-conf`` without path → always
+      read ``cut_copy.conf_path`` from *config_path*
+    - otherwise: explicit path from CLI
+    """
+    if cut_copy_conf_arg is _CUT_COPY_CONF_FROM_CONFIG:
+        return _cut_copy_conf_path_from_config(config_path)
+
+    if cut_copy_conf_arg is not None:
+        return str(cut_copy_conf_arg)
+
+    if not config_path:
+        return None
+    main_config = load_config(config_path)
+    cc_cfg = main_config.get("cut_copy", {})
+    if not cc_cfg.get("enabled", False):
+        return None
+    return _cut_copy_conf_path_from_config(config_path)
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -56,7 +93,13 @@ def build_parser() -> argparse.ArgumentParser:
     batch_parser.add_argument("--concat", action="store_true", help="合并目录下的多个视频后再处理")
     batch_parser.add_argument("--video-codec", default=None, help="视频编码器")
     batch_parser.add_argument("--audio-bitrate-kbps", type=int, default=None, help="音频码率")
-    batch_parser.add_argument("--cut-copy-conf", default=None, help="cut_copy 配置文件路径，batch-run 完成后自动执行 cut_copy 后处理")
+    batch_parser.add_argument(
+        "--cut-copy-conf",
+        nargs="?",
+        const=_CUT_COPY_CONF_FROM_CONFIG,
+        default=None,
+        help="batch-run 完成后执行 cut_copy；省略路径时从 config.yaml 的 cut_copy.conf_path 读取",
+    )
 
     # manual-cut 命令（兼容旧项目）
     manual_parser = subparsers.add_parser("manual-cut", help="从编辑后的 CSV 重新切割片段")
@@ -366,22 +409,14 @@ def main(argv: list[str] | None = None) -> int:
         print("\nDone! Batch run completed.")
 
         # Cut-copy post-processing
-        cut_copy_conf = args.cut_copy_conf
-        # Auto-detect from config if not specified via CLI
-        if not cut_copy_conf:
-            try:
-                main_config = load_config(args.config)
-                cc_cfg = main_config.get("cut_copy", {})
-                if cc_cfg.get("enabled", False):
-                    cut_copy_conf = cc_cfg.get("conf_path", "cut_copy.conf")
-                    # Resolve relative path against config file directory
-                    config_dir = Path(args.config).parent
-                    cut_copy_conf = str(config_dir / cut_copy_conf)
-                    print(f"[cut-copy] Auto-detected from config: {cut_copy_conf}")
-            except Exception:
-                pass  # Ignore config loading errors here
+        try:
+            cut_copy_conf = resolve_batch_cut_copy_conf(args.config, args.cut_copy_conf)
+        except Exception as exc:
+            print(f"[error] Failed to resolve cut_copy config: {exc}")
+            return 1
 
         if cut_copy_conf:
+            print(f"[cut-copy] Using config: {cut_copy_conf}")
             from .cut_copy import load_cut_copy_config, run_batch_cut_copy
             try:
                 cc_config = load_cut_copy_config(cut_copy_conf)
