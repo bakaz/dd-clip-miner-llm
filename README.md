@@ -115,9 +115,10 @@ python -m dd_clip_miner_llm init-config --out config.yaml
 |------|------|
 | `config.example.yaml` | 主配置模板（含注释） |
 | `config.daily-summary.example.yaml` | 仅当天总结 |
+| `cut_copy.example.conf` | 录播自动处理工作流（复制为 `cut_copy.conf`） |
 | `streamer_dictionary.example.json` | 主播词典 |
 
-**勿提交**（已在 `.gitignore`）：`config.yaml`、`streamer_dictionary.json`、`runs/`。
+**勿提交**（已在 `.gitignore`）：`config.yaml`、`cut_copy.conf`、`streamer_dictionary.json`、`runs/`。
 
 ASR 使用 `asr.mode: local | remote` 新结构（见 `config.example.yaml`）：
 

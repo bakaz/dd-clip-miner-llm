@@ -24,6 +24,11 @@ asr:
       generate_kwargs:
         return_time_stamps: true
       keep_chunk_audio: false
+      lyrics:
+        enabled: false
+        max_line_chars: 24
+        sentence_punctuation: "。！？.!?\n"
+        max_sentence_duration_ms: 5000
       fallback:
         enabled: true
         chunk_seconds: 5
@@ -104,14 +109,24 @@ llm:
   retry_empty_with_reasoning: true
   reasoning_followup_rounds: 5
   reasoning_followup_max_tokens: 32768
+  max_completion_tokens: 32768
   batch_size: null
   cache_friendly_prompt_layout: false
   use_tools: false
   verify_with_search: false
   json_fix_rounds: 3
 
+# 必须显式关闭其他类型（否则会与 DEFAULT_CONFIG 合并后仍启用 song）
 content_types:
+  song: false
+  dialogue: false
+  highlight: false
+  funny: false
+  cringe: false
   daily_summary: true
+
+song:
+  enabled: false
 
 daily_summary:
   enabled: true

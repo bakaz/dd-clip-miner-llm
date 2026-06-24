@@ -392,8 +392,8 @@ output:
 # 4. 验证后删除源文件和工作目录
 # 5. 关机
 #
-# 配置详情见 cut_copy.example.conf
+# 配置详情见 cut_copy.example.conf（复制为 cut_copy.conf 后修改路径）
 # 计划任务设置: scripts/setup_cut_copy_task.ps1
 cut_copy:
   enabled: false
-  conf_path: "cut_copy.conf"
+  conf_path: "cut_copy.conf"   # 本地文件，从 cut_copy.example.conf 复制

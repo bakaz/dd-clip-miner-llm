@@ -163,7 +163,7 @@ class TestConfig:
         assert funasr["fallback"]["enabled"] is True
         assert funasr["fallback"]["merge_policy"] == "replace_ranges"
         fw = local["faster_whisper"]
-        assert fw["batch"]["model"] == "small"
+        assert fw["batch"]["model"] == "turbo"
         assert fw["fallback"]["enabled"] is True
         assert "llm" in DEFAULT_CONFIG
         assert "padding" in DEFAULT_CONFIG
@@ -392,7 +392,7 @@ class TestASRBackends:
         batch = resolve_faster_whisper_mode_settings(DEFAULT_CONFIG["asr"], "batch")
         standard = resolve_faster_whisper_mode_settings(DEFAULT_CONFIG["asr"], "standard")
 
-        assert batch["model"] == "small"
+        assert batch["model"] == "turbo"
         assert batch["inference_mode"] == "batched"
         assert batch["batch_size"] == 8
         assert batch["vad_filter"] is True
@@ -3094,6 +3094,27 @@ class TestCLI:
         assert config["song"]["review"]["max_completion_tokens"] == 32768
         assert config["song"]["missed_recheck"]["max_completion_tokens"] == 32768
         assert config["song"]["padding"]["merge_gap_seconds"] == 40.0
+
+    def test_daily_summary_example_disables_other_content_types(self):
+        from dd_clip_miner_llm.pipeline.utils import _get_content_types
+
+        config = load_config("config.daily-summary.example.yaml")
+        assert config["content_types"]["song"] is False
+        assert config["content_types"]["daily_summary"] is True
+        assert config["song"]["enabled"] is False
+        assert _get_content_types(config) == ["daily_summary"]
+
+    def test_init_config_matches_example_cut_copy_and_remote_asr(self):
+        import yaml
+
+        from dd_clip_miner_llm.cli import _generate_config_yaml
+
+        init = yaml.safe_load(_generate_config_yaml())
+        example = yaml.safe_load(Path("config.example.yaml").read_text(encoding="utf-8"))
+        assert init["cut_copy"] == example["cut_copy"]
+        assert init["asr"]["remote"] == example["asr"]["remote"]
+        assert init["asr"]["local"]["funasr"]["keep_chunk_audio"] is False
+        assert init["profiles"]["kv_optimized"]["song"]["normalization"]["chorus_gap_seconds"] == 130.0
 
     @pytest.mark.parametrize(
         "path",
