@@ -2,9 +2,9 @@
 # 用法: python install.py --config install.yaml
 
 # ASR 后端选择
-# faster_whisper: 轻量级，支持 GPU (CUDA 12)
-# funasr: 支持 SenseVoiceSmall / Paraformer，需要 PyTorch
-asr_backend: faster_whisper
+# funasr: Qwen3-ASR / SenseVoiceSmall / Paraformer（GPU 生产默认，需 PyTorch + --funasr）
+# faster_whisper: 轻量级备选，支持 GPU (CUDA 12)
+asr_backend: funasr
 
 # GPU 类型
 # auto: 自动检测（Blackwell/CC≥12 走 cuda13，否则 cuda12）
@@ -14,7 +14,7 @@ asr_backend: faster_whisper
 gpu_type: auto
 
 # 是否安装 FunASR 支持（即使 asr_backend 不是 funasr）
-install_funasr: false
+install_funasr: true
 
 # 是否安装开发/测试工具（pip install -e ".[test]"）
 install_dev_tools: false

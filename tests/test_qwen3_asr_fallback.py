@@ -8,6 +8,7 @@ import pytest
 
 from dd_clip_miner_llm.asr_fallback import (
     detect_qwen3_fallback_ranges,
+    faster_whisper_fallback_config,
     is_qwen3_fallback_enabled,
     merge_replace_ranges,
     qwen3_fallback_config,
@@ -157,3 +158,26 @@ class TestTranscribeQwen3WithFallback:
         assert segments == primary_segments
         assert meta["fallback_range_count"] == 0
         assert (asr_dir / "fallback_ranges.json").exists()
+
+
+class TestFasterWhisperFallbackConfig:
+    def test_empty_when_backend_is_qwen3(self):
+        cfg = {
+            "mode": "local",
+            "local": {
+                "backend": "qwen3_asr",
+                "faster_whisper": {"fallback": {"enabled": True, "merge_policy": "replace_ranges"}},
+            },
+        }
+        assert faster_whisper_fallback_config(cfg) == {}
+
+    def test_returns_fallback_when_backend_is_faster_whisper(self):
+        fallback = {"enabled": True, "merge_policy": "replace_ranges"}
+        cfg = {
+            "mode": "local",
+            "local": {
+                "backend": "faster_whisper",
+                "faster_whisper": {"fallback": fallback},
+            },
+        }
+        assert faster_whisper_fallback_config(cfg) == fallback

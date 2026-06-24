@@ -8,34 +8,50 @@ audio:
 
 asr:
   mode: local
-
   local:
-    backend: faster_whisper
-
-    # faster_whisper 配置（支持 gpu/cpu 自动分流，详见 config.example.yaml）
-    faster_whisper:
-      model: small
-      device: auto            # auto: 自动检测 GPU，无 GPU 时 compute_type 自动设为 int8
-      compute_type: default   # default=float16(GPU) / int8(CPU auto-detect)
-      language: null
-      beam_size: 5
-      vad_filter: true
-      initial_prompt: null
-      inference_mode: batched   # batched | standard
-
+    backend: qwen3_asr
     funasr:
-      model: iic/SenseVoiceSmall
-      hub: ms
-      trust_remote_code: true
-      device: auto
-      batch_size: 1
-      timestamp_chunk_seconds: 5
-      max_workers: 4
+      model: Qwen/Qwen3-ASR-1.7B
+      hub: hf
+      device: cuda:0
+      dtype: bf16
+      batch_size: null
       language: null
-      vad_model: null
-      punc_model: null
-      spk_model: null
-      generate_kwargs: {}
+      timestamp_chunk_seconds: 180
+      max_workers: 2
+      forced_aligner: Qwen/Qwen3-ForcedAligner-0.6B
+      forced_aligner_kwargs: {}
+      generate_kwargs:
+        return_time_stamps: true
+      keep_chunk_audio: false
+      fallback:
+        enabled: true
+        chunk_seconds: 5
+        max_segment_seconds: 15
+        sparse_chars_per_sec: 1.0
+        repeat_threshold: 3
+        padding_seconds: 2.0
+        max_workers: 2
+        merge_policy: replace_ranges
+        zero_duration_policy: merge_adjacent
+    # CPU/轻量备选：将 backend 改为 faster_whisper 并启用下方配置
+    faster_whisper:
+      device: auto
+      compute_type: default
+      batch:
+        model: turbo
+        inference_mode: batched
+        batch_size: 8
+        vad_filter: true
+      standard:
+        model: turbo
+        inference_mode: standard
+        vad_filter: false
+      fallback:
+        enabled: true
+        primary_mode: batch
+        fallback_mode: standard
+        merge_policy: replace_ranges
 
   remote:
     provider: mimo
@@ -47,22 +63,44 @@ asr:
     language: null
 
 llm:
-  active_provider: default
+  provider_route:
+  - opencode
+  - deepseek
+  - mimo
   providers:
-    default:
+    opencode:
       api_key: null
-      api_key_env: LLM_API_KEY
-      base_url: null
-      model: gpt-4o
+      api_key_env: OPENCODE_API_KEY
+      base_url: https://opencode.ai/zen/go/v1
+      model: deepseek-v4-flash
       temperature: 0.1
       max_tokens: 8192
-      max_completion_tokens: null
       timeout_schedule: [60, 120, 180]
       retry_backoff_seconds: [2, 5]
       retry_jitter_ratio: 0.25
       result_retries: 2
-      # proxy: http://127.0.0.1:7890
-      # stream: false                      # 流式接收，代理截断时保留部分内容
+    deepseek:
+      api_key: null
+      api_key_env: DEEPSEEK_API_KEY
+      base_url: https://api.deepseek.com
+      model: deepseek-v4-flash
+      temperature: 0.1
+      max_tokens: 8192
+      timeout_schedule: [60, 120, 180]
+      retry_backoff_seconds: [2, 5]
+      retry_jitter_ratio: 0.25
+      result_retries: 2
+    mimo:
+      api_key: null
+      api_key_env: MIMO_API_KEY
+      base_url: https://token-plan-cn.xiaomimimo.com/v1
+      model: mimo-v2.5-pro
+      temperature: 0.1
+      max_tokens: 8192
+      timeout_schedule: [60, 120, 180]
+      retry_backoff_seconds: [2, 5]
+      retry_jitter_ratio: 0.25
+      result_retries: 2
   retry_empty_with_reasoning: true
   reasoning_followup_rounds: 5
   reasoning_followup_max_tokens: 32768

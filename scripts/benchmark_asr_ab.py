@@ -117,8 +117,18 @@ def run_side(
     return result
 
 
-def with_qwen3_max_workers(asr_config: dict, max_workers: int) -> dict:
+def with_backend(asr_config: dict, backend: str) -> dict:
     cfg = deepcopy(asr_config)
+    local = cfg.setdefault("local", {})
+    if not isinstance(local, dict):
+        local = {}
+        cfg["local"] = local
+    local["backend"] = backend
+    return cfg
+
+
+def with_qwen3_max_workers(asr_config: dict, max_workers: int) -> dict:
+    cfg = with_backend(asr_config, "qwen3_asr")
     local = cfg.setdefault("local", {})
     funasr = local.setdefault("funasr", {})
     if not isinstance(funasr, dict):
@@ -223,7 +233,7 @@ def main() -> None:
         results.append(run_side(
             "fw_turbo_batch_fallback",
             audio_path,
-            asr_config,
+            with_backend(asr_config, "faster_whisper"),
             args.output_dir / "fw_turbo_batch_fallback",
             transcribe_with_fallback,
         ))
@@ -232,7 +242,7 @@ def main() -> None:
         results.append(run_side(
             "qwen3_chunk180_fallback",
             audio_path,
-            asr_config,
+            with_backend(asr_config, "qwen3_asr"),
             args.output_dir / "qwen3_chunk180_fallback",
             transcribe_qwen3_with_fallback,
         ))

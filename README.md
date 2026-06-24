@@ -46,7 +46,7 @@
 
 ```powershell
 cd path\to\dd-clip-miner-llm
-python install.py
+python install.py --gpu cuda13 --funasr   # GPU 生产管线；无 GPU 可用 python install.py
 
 copy config.example.yaml config.yaml
 $env:OPENCODE_API_KEY = "<your-api-key>"      # 或设置 DEEPSEEK_API_KEY / MIMO_API_KEY
