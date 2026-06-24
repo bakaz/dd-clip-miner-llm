@@ -304,7 +304,7 @@ profiles:
         search_query_source: lyric_anchors    # 搜索歌名时用 lyric_anchors 而非 title
         preserve_unknown_on_weak_evidence: true  # 证据弱时保留「未知歌曲」不强行命名
       search:
-        enabled: false                        # false=不在管线内主动联网搜歌（省时间）
+        enabled: true                         # true=对 unknown 歌名联网搜索验证
         search_unknown_only: true             # 若启用，仅搜 unknown 歌名
         max_searches: 25                      # 单次 run 最大搜索次数
       missed_recheck:
@@ -508,6 +508,7 @@ output:
 #   3. 每个文件 run dd-clip-miner-llm
 #   4. cut_copy 复制结果到 destination，校验后删源文件
 #   5. shutdown_after 关机
+# batch-run 触发 cut_copy: cut_copy.enabled=true，或命令行加 --cut-copy-conf（可省略路径）
 # 路径细节在 cut_copy.example.conf（复制为 cut_copy.conf）。
 cut_copy:
   enabled: false                              # true=batch-run 结束后自动执行 cut_copy
