@@ -66,6 +66,7 @@ Thumbs.db
 # Agent / local tooling
 agent-tools/
 terminals/
+cli.txt
 
 # Local ASR benchmark outputs (may contain real transcript text)
 asr_benchmark*.json
