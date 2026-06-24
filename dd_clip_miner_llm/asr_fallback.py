@@ -410,13 +410,13 @@ def _run_qwen3_fallback_ranges(
     asr_dir: Path,
 ) -> list[dict[str, Any]]:
     audio_dir.mkdir(parents=True, exist_ok=True)
+    local_cfg = _build_qwen3_local_config(asr_config, chunk_seconds=chunk_seconds)
+    backend = build_asr_backend(
+        {"mode": "local", "local": local_cfg},
+        runtime_context={"asr_dir": asr_dir},
+    )
 
     def run_one(item: dict[str, Any]) -> dict[str, Any]:
-        local_cfg = _build_qwen3_local_config(asr_config, chunk_seconds=chunk_seconds)
-        backend = build_asr_backend(
-            {"mode": "local", "local": local_cfg},
-            runtime_context={"asr_dir": asr_dir},
-        )
         result = _run_one_fallback_range(source_wav, backend, audio_dir, item)
         repaired_segments = [
             segment.to_dict()

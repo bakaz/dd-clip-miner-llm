@@ -349,8 +349,9 @@ class TestBackendBehaviour:
 
         assert len(segments) == 2
         assert cut_paths
-        assert all(path.parent == asr_dir / "funasr_chunks" for path in cut_paths)
-        assert not (asr_dir / "funasr_chunks").exists()
+        chunk_dir = asr_dir / "funasr_chunks" / "source"
+        assert all(path.parent == chunk_dir for path in cut_paths)
+        assert not chunk_dir.exists()
         safe_rmtree(work_dir)
 
     def test_funasr_chunk_mode_preserves_chunks_on_failure(self):
@@ -370,5 +371,5 @@ class TestBackendBehaviour:
              pytest.raises(RuntimeError, match="boom"):
             backend.transcribe(work_dir / "source.wav")
 
-        assert (asr_dir / "funasr_chunks" / "chunk_0000.wav").exists()
+        assert (asr_dir / "funasr_chunks" / "source" / "chunk_0000.wav").exists()
         safe_rmtree(work_dir)

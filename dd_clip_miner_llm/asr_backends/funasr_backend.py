@@ -44,44 +44,48 @@ class FunASRBackend(ASRBackend):
         if self._model is not None:
             return self._model
 
-        try:
-            from funasr import AutoModel
-        except ImportError as exc:
-            raise RuntimeError("funasr not installed. pip install funasr") from exc
+        with self._model_lock:
+            if self._model is not None:
+                return self._model
 
-        cfg = self.funasr_settings
-        model_name = str(cfg.get("model", self.settings.get("qwen3_model", "Qwen/Qwen3-ASR-0.6B")))
-        kwargs: dict[str, Any] = {
-            "model": model_name,
-            "device": _resolve_device(str(cfg.get("device", self.settings.get("device", "auto")))),
-        }
-        for key in (
-            "hub",
-            "trust_remote_code",
-            "vad_model",
-            "punc_model",
-            "spk_model",
-            "dtype",
-            "model_revision",
-            "disable_update",
-            "forced_aligner",
-            "max_inference_batch_size",
-            "max_new_tokens",
-        ):
-            if key in cfg and cfg[key] is not None:
-                kwargs[key] = cfg[key]
-        if (
-            _is_qwen3_model(model_name)
-            and _wants_timestamps(cfg)
-            and not kwargs.get("forced_aligner")
-        ):
-            kwargs["forced_aligner"] = _DEFAULT_QWEN3_FORCED_ALIGNER
-        for key in ("vad_kwargs", "punc_kwargs", "spk_kwargs", "model_kwargs", "forced_aligner_kwargs"):
-            if isinstance(cfg.get(key), dict):
-                kwargs[key] = cfg[key]
+            try:
+                from funasr import AutoModel
+            except ImportError as exc:
+                raise RuntimeError("funasr not installed. pip install funasr") from exc
 
-        self._model = AutoModel(**kwargs)
-        return self._model
+            cfg = self.funasr_settings
+            model_name = str(cfg.get("model", self.settings.get("qwen3_model", "Qwen/Qwen3-ASR-0.6B")))
+            kwargs: dict[str, Any] = {
+                "model": model_name,
+                "device": _resolve_device(str(cfg.get("device", self.settings.get("device", "auto")))),
+            }
+            for key in (
+                "hub",
+                "trust_remote_code",
+                "vad_model",
+                "punc_model",
+                "spk_model",
+                "dtype",
+                "model_revision",
+                "disable_update",
+                "forced_aligner",
+                "max_inference_batch_size",
+                "max_new_tokens",
+            ):
+                if key in cfg and cfg[key] is not None:
+                    kwargs[key] = cfg[key]
+            if (
+                _is_qwen3_model(model_name)
+                and _wants_timestamps(cfg)
+                and not kwargs.get("forced_aligner")
+            ):
+                kwargs["forced_aligner"] = _DEFAULT_QWEN3_FORCED_ALIGNER
+            for key in ("vad_kwargs", "punc_kwargs", "spk_kwargs", "model_kwargs", "forced_aligner_kwargs"):
+                if isinstance(cfg.get(key), dict):
+                    kwargs[key] = cfg[key]
+
+            self._model = AutoModel(**kwargs)
+            return self._model
 
     def transcribe(self, audio_path: str | Path) -> list[TranscriptSegment]:
         from ..ffmpeg import get_duration
@@ -213,11 +217,14 @@ class FunASRBackend(ASRBackend):
     def _resolve_chunk_dir(self, audio_path: Path, cfg: dict[str, Any]) -> Path:
         configured = cfg.get("chunk_dir")
         if configured:
-            return Path(str(configured)).expanduser()
-        asr_dir = self.runtime_context.get("asr_dir")
-        if asr_dir:
-            return Path(asr_dir) / "funasr_chunks"
-        return Path(audio_path).parent / "funasr_chunks"
+            base = Path(str(configured)).expanduser()
+        else:
+            asr_dir = self.runtime_context.get("asr_dir")
+            if asr_dir:
+                base = Path(asr_dir) / "funasr_chunks"
+            else:
+                base = Path(audio_path).parent / "funasr_chunks"
+        return base / audio_path.stem
 
 
 def is_punctuation(char: str) -> bool:
