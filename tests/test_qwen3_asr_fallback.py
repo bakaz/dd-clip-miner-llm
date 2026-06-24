@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from dd_clip_miner_llm.asr_fallback import (
+    _build_qwen3_local_config,
     detect_qwen3_fallback_ranges,
     faster_whisper_fallback_config,
     is_qwen3_fallback_enabled,
@@ -122,6 +123,37 @@ class TestFallbackConfig:
             },
         }
         assert is_qwen3_fallback_enabled(config) is False
+
+    def test_qwen3_fallback_inherits_gpu_funasr_hub(self):
+        config = {
+            "mode": "local",
+            "local": {
+                "backend": "qwen3_asr",
+                "funasr": {
+                    "device": "auto",
+                    "fallback": {
+                        "enabled": True,
+                        "chunk_seconds": 5,
+                    },
+                },
+                "gpu": {
+                    "funasr": {
+                        "model": "Qwen/Qwen3-ASR-1.7B",
+                        "hub": "ms",
+                        "device": "cuda:0",
+                        "dtype": "bf16",
+                        "timestamp_chunk_seconds": 180,
+                    },
+                },
+            },
+        }
+
+        local_cfg = _build_qwen3_local_config(config, chunk_seconds=5)
+
+        assert local_cfg["funasr"]["model"] == "Qwen/Qwen3-ASR-1.7B"
+        assert local_cfg["funasr"]["hub"] == "ms"
+        assert local_cfg["funasr"]["device"] == "cuda:0"
+        assert local_cfg["funasr"]["timestamp_chunk_seconds"] == 5
 
 
 class TestTranscribeQwen3WithFallback:

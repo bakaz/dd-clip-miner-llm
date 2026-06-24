@@ -33,7 +33,7 @@ asr:
         sparse_chars_per_sec: 1.0
         repeat_threshold: 3
         padding_seconds: 2.0
-        max_workers: 2
+        max_workers: 1
         merge_policy: replace_ranges
         zero_duration_policy: merge_adjacent
     faster_whisper:
@@ -73,11 +73,11 @@ asr:
     gpu:
       funasr:
         model: Qwen/Qwen3-ASR-1.7B
-        hub: hf
+        hub: ms
         device: cuda:0
         dtype: bf16
         timestamp_chunk_seconds: 180
-        max_workers: 2
+        max_workers: 1
         forced_aligner: Qwen/Qwen3-ForcedAligner-0.6B
         forced_aligner_kwargs: {}
       faster_whisper:

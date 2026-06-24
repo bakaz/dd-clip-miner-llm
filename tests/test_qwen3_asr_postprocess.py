@@ -225,6 +225,23 @@ class TestBackendBehaviour:
         call_kwargs = _fake_funasr.call_args[1]
         assert call_kwargs["dtype"] == "bf16"
 
+    def test_funasr_backend_passes_hub_to_automodel(self, _fake_funasr: MagicMock):
+        """hub from settings is forwarded to AutoModel constructor."""
+        _fake_funasr.return_value = MagicMock()
+        settings = {
+            "funasr": {
+                "model": "Qwen/Qwen3-ASR-1.7B",
+                "hub": "ms",
+                "device": "cpu",
+            }
+        }
+
+        backend = FunASRBackend(settings)
+        backend._load_model()
+
+        call_kwargs = _fake_funasr.call_args[1]
+        assert call_kwargs["hub"] == "ms"
+
     def test_funasr_backend_passes_forced_aligner_to_automodel(self, _fake_funasr: MagicMock):
         """Qwen3 timestamp mode initializes AutoModel with forced aligner settings."""
         _fake_funasr.return_value = MagicMock()

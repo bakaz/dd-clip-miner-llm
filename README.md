@@ -118,7 +118,7 @@ python -m dd_clip_miner_llm init-config --out config.yaml
 | `cut_copy.example.conf` | 录播自动处理工作流（复制为 `cut_copy.conf`） |
 | `streamer_dictionary.example.json` | 主播词典 |
 
-**勿提交**（已在 `.gitignore`）：`config.yaml`、`cut_copy.conf`、`streamer_dictionary.json`、`runs/`。
+**勿提交**（已在 `.gitignore`）：`config.yaml`、`cut_copy.conf`、`streamer_dictionary.json`、`runs/`。真实 API key、SMB 密码、WebHook 目标、主播词典和运行产物都应只留在这些本地文件或环境变量里；仓库模板保持 `api_key: null` + `api_key_env`。
 
 ASR 使用 `asr.mode: local | remote` 新结构（见 `config.example.yaml`）：
 
@@ -127,6 +127,7 @@ ASR 使用 `asr.mode: local | remote` 新结构（见 `config.example.yaml`）�
   - **CPU（自动切 backend: faster_whisper）**：FW **small** + `int8` batch 主路径 + standard fallback
   - 安装 GPU 生产管线：`python install.py --gpu cuda13 --funasr`
 - 二轮 fallback 结果会写回 `02_asr/transcript.json`，并保留 `transcript_primary.json`、`fallback_ranges.json`、`fallback_segments.json` 供审计。
+- Qwen3/FunASR GPU 模板默认 `hub: ms`（ModelScope）。Qwen3 二轮 fallback 会继承 `local.gpu.funasr` 的 `model`、`hub`、`device`、`dtype`、`forced_aligner` 等设置，只覆盖 fallback 自己的 `timestamp_chunk_seconds`。
 
 **硬件分流**：`funasr`/`faster_whisper` 设 `device: auto`，并在 `local.gpu` / `local.cpu` 下分别写硬件专用配置（见 `config.example.yaml`）。无 `gpu:`/`cpu:` 节时，FW 在无 CUDA 时自动将 `compute_type` 降为 `int8`。
 
@@ -411,6 +412,7 @@ GitHub Actions（`.github/workflows/tests.yml`）在 Ubuntu + Python 3.10–3.12
 | `clip_naming` 未生效 | 确认 `enabled`、词典路径、路径含日期、`apply_to` |
 | concat 输出时长异常 | 查 `concat_attempts/*.log`；确认输入文件无损坏 |
 | MiMo ASR 连接失败 | 检查 `base_url` 和 `api_key`；确认网络可达 |
+| Qwen3 fallback 仍访问 Hugging Face | 确认 `local.gpu.funasr.hub: ms`；fallback 会继承 GPU FunASR 设置，旧配置可从 `config.example.yaml` 重新同步 |
 
 ## 与 dd-song-miner-llm 的兼容性
 

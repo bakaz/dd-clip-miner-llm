@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .asr_backends import build_asr_backend, resolve_faster_whisper_mode_settings
+from .config import deep_merge
 from .asr_backends.funasr_backend import repair_qwen3_zero_duration_segments
 from .ffmpeg import cut_audio, get_duration
 from .models import TranscriptSegment
@@ -451,6 +452,13 @@ def _build_qwen3_local_config(
     funasr_cfg = deepcopy(local_cfg.get("funasr", {}))
     if not isinstance(funasr_cfg, dict):
         funasr_cfg = {}
+    gpu_funasr_cfg = (
+        local_cfg.get("gpu", {}).get("funasr", {})
+        if isinstance(local_cfg.get("gpu"), dict)
+        else {}
+    )
+    if isinstance(gpu_funasr_cfg, dict):
+        funasr_cfg = deep_merge(funasr_cfg, gpu_funasr_cfg)
     if chunk_seconds is not None:
         funasr_cfg["timestamp_chunk_seconds"] = int(chunk_seconds)
     local_cfg["funasr"] = funasr_cfg
