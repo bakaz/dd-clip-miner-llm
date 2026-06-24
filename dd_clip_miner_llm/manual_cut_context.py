@@ -7,12 +7,8 @@ from pathlib import Path
 from typing import Any
 
 from .ffmpeg import cut_audio, cut_video
-from .post_merge import (
-    PostMergeError,
-    _load_json_object,
-    _portable_run_dir,
-    _source_video_and_duration,
-)
+from .post_merge import PostMergeError, _load_json_object, _source_video_and_duration
+from .run_paths import portable_run_dir, recorded_run_dir_from_context
 
 
 class ManualCutContextError(RuntimeError):
@@ -28,11 +24,11 @@ def manual_cut_from_context(
     context_file = Path(context_path)
     try:
         context = _load_json_object(context_file)
-        context_run_dir = _resolve_run_dir(context, context_file.parent)
-        run_dir = _portable_run_dir(context_file.parent, context_run_dir)
+        recorded_run_dir = recorded_run_dir_from_context(context)
+        run_dir = portable_run_dir(context_file.parent, recorded_run_dir)
 
         _total_duration, input_video = _source_video_and_duration(
-            context, run_dir, original_run_dir=context_run_dir,
+            context, run_dir, recorded_run_dir=recorded_run_dir,
         )
     except PostMergeError as exc:
         raise ManualCutContextError(str(exc)) from exc
@@ -70,13 +66,6 @@ def manual_cut_from_context(
         "start_seconds": start,
         "end_seconds": end,
     }
-
-
-def _resolve_run_dir(context: dict[str, Any], context_dir: Path) -> Path:
-    value = context.get("run_dir")
-    if not value:
-        raise ManualCutContextError("Context is missing 'run_dir'")
-    return Path(str(value))
 
 
 def _determine_output_suffix(context: dict[str, Any]) -> str:

@@ -7,13 +7,10 @@ echo  Manual Cut Tool
 echo ========================================
 
 set "CONTEXT=%~dp0manual_cut_context.json"
-set "PYTHON_EXE={python_exe}"
-set "PROJECT_ROOT={project_root}"
 set "WORK_DIR=%~dp0"
 
-if not exist "%PROJECT_ROOT%\dd_clip_miner_llm\__init__.py" (
-    set "PROJECT_ROOT=%~dp0..\..\..\..\..\..\.."
-)
+call "%~dp0_resolve_env.bat"
+if errorlevel 1 exit /b 1
 
 if not exist "%CONTEXT%" (
     echo.
@@ -51,23 +48,10 @@ echo Filename: %FILENAME%
 echo Context: %CONTEXT%
 echo.
 
-set "PYTHONPATH=%PROJECT_ROOT%;%PYTHONPATH%"
-
-if exist "%PYTHON_EXE%" (
-    pushd "%WORK_DIR%"
-    "%PYTHON_EXE%" -m dd_clip_miner_llm manual-cut-context --context "%CONTEXT%" --start "%START_TIME%" --end "%END_TIME%" --filename "%FILENAME%"
-    set "RESULT=!ERRORLEVEL!"
-    popd
-) else (
-    pushd "%WORK_DIR%"
-    py -3 -m dd_clip_miner_llm manual-cut-context --context "%CONTEXT%" --start "%START_TIME%" --end "%END_TIME%" --filename "%FILENAME%"
-    set "RESULT=!ERRORLEVEL!"
-    if "!RESULT!"=="9009" (
-        python -m dd_clip_miner_llm manual-cut-context --context "%CONTEXT%" --start "%START_TIME%" --end "%END_TIME%" --filename "%FILENAME%"
-        set "RESULT=!ERRORLEVEL!"
-    )
-    popd
-)
+pushd "%WORK_DIR%"
+%PYTHON_CMD% -m dd_clip_miner_llm manual-cut-context --context "%CONTEXT%" --start "%START_TIME%" --end "%END_TIME%" --filename "%FILENAME%"
+set "RESULT=!ERRORLEVEL!"
+popd
 
 if not "!RESULT!"=="0" (
     echo.

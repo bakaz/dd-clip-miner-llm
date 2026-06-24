@@ -15,6 +15,7 @@ from ..profile_state import (
     _write_profile_state,
     _write_usage_summary,
 )
+from ..run_paths import as_run_relative
 from .utils import _print_summary, _save_progress
 
 
@@ -44,7 +45,7 @@ def _write_manifest_and_summary(
         print(usage_console)
 
     manifest = {
-        "input_video": str(input_path),
+        "input_video": as_run_relative(input_path, out),
         "profile": config.get("_profile_name"),
         "total_duration": total_duration,
         "segment_count": len(segments),

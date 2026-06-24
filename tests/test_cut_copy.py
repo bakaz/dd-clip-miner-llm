@@ -256,11 +256,13 @@ class TestRunCutCopy:
             patch("dd_clip_miner_llm.cut_copy.process_video", return_value=tmp_path / "work" / "video_fix"),
             patch("dd_clip_miner_llm.cut_copy.copy_to_destination", return_value=tmp_path / "dest" / "out"),
             patch("dd_clip_miner_llm.cut_copy.verify_copy", return_value=True),
+            patch("dd_clip_miner_llm.cut_copy._finalize_copied_run") as mock_finalize,
             patch("dd_clip_miner_llm.cut_copy.schedule_shutdown") as mock_shutdown,
         ):
             rc = run_cut_copy(config_file, no_shutdown=True)
 
         assert rc == 0
+        mock_finalize.assert_called_once()
         mock_shutdown.assert_not_called()
 
 
@@ -322,6 +324,7 @@ class TestRunBatchCutCopy:
         with (
             patch("dd_clip_miner_llm.cut_copy.copy_to_destination", return_value=tmp_path / "dest" / "new_result") as mock_copy,
             patch("dd_clip_miner_llm.cut_copy.verify_copy", return_value=True),
+            patch("dd_clip_miner_llm.cut_copy._finalize_copied_run") as mock_finalize,
             patch("dd_clip_miner_llm.cut_copy.delete_source_file") as mock_delete_source,
             patch("dd_clip_miner_llm.cut_copy.delete_directory") as mock_delete_dir,
             patch("dd_clip_miner_llm.cut_copy.schedule_shutdown") as mock_shutdown,
@@ -330,6 +333,7 @@ class TestRunBatchCutCopy:
 
         assert rc == 0
         mock_copy.assert_called_once()
+        mock_finalize.assert_called_once()
         mock_delete_source.assert_called_once_with(video)
         mock_delete_dir.assert_called_once_with(result_dir)
         mock_shutdown.assert_called_once_with(60)

@@ -7,13 +7,10 @@ echo  Song Recut Merge Tool
 echo ========================================
 
 set "CONTEXT=%~dp0merge_recut_context.json"
-set "PYTHON_EXE={python_exe}"
-set "PROJECT_ROOT={project_root}"
 set "WORK_DIR=%~dp0"
 
-if not exist "%PROJECT_ROOT%\dd_clip_miner_llm\__init__.py" (
-    set "PROJECT_ROOT=%~dp0..\..\..\..\..\..\.."
-)
+call "%~dp0_resolve_env.bat"
+if errorlevel 1 exit /b 1
 
 if not exist "%CONTEXT%" (
     echo.
@@ -74,28 +71,16 @@ echo.
 echo Input 1: %~1
 echo Input 2: %~2
 echo Context: %CONTEXT%
-echo Python: %PYTHON_EXE%
+echo RunRoot: %RUN_ROOT%
+echo Python: %PYTHON_CMD%
 echo Project: %PROJECT_ROOT%
 echo WorkDir: %WORK_DIR%
 echo.
 
-set "PYTHONPATH=%PROJECT_ROOT%;%PYTHONPATH%"
-
-if exist "%PYTHON_EXE%" (
-    pushd "%WORK_DIR%"
-    "%PYTHON_EXE%" -m dd_clip_miner_llm post-merge --context "%CONTEXT%" "%~1" "%~2"
-    set "RESULT=!ERRORLEVEL!"
-    popd
-) else (
-    pushd "%WORK_DIR%"
-    py -3 -m dd_clip_miner_llm post-merge --context "%CONTEXT%" "%~1" "%~2"
-    set "RESULT=!ERRORLEVEL!"
-    if "!RESULT!"=="9009" (
-        python -m dd_clip_miner_llm post-merge --context "%CONTEXT%" "%~1" "%~2"
-        set "RESULT=!ERRORLEVEL!"
-    )
-    popd
-)
+pushd "%WORK_DIR%"
+%PYTHON_CMD% -m dd_clip_miner_llm post-merge --context "%CONTEXT%" "%~1" "%~2"
+set "RESULT=!ERRORLEVEL!"
+popd
 
 if not "!RESULT!"=="0" (
     echo.

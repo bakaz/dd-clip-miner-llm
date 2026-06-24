@@ -327,6 +327,23 @@ def copy_to_destination(
     return dest
 
 
+def _finalize_copied_run(dest: Path, log_file: Path) -> None:
+    try:
+        from .run_relocate import relocate_run_artifacts
+
+        relocate_run_artifacts(dest)
+    except Exception as exc:
+        _log(f"  Warning: failed to relocate run artifacts on destination: {exc}", log_file)
+
+    try:
+        from .portable_bundle import install_portable_bundle
+
+        bundle_root = install_portable_bundle(dest)
+        _log(f"  Installed portable miner bundle: {bundle_root}", log_file)
+    except Exception as exc:
+        _log(f"  Warning: failed to install portable miner bundle: {exc}", log_file)
+
+
 def verify_copy(source: Path, dest: Path) -> bool:
     """Verify that *dest* matches *source* in file count and total size."""
     if source.is_dir():
@@ -449,6 +466,7 @@ def run_cut_copy(
         try:
             dest = copy_to_destination(result_dir, dest_path, config)
             verify_copy(result_dir, dest)
+            _finalize_copied_run(dest, log_file)
             _log(f"  Copied to: {dest}", log_file)
         except Exception as exc:
             _log(f"  Copy failed: {exc}", log_file)
@@ -555,6 +573,7 @@ def run_batch_cut_copy(
         try:
             dest = copy_to_destination(result_dir, dest_path, config)
             verify_copy(result_dir, dest)
+            _finalize_copied_run(dest, log_file)
             _log(f"    Copied to: {dest}", log_file)
         except Exception as exc:
             _log(f"    Copy failed: {exc}", log_file)

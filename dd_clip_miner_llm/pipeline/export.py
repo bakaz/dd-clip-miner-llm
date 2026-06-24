@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import logging
-import sys
 from importlib import resources
 from pathlib import Path
 from typing import Any
@@ -12,33 +11,24 @@ logger = logging.getLogger(__name__)
 from ..models import ContentMatch, ContentResult, TranscriptSegment
 from ..ffmpeg import cut_audio, cut_video
 from ..clip_naming import ClipNamingProfile, resolve_export_stem
+from ..run_paths import as_run_relative
 from .utils import _safe_filename
 
+_PORTABLE_BAT_FILES = ("merge_mp4.bat", "manual_cut.bat", "_resolve_env.bat")
 
-def _write_merge_tool(target_dir: Path) -> None:
-    """Write a drag-drop bat with absolute Python and project paths."""
-    package_dir = Path(__file__).parent.parent.parent.resolve()
-    python_exe = Path(sys.executable).resolve()
-    target = target_dir / "merge_mp4.bat"
+
+def _write_portable_bat_tools(target_dir: Path) -> None:
+    """Copy drag-drop bats that resolve Python/project paths at runtime."""
     try:
         target_dir.mkdir(parents=True, exist_ok=True)
-        target.write_text(
-            _merge_tool_script(python_exe=python_exe, project_root=package_dir),
-            encoding="utf-8",
-        )
-        logger.debug("Wrote merge_mp4.bat to %s", target_dir)
+        asset_root = resources.files("dd_clip_miner_llm.assets")
+        for name in _PORTABLE_BAT_FILES:
+            template = asset_root.joinpath(name)
+            target = target_dir / name
+            target.write_text(template.read_text(encoding="utf-8"), encoding="utf-8")
+        logger.debug("Wrote portable bat tools to %s", target_dir)
     except OSError as exc:
-        logger.debug("Failed to write merge_mp4.bat: %s", exc)
-
-
-def _merge_tool_script(*, python_exe: Path, project_root: Path) -> str:
-    template = resources.files("dd_clip_miner_llm.assets").joinpath("merge_mp4.bat").read_text(
-        encoding="utf-8"
-    )
-    return template.format(
-        python_exe=str(python_exe),
-        project_root=str(project_root),
-    )
+        logger.debug("Failed to write portable bat tools: %s", exc)
 
 
 def _post_merge_config_snapshot(config: dict[str, Any]) -> dict[str, Any]:
@@ -60,36 +50,9 @@ def _post_merge_config_snapshot(config: dict[str, Any]) -> dict[str, Any]:
     return snapshot
 
 
-def _write_manual_cut_tool(target_dir: Path) -> None:
-    """Write a manual cut bat with absolute Python and project paths."""
-    package_dir = Path(__file__).parent.parent.parent.resolve()
-    python_exe = Path(sys.executable).resolve()
-    target = target_dir / "manual_cut.bat"
-    try:
-        target_dir.mkdir(parents=True, exist_ok=True)
-        target.write_text(
-            _manual_cut_tool_script(python_exe=python_exe, project_root=package_dir),
-            encoding="utf-8",
-        )
-        logger.debug("Wrote manual_cut.bat to %s", target_dir)
-    except OSError as exc:
-        logger.debug("Failed to write manual_cut.bat: %s", exc)
-
-
-def _manual_cut_tool_script(*, python_exe: Path, project_root: Path) -> str:
-    template = resources.files("dd_clip_miner_llm.assets").joinpath("manual_cut.bat").read_text(
-        encoding="utf-8"
-    )
-    return template.format(
-        python_exe=str(python_exe),
-        project_root=str(project_root),
-    )
-
-
 def _write_merge_recut_assets(target_dir: Path, context: dict[str, Any]) -> None:
     target_dir.mkdir(parents=True, exist_ok=True)
-    _write_merge_tool(target_dir)
-    _write_manual_cut_tool(target_dir)
+    _write_portable_bat_tools(target_dir)
     (target_dir / "merge_recut_context.json").write_text(
         json.dumps(context, ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -175,18 +138,18 @@ def _export_results(
         and transcript_path is not None
         and manifest_path is not None
     ):
+        run_root = Path(run_dir).resolve()
+        reports_json = Path(reports_dir) / f"{content_type}s.json"
         merge_context = {
-            "run_dir": str(Path(run_dir).resolve()),
+            "run_dir": ".",
             "content_type": content_type,
             "profile": config.get("_profile_name"),
-            "python_executable": str(Path(sys.executable).resolve()),
-            "project_root": str(Path(__file__).parent.parent.parent.resolve()),
-            "manifest_path": str(Path(manifest_path).resolve()),
-            "reports_path": str((Path(reports_dir) / f"{content_type}s.json").resolve()),
-            "llm_dir": str(Path(llm_dir).resolve()),
-            "matches_path": str((Path(llm_dir) / "matches.json").resolve()),
-            "transcript_path": str(Path(transcript_path).resolve()),
-            "input_video": str(Path(input_path).resolve()),
+            "manifest_path": as_run_relative(Path(manifest_path), run_root),
+            "reports_path": as_run_relative(reports_json, run_root),
+            "llm_dir": as_run_relative(Path(llm_dir), run_root),
+            "matches_path": as_run_relative(Path(llm_dir) / "matches.json", run_root),
+            "transcript_path": as_run_relative(Path(transcript_path), run_root),
+            "input_video": as_run_relative(Path(input_path), run_root),
             "total_duration": total_duration,
             "config": _post_merge_config_snapshot(config),
         }
@@ -239,6 +202,14 @@ def _export_results(
         ]
         for future in as_completed(futures):
             future.result()  # raise any exceptions
+
+    if run_dir is not None:
+        run_root = Path(run_dir).resolve()
+        for result in results:
+            if result.video_path is not None:
+                result.video_path = Path(as_run_relative(result.video_path, run_root))
+            if result.audio_path is not None:
+                result.audio_path = Path(as_run_relative(result.audio_path, run_root))
 
 
 def _export_sus_clips(

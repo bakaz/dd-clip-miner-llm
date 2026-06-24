@@ -416,9 +416,13 @@ def test_export_results_writes_merge_recut_assets(tmp_path, monkeypatch):
         confidence=0.9,
     )
 
+    input_path = run_dir / "00_input" / "input.mp4"
+    input_path.parent.mkdir(parents=True, exist_ok=True)
+    input_path.write_bytes(b"input")
+
     export._export_results(
         [result],
-        tmp_path / "input.mp4",
+        input_path,
         clips_dir,
         _post_merge_config(),
         "song",
@@ -432,15 +436,14 @@ def test_export_results_writes_merge_recut_assets(tmp_path, monkeypatch):
 
     for target_dir in (clips_dir / "audio" / "song", clips_dir / "video" / "song"):
         bat_content = (target_dir / "merge_mp4.bat").read_text(encoding="utf-8")
-        assert str(Path(sys.executable).resolve()) in bat_content
-        assert str(Path.cwd().resolve()) in bat_content
-        assert 'set "WORK_DIR=%~dp0"' in bat_content
-        assert 'if not exist "%PROJECT_ROOT%\\dd_clip_miner_llm\\__init__.py"' in bat_content
-        assert 'set "PROJECT_ROOT=%~dp0..\\..\\..\\..\\..\\..\\.."' in bat_content
-        assert 'set "PYTHONPATH=%PROJECT_ROOT%;%PYTHONPATH%"' in bat_content
-        assert 'pushd "%WORK_DIR%"' in bat_content
+        assert 'call "%~dp0_resolve_env.bat"' in bat_content
+        assert (target_dir / "_resolve_env.bat").is_file()
+        assert (target_dir / "manual_cut.bat").is_file()
         context = json.loads((target_dir / "merge_recut_context.json").read_text(encoding="utf-8"))
         assert context["content_type"] == "song"
-        assert context["python_executable"] == str(Path(sys.executable).resolve())
-        assert context["project_root"] == str(Path.cwd().resolve())
+        assert context["run_dir"] == "."
+        assert Path(context["input_video"]) == Path("00_input/input.mp4")
+        assert "python_executable" not in context
+        assert "project_root" not in context
         assert context["config"]["output"]["video_codec"] == "copy"
+        assert Path(result.video_path) == Path("03_clips/video/song/001-Song.mp4")
