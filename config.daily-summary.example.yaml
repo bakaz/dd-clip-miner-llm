@@ -1,30 +1,48 @@
-# dd-clip-miner-llm daily summary config
-# Usage:
-#   python -m dd_clip_miner_llm run live.mp4 --config config.daily-summary.example.yaml
+# =============================================================================
+# dd-clip-miner-llm 当日直播总结专用配置
+# =============================================================================
+# 用法: python -m dd_clip_miner_llm run live.mp4 --config config.daily-summary.example.yaml
+#
+# 【与本模板差异】仅跑 ASR + daily_summary，不识别歌曲、不导出切片。
+#
+# 处理流程:
+#   1. audio + asr  — 同主配置，产出 transcript.json
+#   2. daily_summary — LLM 读全文，生成三层金字塔 summary.md / summary.json
+#   3. output        — video_clips/audio_segments 均为 false，不写切片文件
+#
+# 注意: content_types 必须显式关闭 song 等，否则会与 DEFAULT_CONFIG 合并后仍启用歌曲管线。
+# =============================================================================
 
+# ─── audio：音频预处理 ───────────────────────────────────────
+# 【作用】提取 ASR 输入 WAV。总结任务与切歌共用同一音频格式要求。
 audio:
-  sample_rate: 16000
-  channels: 1
+  sample_rate: 16000   # ASR 采样率 (Hz)，固定 16kHz
+  channels: 1          # 单声道
 
+# ─── asr：语音识别 ───────────────────────────────────────────
+# 【作用】总结的质量完全依赖 transcript 准确度；推荐 Qwen3 GPU 路径。
+# 【流程】同 config.example.yaml asr 节；此处为总结场景保留完整 ASR 能力。
 asr:
-  mode: local
+  mode: local          # local=本地 | remote=云端（无 GPU 时可改 remote）
+
   local:
-    backend: qwen3_asr
+    backend: qwen3_asr # 推荐 Qwen3；纯 CPU 可改 faster_whisper 并删 gpu 节
+
     funasr:
-      device: auto
-      trust_remote_code: true
-      batch_size: null
-      language: null
+      device: auto                    # auto | cuda:0 | cpu
+      trust_remote_code: true         # 加载 HF 模型自定义代码
+      batch_size: null                # null=自动批大小
+      language: null                  # null=自动检测语言
       generate_kwargs:
-        return_time_stamps: true
-      keep_chunk_audio: false
+        return_time_stamps: true      # 总结需时间戳以生成 timeline
+      keep_chunk_audio: false         # 总结任务不需保留分块音频
       lyrics:
-        enabled: false
+        enabled: false                # 总结不需要歌词格式化
         max_line_chars: 24
         sentence_punctuation: "。！？.!?\n"
         max_sentence_duration_ms: 5000
       fallback:
-        enabled: true
+        enabled: true                 # 稀疏段回退，提升长直播 transcript 完整度
         chunk_seconds: 5
         max_segment_seconds: 15
         sparse_chars_per_sec: 1.0
@@ -33,9 +51,10 @@ asr:
         max_workers: 2
         merge_policy: replace_ranges
         zero_duration_policy: merge_adjacent
+
     faster_whisper:
       device: auto
-      compute_type: default
+      compute_type: default           # CPU 无 gpu 节时建议改 int8
       batch:
         model: small
         inference_mode: batched
@@ -50,13 +69,14 @@ asr:
         primary_mode: batch
         fallback_mode: standard
         merge_policy: replace_ranges
+
     gpu:
       funasr:
         model: Qwen/Qwen3-ASR-1.7B
         hub: hf
         device: cuda:0
         dtype: bf16
-        timestamp_chunk_seconds: 180
+        timestamp_chunk_seconds: 180    # 长直播分块识别 (秒)
         max_workers: 2
         forced_aligner: Qwen/Qwen3-ForcedAligner-0.6B
         forced_aligner_kwargs: {}
@@ -65,6 +85,7 @@ asr:
           model: turbo
         standard:
           model: turbo
+
     cpu:
       backend: faster_whisper
       faster_whisper:
@@ -77,12 +98,15 @@ asr:
   remote:
     provider: mimo
     base_url: https://token-plan-cn.xiaomimimo.com/v1
-    api_key: null
+    api_key: null                       # 或设 MIMO_API_KEY 环境变量
     api_key_env: MIMO_API_KEY
     model: mimo-v2.5-asr
     timestamp_chunk_seconds: 5
     language: null
 
+# ─── llm：大语言模型 ─────────────────────────────────────────
+# 【作用】将 transcript 归纳为结构化总结；不需要工具调用与歌名搜索。
+# 【流程】分批读 segment → JSON 输出 level1/2/3 → 合并 → 写 summary 文件。
 llm:
   provider_route:
   - opencode
@@ -93,8 +117,8 @@ llm:
       api_key: null
       api_key_env: OPENCODE_API_KEY
       base_url: https://opencode.ai/zen/go/v1
-      model: deepseek-v4-flash
-      temperature: 0.1
+      model: deepseek-v4-flash        # 长上下文模型更适合整场总结
+      temperature: 0.1                # 低温度保证总结稳定
       max_tokens: 8192
       timeout_schedule: [60, 120, 180]
       retry_backoff_seconds: [2, 5]
@@ -122,44 +146,49 @@ llm:
       retry_backoff_seconds: [2, 5]
       retry_jitter_ratio: 0.25
       result_retries: 2
-  retry_empty_with_reasoning: true
+  retry_empty_with_reasoning: true      # 空总结时 reasoning 追问
   reasoning_followup_rounds: 5
   reasoning_followup_max_tokens: 32768
-  max_completion_tokens: 32768
-  batch_size: null
-  cache_friendly_prompt_layout: false
-  use_tools: false
-  verify_with_search: false
+  max_completion_tokens: 32768          # 长直播需大 token 上限
+  batch_size: null                        # null=按上下文自动分批
+  cache_friendly_prompt_layout: false     # 总结不需 KV 缓存优化
+  use_tools: false                      # 总结不需要搜索工具
+  verify_with_search: false             # 不验证歌名
   json_fix_rounds: 3
 
-# 必须显式关闭其他类型（否则会与 DEFAULT_CONFIG 合并后仍启用 song）
+# ─── content_types：仅启用总结 ───────────────────────────────
 content_types:
-  song: false
+  song: false                           # 必须 false，否则 DEFAULT_CONFIG 会启用切歌
   dialogue: false
   highlight: false
   funny: false
   cringe: false
-  daily_summary: true
+  daily_summary: true                   # 唯一启用的识别类型
 
 song:
-  enabled: false
+  enabled: false                        # 双保险：显式关闭歌曲管线
 
+# ─── daily_summary：总结结构与输出内容 ───────────────────────
+# 【作用】控制金字塔层级数量、语言、以及 summary 包含哪些板块。
+# 【可选扩展】还可添加 max_segment_indices_per_item / max_timeline_items /
+#             max_quote_chars（见 recognizers/daily_summary.py 默认值）。
 daily_summary:
   enabled: true
-  summary_only: true
-  language: zh-CN
-  title: 当天直播内容总结
-  max_level1_items: 6
-  max_level2_per_level1: 5
-  max_level3_per_level2: 4
-  include_timeline: true
-  include_quotes: true
-  include_open_questions: true
+  summary_only: true                    # true=不为此类型导出音视频切片
+  language: zh-CN                       # 总结正文语言
+  title: 当天直播内容总结                 # 输出文档标题
+  max_level1_items: 6                   # 一级：「今天主要讲了什么」条数上限
+  max_level2_per_level1: 5              # 二级：每个一级下的主题/模块上限
+  max_level3_per_level2: 4              # 三级：每个二级下的事实/例子上限
+  include_timeline: true                # true=附关键阶段时间线（需 ASR 时间戳）
+  include_quotes: true                    # true=每条附 ASR 原话摘录
+  include_open_questions: true          # true=列出直播中未解答的问题
 
+# ─── output：总结模式关闭切片导出 ────────────────────────────
 output:
-  video_clips: false
-  audio_segments: false
-  audio_extension: mp3
+  video_clips: false                    # 不导出 mp4
+  audio_segments: false                 # 不导出 mp3
+  audio_extension: mp3                  # 以下字段在 false 时不生效，保留默认值即可
   audio_bitrate_kbps: 320
   video_extension: mp4
   video_codec: copy

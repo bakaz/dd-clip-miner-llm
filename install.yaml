@@ -1,26 +1,28 @@
-# 安装配置文件
+# =============================================================================
+# install.py 依赖安装配置
+# =============================================================================
 # 用法: python install.py --config install.yaml
+#       python install.py --config install.yaml --gpu cuda13 --funasr
+#
+# 【作用】控制 pip 安装哪些 ASR 后端、PyTorch CUDA 版本、系统工具。
+# 【流程】
+#   ① 读 asr_backend / gpu_type → 选择 requirements-cu13.txt 或 cu12.txt
+#   ② 先装 CUDA 版 torch（避免 pip 拉 CPU-only 版）
+#   ③ 再装 funasr 可选依赖与主包
+#   ④ 可选装 mkvmerge、开发工具
+# =============================================================================
 
-# ASR 后端选择
-# funasr: Qwen3-ASR / SenseVoiceSmall / Paraformer（GPU 生产默认，需 PyTorch + --funasr）
-# faster_whisper: 轻量级备选，支持 GPU (CUDA 12)
-asr_backend: funasr
+# ASR 后端选择（影响默认推荐安装项，可与 --funasr 覆盖）
+asr_backend: funasr          # funasr=Qwen3/SenseVoice（GPU 生产推荐）
+                             # faster_whisper=轻量备选，CUDA 12 可用 GPU
 
-# GPU 类型
-# auto: 自动检测（Blackwell/CC≥12 走 cuda13，否则 cuda12）
-# cuda13: CUDA 13 (Blackwell RTX 50xx, CC ≥ 12.0, cu130 PyTorch)
-# cuda12: CUDA 12 (Ampere/Ada, CC 8.x-9.x)
-# cpu: 强制使用 CPU
-gpu_type: auto
+# GPU / PyTorch 变体
+gpu_type: auto               # auto=检测显卡 CC≥12 用 cuda13，否则 cuda12
+                             # cuda13=Blackwell RTX 50xx (CC≥12, cu130)
+                             # cuda12=Ampere/Ada (CC 8.x-9.x)
+                             # cpu=强制 CPU 版 torch
 
-# 是否安装 FunASR 支持（即使 asr_backend 不是 funasr）
-install_funasr: true
-
-# 是否安装开发/测试工具（pip install -e ".[test]"）
-install_dev_tools: false
-
-# 是否安装 MKVToolNix（需要系统包管理器）
-install_mkvmerge: true
-
-# 跳过已安装的包
-skip_installed: true
+install_funasr: true         # true=安装 [funasr] 可选依赖（Qwen3 必需）
+install_dev_tools: false     # true=额外 pip install -e ".[test]" 装 pytest
+install_mkvmerge: true       # true=尝试用系统包管理器装 MKVToolNix（concat 用）
+skip_installed: true         # true=已满足的包跳过，加速重复安装

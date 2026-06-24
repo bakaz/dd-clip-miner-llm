@@ -1,25 +1,37 @@
-audio:
-  sample_rate: 16000
-  channels: 1
+# =============================================================================
+# Qwen3-ASR 管线测试配置
+# =============================================================================
+# 用法: python -m dd_clip_miner_llm run live.mp4 --config config_qwen3_test.yaml
+#
+# 【用途】验证 GPU Qwen3 + kv_optimized 歌曲管线，轻量输出（仅音频、无视频）。
+# 【流程】ASR(Qwen3) → song(kv_optimized) → 导出 mp3，跳过 daily_summary 与其他类型。
+# =============================================================================
 
+# ─── audio ───────────────────────────────────────────────────
+audio:
+  sample_rate: 16000   # ASR 输入采样率 (Hz)
+  channels: 1          # 单声道
+
+# ─── asr：Qwen3 测试 ────────────────────────────────────────
 asr:
   mode: local
   local:
-    backend: qwen3_asr
+    backend: qwen3_asr # 测试目标：Qwen3-ASR GPU 路径
+
     funasr:
-      device: auto
+      device: auto                    # auto | cuda:0 | cpu
       trust_remote_code: true
-      batch_size: null
-      language: null
+      batch_size: null                # null=自动
+      language: null                  # null=自动检测
       generate_kwargs:
-        return_time_stamps: true
+        return_time_stamps: true      # 词级时间戳
       lyrics:
         enabled: false
         max_line_chars: 24
         sentence_punctuation: "。！？.!?\n"
         max_sentence_duration_ms: 5000
       fallback:
-        enabled: true
+        enabled: true                 # 稀疏段分块重跑
         chunk_seconds: 5
         max_segment_seconds: 15
         sparse_chars_per_sec: 1.0
@@ -28,6 +40,7 @@ asr:
         max_workers: 1
         merge_policy: replace_ranges
         zero_duration_policy: merge_adjacent
+
     faster_whisper:
       device: auto
       compute_type: default
@@ -42,18 +55,19 @@ asr:
         batch_size: 0
         vad_filter: false
       fallback:
-        enabled: true
+        enabled: true                 # batch→standard 回退
         primary_mode: batch
         fallback_mode: standard
         merge_policy: replace_ranges
+
     gpu:
       funasr:
-        model: Qwen/Qwen3-ASR-1.7B
-        hub: ms
+        model: Qwen/Qwen3-ASR-1.7B  # 测试主模型
+        hub: ms                       # ModelScope 源（与生产 config.example 一致）
         device: cuda:0
         dtype: bf16
         timestamp_chunk_seconds: 180
-        max_workers: 1
+        max_workers: 1                # 测试默认单 worker，减少显存占用
         forced_aligner: Qwen/Qwen3-ForcedAligner-0.6B
         forced_aligner_kwargs: {}
       faster_whisper:
@@ -61,6 +75,7 @@ asr:
           model: turbo
         standard:
           model: turbo
+
     cpu:
       backend: faster_whisper
       faster_whisper:
@@ -70,6 +85,7 @@ asr:
         standard:
           model: small
 
+# ─── llm ─────────────────────────────────────────────────────
 llm:
   provider_route:
   - opencode
@@ -86,21 +102,21 @@ llm:
       retry_jitter_ratio: 0.25
       result_retries: 2
 
-default_profile: kv_optimized
+default_profile: kv_optimized           # 使用三阶段 KV 歌曲管线
 profiles:
   kv_optimized:
     llm:
-      cache_friendly_prompt_layout: true
-      compact_segment_ranges: true
+      cache_friendly_prompt_layout: true   # KV 缓存友好 prompt
+      compact_segment_ranges: true         # 压缩段范围省 token
     song:
       normalization:
-        force_merge_same_title: true
-        chorus_aware_split: true
+        force_merge_same_title: true       # 同歌名合并
+        chorus_aware_split: true           # 副歌感知切分多次演唱
         chorus_gap_seconds: 130.0
         chorus_similarity_threshold: 0.3
         chorus_context_segments: 3
       pipeline:
-        strategy: risk_routed_kv
+        strategy: risk_routed_kv           # 发现→召回→裁决
         runtime_adaptive: fixed_three_stage
         temporal_adjudication:
           enabled: true
@@ -122,15 +138,15 @@ profiles:
         max_searches: 25
       missed_recheck:
         enabled: true
-        output_mode: anchors
+        output_mode: anchors               # 测试用 anchors 模式
         min_uncovered_seconds: 10.0
         check_all_uncovered: true
         max_tool_rounds: 0
       review:
-        enabled: false
+        enabled: false                     # 三阶段已含裁决
 
 content_types:
-  song: true
+  song: true                            # 仅测歌曲
   dialogue: false
   highlight: false
   funny: false
@@ -138,7 +154,7 @@ content_types:
   daily_summary: false
 
 output:
-  video_clips: false
-  audio_segments: true
+  video_clips: false                    # 测试跳过视频导出
+  audio_segments: true                  # 保留 mp3 验证切点
   audio_extension: mp3
   audio_bitrate_kbps: 320

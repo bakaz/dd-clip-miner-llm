@@ -1,3 +1,8 @@
+# Python 项目元数据与依赖配置
+# 安装: pip install -e .          # 基础依赖
+#       pip install -e ".[test]"   # 含测试工具
+#       python install.py          # GPU + FunASR 完整安装（推荐）
+
 [build-system]
 requires = ["setuptools>=70", "wheel"]
 build-backend = "setuptools.build_meta"
@@ -8,7 +13,7 @@ version = "0.3.0"
 description = "基于 Whisper ASR + LLM 的直播内容挖掘工具，兼容 dd-song-miner-llm"
 readme = "README.md"
 license = {text = "AGPL-3.0"}
-requires-python = ">=3.10,<3.13"
+requires-python = ">=3.10,<3.13"  # 支持 3.10–3.12，不含 3.13
 keywords = ["whisper", "asr", "llm", "song", "live", "clip", "miner"]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -22,15 +27,15 @@ classifiers = [
     "Topic :: Multimedia :: Video :: Analysis",
 ]
 dependencies = [
-    "PyYAML>=6.0.2",
-    "tqdm>=4.66",
-    "imageio-ffmpeg>=0.5.1",
-    "faster-whisper>=1.2.1",
+    "PyYAML>=6.0.2",           # config.yaml 解析
+    "tqdm>=4.66",              # 进度条
+    "imageio-ffmpeg>=0.5.1",   # 内置 ffmpeg 二进制
+    "faster-whisper>=1.2.1",   # 本地 ASR（CPU/GPU）
     "numpy>=1.26",
-    "soundfile>=0.12",
-    "openai>=1.0.0",
-    "httpx>=0.23.0",
-    "ddgs>=9.0.0",
+    "soundfile>=0.12",         # 音频读写
+    "openai>=1.0.0",           # LLM API 客户端
+    "httpx>=0.23.0",           # HTTP 请求
+    "ddgs>=9.0.0",             # 歌名联网搜索 (DuckDuckGo)
 ]
 
 [project.optional-dependencies]
@@ -38,7 +43,7 @@ test = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
 ]
-funasr = [
+funasr = [  # Qwen3-ASR / SenseVoice；GPU torch 需 install.py 单独处理
     "funasr>=1.3.7",
     "qwen-asr>=0.0.6",
     "torch>=2.7",
@@ -57,13 +62,13 @@ Repository = "https://github.com/bakaz/dd-clip-miner-llm"
 Issues = "https://github.com/bakaz/dd-clip-miner-llm/issues"
 
 [project.scripts]
-dd-clip-miner-llm = "dd_clip_miner_llm.cli:main"
+dd-clip-miner-llm = "dd_clip_miner_llm.cli:main"  # CLI 入口: python -m dd_clip_miner_llm
 
 [tool.setuptools.packages.find]
 include = ["dd_clip_miner_llm*"]
 
 [tool.setuptools.package-data]
-dd_clip_miner_llm = ["assets/*.bat"]
+dd_clip_miner_llm = ["assets/*.bat"]  # 歌曲目录 merge_mp4.bat 等资源
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
