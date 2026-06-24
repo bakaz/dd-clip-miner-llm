@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import tempfile
+from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -154,11 +155,15 @@ class TestConfig:
         assert "audio" in DEFAULT_CONFIG
         assert "asr" in DEFAULT_CONFIG
         assert DEFAULT_CONFIG["asr"]["mode"] == "local"
-        fw = DEFAULT_CONFIG["asr"]["local"]["faster_whisper"]
+        local = DEFAULT_CONFIG["asr"]["local"]
+        assert local["backend"] == "qwen3_asr"
+        funasr = local["funasr"]
+        assert funasr["model"] == "Qwen/Qwen3-ASR-1.7B"
+        assert funasr["timestamp_chunk_seconds"] == 180
+        assert funasr["fallback"]["enabled"] is True
+        assert funasr["fallback"]["merge_policy"] == "replace_ranges"
+        fw = local["faster_whisper"]
         assert fw["batch"]["model"] == "small"
-        assert fw["batch"]["inference_mode"] == "batched"
-        assert fw["standard"]["model"] == "turbo"
-        assert fw["standard"]["vad_filter"] is False
         assert fw["fallback"]["enabled"] is True
         assert "llm" in DEFAULT_CONFIG
         assert "padding" in DEFAULT_CONFIG
@@ -347,12 +352,13 @@ profiles:
 class TestASRBackends:
     def test_build_default_backend(self):
         backend = build_asr_backend(DEFAULT_CONFIG["asr"])
-        assert isinstance(backend, FasterWhisperBackend)
-        assert backend.settings["model"] == "small"
-        assert backend.inference_mode == "batched"
+        assert isinstance(backend, FunASRBackend)
+        assert backend.funasr_settings["model"] == "Qwen/Qwen3-ASR-1.7B"
 
     def test_build_faster_whisper_backend(self):
-        backend = build_asr_backend(DEFAULT_CONFIG["asr"]["local"])
+        local = deepcopy(DEFAULT_CONFIG["asr"]["local"])
+        local["backend"] = "faster_whisper"
+        backend = build_asr_backend(local)
         assert isinstance(backend, FasterWhisperBackend)
 
     def test_build_funasr_backend_for_qwen3_alias(self):
@@ -611,6 +617,7 @@ class TestASRFallback:
         source.write_bytes(b"fake")
         asr_dir = tmp_path / "02_asr"
         config = deepcopy(DEFAULT_CONFIG["asr"])
+        config["local"]["backend"] = "faster_whisper"
         config["local"]["faster_whisper"]["fallback"]["merge_policy"] = "fill_gaps"
 
         class Backend:
@@ -656,6 +663,7 @@ class TestASRFallback:
         source.write_bytes(b"fake")
         asr_dir = tmp_path / "02_asr"
         config = deepcopy(DEFAULT_CONFIG["asr"])
+        config["local"]["backend"] = "faster_whisper"
         config["local"]["faster_whisper"]["fallback"]["merge_policy"] = "replace_ranges"
 
         class Backend:

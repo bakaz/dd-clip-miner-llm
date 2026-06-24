@@ -1,46 +1,43 @@
 audio:
   sample_rate: 16000
   channels: 1
-# Qwen3-ASR 歌词识别推荐配置（Blackwell/RTX 50xx 需要 CUDA 13 + cu130 PyTorch）：
-# 先安装 GPU 依赖：python install.py --gpu cuda13 --funasr
-# 或手动：pip install -e ".[funasr]" && pip install -r requirements-cu13.txt
-# asr:
-#   mode: local
-#   local:
-#     backend: qwen3_asr
-#     funasr:
-#       model: Qwen/Qwen3-ASR-1.7B
-#       hub: hf
-#       device: cuda:0
-#       dtype: bf16
-#       batch_size: null
-#       language: null
-#       timestamp_chunk_seconds: 180
-#       max_workers: 2
-#       forced_aligner: Qwen/Qwen3-ForcedAligner-0.6B
-#       forced_aligner_kwargs: {}
-#       generate_kwargs:
-#         return_time_stamps: true
-#       lyrics:
-#         enabled: false
-#         max_line_chars: 24
-#         sentence_punctuation: "。！？.!?\n"
-#         max_sentence_duration_ms: 5000
-#       fallback:
-#         enabled: true
-#         chunk_seconds: 5
-#         max_segment_seconds: 15
-#         sparse_chars_per_sec: 1.0
-#         repeat_threshold: 3
-#         padding_seconds: 2.0
-#         max_workers: 2
-#         merge_policy: replace_ranges
-#         zero_duration_policy: merge_adjacent
 
+# GPU 生产管线（默认推荐）
+# 安装：python install.py --gpu cuda13 --funasr
+# Blackwell/RTX 50xx 需要 CUDA 13 + cu130 PyTorch
 asr:
   mode: local
   local:
-    backend: faster_whisper
+    backend: qwen3_asr
+    funasr:
+      model: Qwen/Qwen3-ASR-1.7B
+      hub: hf
+      device: cuda:0
+      dtype: bf16
+      batch_size: null
+      language: null
+      timestamp_chunk_seconds: 180
+      max_workers: 2
+      forced_aligner: Qwen/Qwen3-ForcedAligner-0.6B
+      forced_aligner_kwargs: {}
+      generate_kwargs:
+        return_time_stamps: true
+      keep_chunk_audio: false
+      lyrics:
+        enabled: false
+        max_line_chars: 24
+        sentence_punctuation: "。！？.!?\n"
+        max_sentence_duration_ms: 5000
+      fallback:
+        enabled: true
+        chunk_seconds: 5
+        max_segment_seconds: 15
+        sparse_chars_per_sec: 1.0
+        repeat_threshold: 3
+        padding_seconds: 2.0
+        max_workers: 2
+        merge_policy: replace_ranges
+        zero_duration_policy: merge_adjacent
     faster_whisper:
       device: auto
       compute_type: default
@@ -74,50 +71,16 @@ asr:
         sparse_chars_per_sec: 1.0
         repeat_threshold: 3
         merge_policy: replace_ranges
-    funasr:
-      model: iic/SenseVoiceSmall
-      hub: ms
-      trust_remote_code: true
-      device: auto
-      batch_size: 1
-      timestamp_chunk_seconds: 5
-      max_workers: 4
-      language: null
-      vad_model: null
-      punc_model: null
-      spk_model: null
-      generate_kwargs: {}
 
-      # Qwen3-ASR 歌词识别示例：
-      # backend 可设置为 qwen3_asr，仍然复用 FunASRBackend。
-      # Blackwell/RTX 50xx 需要 CUDA 13 + cu130 PyTorch（install.py --gpu cuda13）。
-      # model: Qwen/Qwen3-ASR-1.7B
-      # hub: hf
-      # device: cuda:0
-      # dtype: bf16
-      # batch_size: null
-      # language: null
-      # timestamp_chunk_seconds: 180
-      # max_workers: 2
-      # forced_aligner: Qwen/Qwen3-ForcedAligner-0.6B
-      # forced_aligner_kwargs: {}
-      # generate_kwargs:
-      #   return_time_stamps: true
-      # lyrics:
-      #   enabled: false
-      #   max_line_chars: 24
-      #   sentence_punctuation: "。！？.!?\n"
-      #   max_sentence_duration_ms: 5000
-      # fallback:
-      #   enabled: true
-      #   chunk_seconds: 5
-      #   max_segment_seconds: 15
-      #   sparse_chars_per_sec: 1.0
-      #   repeat_threshold: 3
-      #   padding_seconds: 2.0
-      #   max_workers: 2
-      #   merge_policy: replace_ranges
-      #   zero_duration_policy: merge_adjacent
+      # CPU/轻量备选：将 backend 改为 faster_whisper 即可启用上方配置
+      # SenseVoice 示例：
+      # funasr:
+      #   model: iic/SenseVoiceSmall
+      #   hub: ms
+      #   trust_remote_code: true
+      #   device: auto
+      #   timestamp_chunk_seconds: 5
+      #   max_workers: 4
   remote:
     provider: mimo
     base_url: https://token-plan-cn.xiaomimimo.com/v1

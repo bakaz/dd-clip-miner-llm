@@ -63,7 +63,10 @@ asr:
         min_gap_seconds: 4.0
         padding_seconds: 2.0
         max_workers: 1
-        merge_policy: fill_gaps
+        max_segment_seconds: 15.0
+        sparse_chars_per_sec: 1.0
+        repeat_threshold: 3
+        merge_policy: replace_ranges
 
 llm:
   provider_route:

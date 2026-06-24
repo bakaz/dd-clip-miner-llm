@@ -15,7 +15,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "asr": {
         "mode": "local",
         "local": {
-            "backend": "faster_whisper",
+            "backend": "qwen3_asr",
             "faster_whisper": {
                 "device": "auto",
                 "compute_type": "default",
@@ -54,11 +54,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
                 },
             },
             "funasr": {
-                "model": "Qwen/Qwen3-ASR-0.6B",
+                "model": "Qwen/Qwen3-ASR-1.7B",
                 "hub": "hf",
                 "trust_remote_code": True,
-                "device": "auto",
-                "batch_size": 1,
+                "device": "cuda:0",
+                "dtype": "bf16",
+                "batch_size": None,
                 "language": None,
                 "timestamp_chunk_seconds": 180,
                 "max_workers": 2,
@@ -69,8 +70,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
                 "forced_aligner_kwargs": {},
                 "generate_kwargs": {"return_time_stamps": True},
                 "keep_chunk_audio": False,
-                "fallback": {
+                "lyrics": {
                     "enabled": False,
+                    "max_line_chars": 24,
+                    "sentence_punctuation": "。！？.!?\n",
+                    "max_sentence_duration_ms": 5000,
+                },
+                "fallback": {
+                    "enabled": True,
                     "chunk_seconds": 5,
                     "max_segment_seconds": 15,
                     "sparse_chars_per_sec": 1.0,
