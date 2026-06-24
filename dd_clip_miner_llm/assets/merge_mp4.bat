@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 >nul
-setlocal
+setlocal enabledelayedexpansion
 
 echo ========================================
 echo  Song Recut Merge Tool
@@ -84,25 +84,25 @@ set "PYTHONPATH=%PROJECT_ROOT%;%PYTHONPATH%"
 if exist "%PYTHON_EXE%" (
     pushd "%WORK_DIR%"
     "%PYTHON_EXE%" -m dd_clip_miner_llm post-merge --context "%CONTEXT%" "%~1" "%~2"
-    set "RESULT=%ERRORLEVEL%"
+    set "RESULT=!ERRORLEVEL!"
     popd
 ) else (
     pushd "%WORK_DIR%"
     py -3 -m dd_clip_miner_llm post-merge --context "%CONTEXT%" "%~1" "%~2"
-    set "RESULT=%ERRORLEVEL%"
-    if "%RESULT%"=="9009" (
+    set "RESULT=!ERRORLEVEL!"
+    if "!RESULT!"=="9009" (
         python -m dd_clip_miner_llm post-merge --context "%CONTEXT%" "%~1" "%~2"
-        set "RESULT=%ERRORLEVEL%"
+        set "RESULT=!ERRORLEVEL!"
     )
     popd
 )
 
-if not "%RESULT%"=="0" (
+if not "!RESULT!"=="0" (
     echo.
     echo ERROR: Recut merge failed.
     echo.
     pause
-    exit /b %RESULT%
+    exit /b !RESULT!
 )
 
 echo.

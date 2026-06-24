@@ -290,7 +290,7 @@ def main(argv: list[str] | None = None) -> int:
                 _apply_run_overrides(config, args)
                 if not _has_api_key(config):
                     raise RuntimeError(
-                        "LLM API key required. Set in config or --llm-api-key"
+                        "LLM API key required. Set in config, environment variable, or --llm-api-key"
                     )
                 if len(profile_names) > 1:
                     print(f"\n[profile] Running {label}...")
@@ -338,7 +338,7 @@ def main(argv: list[str] | None = None) -> int:
                     config["output"]["concat_videos"] = True
                 if not _has_api_key(config):
                     raise RuntimeError(
-                        "LLM API key required. Set in config or environment"
+                        "LLM API key required. Set in config, environment variable, or --llm-api-key"
                     )
                 if len(profile_names) > 1:
                     print(f"\n[profile] Running batch for {label}...")

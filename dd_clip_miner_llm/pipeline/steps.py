@@ -64,7 +64,7 @@ def _extract_audio_step(
     if reuse_audio:
         print("[1/3] 音频提取: 复用已有结果")
     else:
-        print("[1/3] Extracting audio...", flush=True)
+        print("[1/3] 正在提取音频...", flush=True)
         audio_config = config.get("audio", {})
         extract_audio(
             input_path, source_wav,
@@ -144,7 +144,7 @@ def _run_asr_step(
             )
             merge_policy = str(fw_fallback.get("merge_policy") or "replace_ranges")
             print(
-                f"[2/3] Running Whisper ASR... "
+                f"[2/3] 正在运行 Whisper ASR... "
                 f"({fw_fallback.get('primary_mode', 'batch')} + {fw_fallback.get('fallback_mode', 'standard')} fallback, "
                 f"{merge_policy})",
                 flush=True,
@@ -162,7 +162,7 @@ def _run_asr_step(
                 flush=True,
             )
         elif is_qwen3_fallback_enabled(config.get("asr", {})):
-            print("[2/3] Running Qwen3 ASR... (primary + suspicious-range fallback)", flush=True)
+            print("[2/3] 正在运行 Qwen3 ASR... (primary + suspicious-range fallback)", flush=True)
             segments, fallback_meta = transcribe_qwen3_with_fallback(source_wav, config["asr"], asr_dir)
             inference_mode = f"qwen3+fallback:chunk{fallback_meta['chunk_seconds']}"
             print(
@@ -175,7 +175,7 @@ def _run_asr_step(
         else:
             transcriber = Transcriber(config, asr_dir=asr_dir)
             inference_mode = transcriber.inference_mode
-            print(f"[2/3] Running ASR... (inference_mode: {transcriber.inference_mode})", flush=True)
+            print(f"[2/3] 正在运行 ASR... (inference_mode: {transcriber.inference_mode})", flush=True)
             segments = transcriber.transcribe(source_wav)
         transcript_path.write_text(
             json.dumps([s.to_dict() for s in segments], ensure_ascii=False, indent=2),

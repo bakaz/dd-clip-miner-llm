@@ -99,7 +99,7 @@ def run_batch(
                     if run_dir.resolve() != result_dir.resolve():
                         shutil.copytree(run_dir, result_dir, dirs_exist_ok=True)
                         shutil.rmtree(run_dir, ignore_errors=True)
-                        print(f"  [cleanup] Removed work dir: {run_dir}")
+                        print(f"  [cleanup] Attempted to remove work dir: {run_dir}")
                     total_count = sum(len(v) for v in results.values()) if isinstance(results, dict) else len(results)
                     item = {
                         "video": str(video),
@@ -225,7 +225,7 @@ def _process_folder_concat(
             # 清理合并前的临时文件（复制成功后再清理，避免复制失败时丢失数据）
             _cleanup_concat_source(concat_dir)
             shutil.rmtree(run_dir, ignore_errors=True)
-            print(f"  [cleanup] Removed work dir: {run_dir}")
+            print(f"  [cleanup] Attempted to remove work dir: {run_dir}")
 
         total_count = sum(len(v) for v in results.values()) if isinstance(results, dict) else len(results)
         item = {

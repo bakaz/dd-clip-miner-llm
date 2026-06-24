@@ -3,10 +3,12 @@
 # Setup:
 #   1. Copy to wol_webhook.py (gitignored local file):
 #        copy wol_webhook.example.py wol_webhook.py
-#   2. Edit GPU_MAC / GPU_IP / TARGET_UID / TARGET_ROOM in wol_webhook.py
+#   2. Edit GPU_MAC / GPU_IP / TARGET_UID / TARGET_ROOM / TARGET_NAME in wol_webhook.py
 #   3. Run:
 #        python wol_webhook.py
-#      or background:
+#      Test mode (send one WOL packet and exit):
+#        python wol_webhook.py -t
+#      Background:
 #        pythonw wol_webhook.py
 #
 # DDTV settings:
@@ -15,8 +17,10 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import socket
+import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 # --- Local config (replace in wol_webhook.py) --------------------------------
@@ -29,14 +33,21 @@ LISTEN_PORT = 29000
 # -----------------------------------------------------------------------------
 
 
-def send_wol(mac: str) -> None:
-    """Send a Wake-on-LAN magic packet."""
-    mac_hex = mac.replace(":", "").replace("-", "")
-    mac_bytes = bytes.fromhex(mac_hex)
+def send_wol(mac: str) -> bytes:
+    """Send a Wake-on-LAN magic packet, returning the built packet bytes."""
+    mac_hex = mac.replace(":", "").replace("-", "").replace(".", "")
+    if len(mac_hex) != 12:
+        raise ValueError(f"Invalid MAC address: {mac!r}, expected 12 hex chars")
+    try:
+        mac_bytes = bytes.fromhex(mac_hex)
+    except ValueError as exc:
+        raise ValueError(f"Invalid MAC address characters: {mac!r}") from exc
+
     packet = b"\xff" * 6 + mac_bytes * 16
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         sock.sendto(packet, ("255.255.255.255", 9))
+    return packet
 
 
 class WebHookHandler(BaseHTTPRequestHandler):
@@ -70,6 +81,30 @@ class WebHookHandler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="DDTV WebHook listener that sends a WOL packet on RecordingEnd"
+    )
+    parser.add_argument(
+        "-t", "--test",
+        action="store_true",
+        help="Test mode: build and send one WOL packet, then exit"
+    )
+    args = parser.parse_args()
+
+    if args.test:
+        print("[Test Mode] Sending WOL test packet")
+        print(f"  target MAC: {GPU_MAC}")
+        print(f"  target IP:  {GPU_IP} (for reference only)")
+        try:
+            packet = send_wol(GPU_MAC)
+            print(f"  packet size: {len(packet)} bytes")
+            print(f"  packet hex:  {packet.hex()}")
+            print("[Test Mode] WOL test packet sent")
+        except Exception as exc:
+            print(f"[Test Mode Error] {exc}")
+            sys.exit(1)
+        return
+
     print("DDTV WebHook Listener")
     print(f"  listen: http://0.0.0.0:{LISTEN_PORT}/webhook")
     print(f"  target: {TARGET_NAME} (UID={TARGET_UID}, RoomId={TARGET_ROOM})")

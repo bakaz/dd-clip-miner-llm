@@ -64,7 +64,7 @@ def run_risk_routed_kv_pipeline(
         }
         (kv_dir / "pipeline.json").write_text(json.dumps(audit, ensure_ascii=False, indent=2), encoding="utf-8")
         raise RuntimeError(
-            "V3 precision discovery failed: "
+            "KV precision discovery failed: "
             f"{discovery_debug.get('error') or 'invalid protocol'}"
         )
 

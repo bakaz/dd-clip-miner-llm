@@ -694,7 +694,7 @@ def main():
         else:
             print("  1. 复制配置文件: cp config.example.yaml config.yaml")
             print("  2. 设置 API key: export OPENCODE_API_KEY='your-key'  # 或 DEEPSEEK_API_KEY / MIMO_API_KEY")
-        print("  3. GPU 生产管线: python install.py --gpu cuda13 --funasr  (已安装可跳过)")
+        print("  3. GPU 生产管线 (可选): python install.py --gpu cuda13 --funasr  (仅 GPU 用户；如已安装 GPU 依赖可跳过)")
         print("  4. 运行: python -m dd_clip_miner_llm run video.mp4 --config config.yaml")
     else:
         print("\n✗ 安装过程中出现错误，请检查日志。")

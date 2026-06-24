@@ -167,7 +167,7 @@ def scan_pending_files(config: dict) -> list[Path]:
     )
 
     if not source_path.is_dir():
-        _log(f"Source directory does not exist: {source_path}", Path("cut_copy.log"))
+        _log(f"Source directory does not exist: {source_path}", Path(config.get("behavior", {}).get("log_file", "cut_copy.log")))
         return []
 
     all_files = sorted(source_path.glob(pattern), key=lambda p: p.stat().st_mtime)
