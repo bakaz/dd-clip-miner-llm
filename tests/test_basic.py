@@ -162,7 +162,8 @@ class TestConfig:
         assert funasr["fallback"]["enabled"] is True
         assert funasr["fallback"]["merge_policy"] == "replace_ranges"
         assert local["gpu"]["funasr"]["model"] == "Qwen/Qwen3-ASR-1.7B"
-        assert local["cpu"]["funasr"]["model"] == "iic/SenseVoiceSmall"
+        assert local["cpu"]["backend"] == "faster_whisper"
+        assert "funasr" not in local["cpu"]
         fw = local["faster_whisper"]
         assert fw["batch"]["model"] == "small"
         assert local["gpu"]["faster_whisper"]["batch"]["model"] == "turbo"
@@ -465,11 +466,7 @@ class TestASRBackends:
                 },
             },
             "cpu": {
-                "funasr": {
-                    "model": "iic/SenseVoiceSmall",
-                    "device": "cpu",
-                    "timestamp_chunk_seconds": 5,
-                },
+                "backend": "faster_whisper",
                 "faster_whisper": {
                     "compute_type": "int8",
                     "batch": {"model": "small"},
@@ -480,13 +477,15 @@ class TestASRBackends:
 
         monkeypatch.setattr("dd_clip_miner_llm.asr_backends._is_gpu_available", lambda: True)
         resolved_gpu = _resolve_hardware_local_config(cfg)
+        assert resolved_gpu["backend"] == "qwen3_asr"
         assert resolved_gpu["funasr"]["model"] == "Qwen/Qwen3-ASR-1.7B"
         assert resolved_gpu["faster_whisper"]["batch"]["model"] == "turbo"
 
         monkeypatch.setattr("dd_clip_miner_llm.asr_backends._is_gpu_available", lambda: False)
         resolved_cpu = _resolve_hardware_local_config(cfg)
-        assert resolved_cpu["funasr"]["model"] == "iic/SenseVoiceSmall"
+        assert resolved_cpu["backend"] == "faster_whisper"
         assert resolved_cpu["faster_whisper"]["batch"]["model"] == "small"
+        assert resolved_cpu["faster_whisper"]["standard"]["model"] == "small"
         assert resolved_cpu["faster_whisper"]["compute_type"] == "int8"
 
     def test_resolve_hardware_cpu_section_fallback(self, monkeypatch):
@@ -3161,19 +3160,10 @@ class TestCLI:
         assert config["song"]["enabled"] is False
         assert _get_content_types(config) == ["daily_summary"]
 
-    def test_init_config_matches_example_cut_copy_and_remote_asr(self):
-        import yaml
+    def test_init_config_matches_config_example_yaml(self):
+        from dd_clip_miner_llm.cli import _config_example_path, _generate_config_yaml
 
-        from dd_clip_miner_llm.cli import _generate_config_yaml
-
-        init = yaml.safe_load(_generate_config_yaml())
-        example = yaml.safe_load(Path("config.example.yaml").read_text(encoding="utf-8"))
-        assert init["cut_copy"] == example["cut_copy"]
-        assert init["asr"]["remote"] == example["asr"]["remote"]
-        assert init["asr"]["local"]["funasr"]["keep_chunk_audio"] is False
-        assert init["asr"]["local"]["gpu"]["faster_whisper"]["batch"]["model"] == "turbo"
-        assert init["asr"]["local"]["cpu"]["faster_whisper"]["batch"]["model"] == "small"
-        assert init["profiles"]["kv_optimized"]["song"]["normalization"]["chorus_gap_seconds"] == 130.0
+        assert _generate_config_yaml() == _config_example_path().read_text(encoding="utf-8")
 
     @pytest.mark.parametrize(
         "path",

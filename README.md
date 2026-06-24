@@ -122,11 +122,10 @@ python -m dd_clip_miner_llm init-config --out config.yaml
 
 ASR 使用 `asr.mode: local | remote` 新结构（见 `config.example.yaml`）：
 
-- **默认 backend**：`local.backend: qwen3_asr`（FunASR）。`device: auto` 时按 `gpu:`/`cpu:` 节自动分流：
-  - **GPU**：Qwen3-1.7B + chunk180 + funasr fallback；FW **turbo**（batch/standard）
-  - **CPU**：SenseVoiceSmall + chunk5；FW **small** + `int8`
+- **硬件自动分流**（`device: auto` + `local.gpu` / `local.cpu`）：
+  - **GPU（默认 backend: qwen3_asr）**：Qwen3-1.7B + chunk180 + funasr fallback；FW **turbo** 供对比/fallback
+  - **CPU（自动切 backend: faster_whisper）**：FW **small** + `int8` batch 主路径 + standard fallback
   - 安装 GPU 生产管线：`python install.py --gpu cuda13 --funasr`
-- **纯 CPU 轻量备选**：将 `backend` 改为 `faster_whisper` 即可只走 FW small 路径
 - 二轮 fallback 结果会写回 `02_asr/transcript.json`，并保留 `transcript_primary.json`、`fallback_ranges.json`、`fallback_segments.json` 供审计。
 
 **硬件分流**：`funasr`/`faster_whisper` 设 `device: auto`，并在 `local.gpu` / `local.cpu` 下分别写硬件专用配置（见 `config.example.yaml`）。无 `gpu:`/`cpu:` 节时，FW 在无 CUDA 时自动将 `compute_type` 降为 `int8`。

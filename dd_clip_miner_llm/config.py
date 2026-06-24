@@ -98,13 +98,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
                 },
             },
             "cpu": {
-                "funasr": {
-                    "model": "iic/SenseVoiceSmall",
-                    "hub": "ms",
-                    "device": "cpu",
-                    "timestamp_chunk_seconds": 5,
-                    "max_workers": 1,
-                },
+                "backend": "faster_whisper",
                 "faster_whisper": {
                     "compute_type": "int8",
                     "batch": {"model": "small"},

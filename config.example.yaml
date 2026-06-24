@@ -2,10 +2,10 @@ audio:
   sample_rate: 16000
   channels: 1
 
-# 默认 backend: qwen3_asr (FunASR)
-# GPU: Qwen3-1.7B chunk180 + FW turbo | CPU: SenseVoiceSmall + FW small/int8
+# 默认 backend: qwen3_asr (GPU) / faster_whisper (CPU 自动切换)
+# GPU: Qwen3-1.7B chunk180 + funasr fallback；FW turbo 供 fallback/对比
+# CPU: FW small int8 batch + standard fallback（主路径）
 # 安装 GPU 生产管线：python install.py --gpu cuda13 --funasr
-# 纯 CPU 可将 backend 改为 faster_whisper 走轻量路径
 asr:
   mode: local
   local:
@@ -86,12 +86,7 @@ asr:
         standard:
           model: turbo
     cpu:
-      funasr:
-        model: iic/SenseVoiceSmall
-        hub: ms
-        device: cpu
-        timestamp_chunk_seconds: 5
-        max_workers: 1
+      backend: faster_whisper
       faster_whisper:
         compute_type: int8
         batch:
