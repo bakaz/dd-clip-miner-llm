@@ -7,16 +7,10 @@ asr:
   local:
     backend: qwen3_asr
     funasr:
-      model: Qwen/Qwen3-ASR-1.7B
-      hub: hf
-      device: cuda:0
-      dtype: bf16
+      device: auto
+      trust_remote_code: true
       batch_size: null
       language: null
-      timestamp_chunk_seconds: 180
-      max_workers: 2
-      forced_aligner: Qwen/Qwen3-ForcedAligner-0.6B
-      forced_aligner_kwargs: {}
       generate_kwargs:
         return_time_stamps: true
       lyrics:
@@ -37,22 +31,13 @@ asr:
     faster_whisper:
       device: auto
       compute_type: default
-      cpu_threads: 8
-      num_workers: 1
-      language: null
-      beam_size: 5
-      initial_prompt: null
-      word_timestamps: true
-      split_on_word_gaps: true
-      word_gap_seconds: 2.0
-      max_segment_seconds: 15.0
       batch:
-        model: turbo
+        model: small
         inference_mode: batched
         batch_size: 8
         vad_filter: true
       standard:
-        model: turbo
+        model: small
         inference_mode: standard
         batch_size: 0
         vad_filter: false
@@ -60,13 +45,35 @@ asr:
         enabled: true
         primary_mode: batch
         fallback_mode: standard
-        min_gap_seconds: 4.0
-        padding_seconds: 2.0
-        max_workers: 1
-        max_segment_seconds: 15.0
-        sparse_chars_per_sec: 1.0
-        repeat_threshold: 3
         merge_policy: replace_ranges
+    gpu:
+      funasr:
+        model: Qwen/Qwen3-ASR-1.7B
+        hub: hf
+        device: cuda:0
+        dtype: bf16
+        timestamp_chunk_seconds: 180
+        max_workers: 2
+        forced_aligner: Qwen/Qwen3-ForcedAligner-0.6B
+        forced_aligner_kwargs: {}
+      faster_whisper:
+        batch:
+          model: turbo
+        standard:
+          model: turbo
+    cpu:
+      funasr:
+        model: iic/SenseVoiceSmall
+        hub: ms
+        device: cpu
+        timestamp_chunk_seconds: 5
+        max_workers: 1
+      faster_whisper:
+        compute_type: int8
+        batch:
+          model: small
+        standard:
+          model: small
 
 llm:
   provider_route:

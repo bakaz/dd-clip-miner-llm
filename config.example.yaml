@@ -2,24 +2,22 @@ audio:
   sample_rate: 16000
   channels: 1
 
-# GPU 生产管线（默认推荐）
-# 安装：python install.py --gpu cuda13 --funasr
-# Blackwell/RTX 50xx 需要 CUDA 13 + cu130 PyTorch
+# 默认 backend: qwen3_asr (FunASR)
+# GPU: Qwen3-1.7B chunk180 + FW turbo | CPU: SenseVoiceSmall + FW small/int8
+# 安装 GPU 生产管线：python install.py --gpu cuda13 --funasr
+# 纯 CPU 可将 backend 改为 faster_whisper 走轻量路径
 asr:
   mode: local
   local:
     backend: qwen3_asr
     funasr:
-      model: Qwen/Qwen3-ASR-1.7B
-      hub: hf
-      device: cuda:0
-      dtype: bf16
+      device: auto
+      trust_remote_code: true
       batch_size: null
       language: null
-      timestamp_chunk_seconds: 180
-      max_workers: 2
-      forced_aligner: Qwen/Qwen3-ForcedAligner-0.6B
-      forced_aligner_kwargs: {}
+      vad_model: null
+      punc_model: null
+      spk_model: null
       generate_kwargs:
         return_time_stamps: true
       keep_chunk_audio: false
@@ -51,12 +49,12 @@ asr:
       word_gap_seconds: 2.0
       max_segment_seconds: 15.0
       batch:
-        model: turbo
+        model: small
         inference_mode: batched
         batch_size: 8
         vad_filter: true
       standard:
-        model: turbo
+        model: small
         inference_mode: standard
         batch_size: 0
         vad_filter: false
@@ -71,16 +69,35 @@ asr:
         sparse_chars_per_sec: 1.0
         repeat_threshold: 3
         merge_policy: replace_ranges
-
-      # CPU/轻量备选：将 backend 改为 faster_whisper 即可启用上方配置
-      # SenseVoice 示例：
-      # funasr:
-      #   model: iic/SenseVoiceSmall
-      #   hub: ms
-      #   trust_remote_code: true
-      #   device: auto
-      #   timestamp_chunk_seconds: 5
-      #   max_workers: 4
+    # device: auto 时按硬件自动合并 gpu/cpu 节
+    gpu:
+      funasr:
+        model: Qwen/Qwen3-ASR-1.7B
+        hub: hf
+        device: cuda:0
+        dtype: bf16
+        timestamp_chunk_seconds: 180
+        max_workers: 2
+        forced_aligner: Qwen/Qwen3-ForcedAligner-0.6B
+        forced_aligner_kwargs: {}
+      faster_whisper:
+        batch:
+          model: turbo
+        standard:
+          model: turbo
+    cpu:
+      funasr:
+        model: iic/SenseVoiceSmall
+        hub: ms
+        device: cpu
+        timestamp_chunk_seconds: 5
+        max_workers: 1
+      faster_whisper:
+        compute_type: int8
+        batch:
+          model: small
+        standard:
+          model: small
   remote:
     provider: mimo
     base_url: https://token-plan-cn.xiaomimimo.com/v1

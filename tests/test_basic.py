@@ -158,12 +158,15 @@ class TestConfig:
         local = DEFAULT_CONFIG["asr"]["local"]
         assert local["backend"] == "qwen3_asr"
         funasr = local["funasr"]
-        assert funasr["model"] == "Qwen/Qwen3-ASR-1.7B"
-        assert funasr["timestamp_chunk_seconds"] == 180
+        assert funasr["device"] == "auto"
         assert funasr["fallback"]["enabled"] is True
         assert funasr["fallback"]["merge_policy"] == "replace_ranges"
+        assert local["gpu"]["funasr"]["model"] == "Qwen/Qwen3-ASR-1.7B"
+        assert local["cpu"]["funasr"]["model"] == "iic/SenseVoiceSmall"
         fw = local["faster_whisper"]
-        assert fw["batch"]["model"] == "turbo"
+        assert fw["batch"]["model"] == "small"
+        assert local["gpu"]["faster_whisper"]["batch"]["model"] == "turbo"
+        assert local["cpu"]["faster_whisper"]["batch"]["model"] == "small"
         assert fw["fallback"]["enabled"] is True
         assert "llm" in DEFAULT_CONFIG
         assert "padding" in DEFAULT_CONFIG
@@ -386,21 +389,28 @@ class TestASRBackends:
         assert asr["model"] == "new-model"
         assert asr["local"]["funasr"]["model"] == "new-model"
 
-    def test_resolve_faster_whisper_batch_and_standard_modes(self):
+    def test_resolve_faster_whisper_batch_and_standard_modes(self, monkeypatch):
         from dd_clip_miner_llm.asr_backends import resolve_faster_whisper_mode_settings
 
-        batch = resolve_faster_whisper_mode_settings(DEFAULT_CONFIG["asr"], "batch")
-        standard = resolve_faster_whisper_mode_settings(DEFAULT_CONFIG["asr"], "standard")
+        monkeypatch.setattr("dd_clip_miner_llm.asr_backends._is_gpu_available", lambda: True)
+        batch_gpu = resolve_faster_whisper_mode_settings(DEFAULT_CONFIG["asr"], "batch")
+        standard_gpu = resolve_faster_whisper_mode_settings(DEFAULT_CONFIG["asr"], "standard")
+        assert batch_gpu["model"] == "turbo"
+        assert standard_gpu["model"] == "turbo"
 
-        assert batch["model"] == "turbo"
-        assert batch["inference_mode"] == "batched"
-        assert batch["batch_size"] == 8
-        assert batch["vad_filter"] is True
-        assert standard["model"] == "turbo"
-        assert standard["inference_mode"] == "standard"
-        assert standard["batch_size"] == 0
-        assert standard["vad_filter"] is False
-        assert standard["word_gap_seconds"] == 2.0
+        monkeypatch.setattr("dd_clip_miner_llm.asr_backends._is_gpu_available", lambda: False)
+        batch_cpu = resolve_faster_whisper_mode_settings(DEFAULT_CONFIG["asr"], "batch")
+        standard_cpu = resolve_faster_whisper_mode_settings(DEFAULT_CONFIG["asr"], "standard")
+        assert batch_cpu["model"] == "small"
+        assert batch_cpu["compute_type"] == "int8"
+        assert standard_cpu["model"] == "small"
+        assert batch_cpu["inference_mode"] == "batched"
+        assert batch_cpu["batch_size"] == 8
+        assert batch_cpu["vad_filter"] is True
+        assert standard_cpu["inference_mode"] == "standard"
+        assert standard_cpu["batch_size"] == 0
+        assert standard_cpu["vad_filter"] is False
+        assert standard_cpu["word_gap_seconds"] == 2.0
 
     def test_funasr_timestamp_result_to_segments(self):
         result = [
@@ -431,6 +441,53 @@ class TestASRBackends:
         resolved = _resolve_hardware_local_config(cfg)
         assert resolved["faster_whisper"]["device"] == "cuda"
         assert resolved["faster_whisper"]["compute_type"] == "float16"
+
+    def test_resolve_qwen3_funasr_and_fw_hardware_sections(self, monkeypatch):
+        from dd_clip_miner_llm.asr_backends import _resolve_hardware_local_config
+
+        cfg = {
+            "backend": "qwen3_asr",
+            "funasr": {"device": "auto", "fallback": {"enabled": True}},
+            "faster_whisper": {
+                "device": "auto",
+                "batch": {"model": "small"},
+                "standard": {"model": "small"},
+            },
+            "gpu": {
+                "funasr": {
+                    "model": "Qwen/Qwen3-ASR-1.7B",
+                    "device": "cuda:0",
+                    "timestamp_chunk_seconds": 180,
+                },
+                "faster_whisper": {
+                    "batch": {"model": "turbo"},
+                    "standard": {"model": "turbo"},
+                },
+            },
+            "cpu": {
+                "funasr": {
+                    "model": "iic/SenseVoiceSmall",
+                    "device": "cpu",
+                    "timestamp_chunk_seconds": 5,
+                },
+                "faster_whisper": {
+                    "compute_type": "int8",
+                    "batch": {"model": "small"},
+                    "standard": {"model": "small"},
+                },
+            },
+        }
+
+        monkeypatch.setattr("dd_clip_miner_llm.asr_backends._is_gpu_available", lambda: True)
+        resolved_gpu = _resolve_hardware_local_config(cfg)
+        assert resolved_gpu["funasr"]["model"] == "Qwen/Qwen3-ASR-1.7B"
+        assert resolved_gpu["faster_whisper"]["batch"]["model"] == "turbo"
+
+        monkeypatch.setattr("dd_clip_miner_llm.asr_backends._is_gpu_available", lambda: False)
+        resolved_cpu = _resolve_hardware_local_config(cfg)
+        assert resolved_cpu["funasr"]["model"] == "iic/SenseVoiceSmall"
+        assert resolved_cpu["faster_whisper"]["batch"]["model"] == "small"
+        assert resolved_cpu["faster_whisper"]["compute_type"] == "int8"
 
     def test_resolve_hardware_cpu_section_fallback(self, monkeypatch):
         from dd_clip_miner_llm.asr_backends import _resolve_hardware_local_config
@@ -3114,6 +3171,8 @@ class TestCLI:
         assert init["cut_copy"] == example["cut_copy"]
         assert init["asr"]["remote"] == example["asr"]["remote"]
         assert init["asr"]["local"]["funasr"]["keep_chunk_audio"] is False
+        assert init["asr"]["local"]["gpu"]["faster_whisper"]["batch"]["model"] == "turbo"
+        assert init["asr"]["local"]["cpu"]["faster_whisper"]["batch"]["model"] == "small"
         assert init["profiles"]["kv_optimized"]["song"]["normalization"]["chorus_gap_seconds"] == 130.0
 
     @pytest.mark.parametrize(

@@ -122,11 +122,14 @@ python -m dd_clip_miner_llm init-config --out config.yaml
 
 ASR 使用 `asr.mode: local | remote` 新结构（见 `config.example.yaml`）：
 
-- **GPU 生产默认**：`local.backend: qwen3_asr`，Qwen3-1.7B + chunk180 + funasr fallback（`replace_ranges`）。安装：`python install.py --gpu cuda13 --funasr`
-- 本地备选：`local.backend: faster_whisper`（turbo batch + standard fallback，适合极速粗扫）
+- **默认 backend**：`local.backend: qwen3_asr`（FunASR）。`device: auto` 时按 `gpu:`/`cpu:` 节自动分流：
+  - **GPU**：Qwen3-1.7B + chunk180 + funasr fallback；FW **turbo**（batch/standard）
+  - **CPU**：SenseVoiceSmall + chunk5；FW **small** + `int8`
+  - 安装 GPU 生产管线：`python install.py --gpu cuda13 --funasr`
+- **纯 CPU 轻量备选**：将 `backend` 改为 `faster_whisper` 即可只走 FW small 路径
 - 二轮 fallback 结果会写回 `02_asr/transcript.json`，并保留 `transcript_primary.json`、`fallback_ranges.json`、`fallback_segments.json` 供审计。
 
-**faster-whisper 设备自动检测**：设置 `device: auto` + `compute_type: default` 时，系统自动检测 CUDA 可用性。有 GPU 时使用 float16，无 GPU（CPU）时自动切换 `int8` 以获得最佳性能。无需手动配置 `gpu:`/`cpu:` 分流节。
+**硬件分流**：`funasr`/`faster_whisper` 设 `device: auto`，并在 `local.gpu` / `local.cpu` 下分别写硬件专用配置（见 `config.example.yaml`）。无 `gpu:`/`cpu:` 节时，FW 在无 CUDA 时自动将 `compute_type` 降为 `int8`。
 
 LLM Key 优先环境变量：默认模板使用 `OPENCODE_API_KEY`、`DEEPSEEK_API_KEY`、`MIMO_API_KEY`，也可在 provider 的 `api_key_env` 中改成自己的变量名。
 
