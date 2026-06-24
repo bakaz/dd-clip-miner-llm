@@ -53,6 +53,7 @@ def create_mock_batch_results(base_dir: Path) -> list[dict]:
             "song_count": i + 1,
             "content_counts": {"song": i + 1},
             "status": "success",
+            "processed_this_run": True,
         })
 
     # Add one failed result
@@ -201,6 +202,7 @@ def test_skip_missing_result_dir():
                 "video": "/fake/video.mp4",
                 "result_dir": "/nonexistent/path",
                 "status": "success",
+                "processed_this_run": True,
             },
         ]
 

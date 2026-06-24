@@ -14,6 +14,7 @@ from dd_clip_miner_llm.cut_copy import (
     _load_done_marker,
     _save_done_marker,
     load_cut_copy_config,
+    run_batch_cut_copy,
     run_cut_copy,
     scan_pending_files,
     schedule_shutdown,
@@ -261,6 +262,77 @@ class TestRunCutCopy:
 
         assert rc == 0
         mock_shutdown.assert_not_called()
+
+
+class TestRunBatchCutCopy:
+    def _config(self, tmp_path) -> dict:
+        return {
+            "enabled": True,
+            "destination": {"path": str(tmp_path / "dest"), "username": "", "password": ""},
+            "processing": {"skip_on_failure": True},
+            "behavior": {
+                "delete_source_after_copy": True,
+                "delete_work_dir": True,
+                "shutdown_after": True,
+                "shutdown_delay": 60,
+                "log_file": str(tmp_path / "cut_copy.log"),
+            },
+        }
+
+    def test_skips_successful_marker_records_from_previous_runs(self, tmp_path):
+        config = self._config(tmp_path)
+        result_dir = tmp_path / "old_result"
+        result_dir.mkdir()
+        video = tmp_path / "video_fix.mp4"
+        video.write_bytes(b"video")
+        runs = [{
+            "video": str(video),
+            "result_dir": str(result_dir),
+            "status": "success",
+        }]
+
+        with (
+            patch("dd_clip_miner_llm.cut_copy.copy_to_destination") as mock_copy,
+            patch("dd_clip_miner_llm.cut_copy.delete_source_file") as mock_delete_source,
+            patch("dd_clip_miner_llm.cut_copy.delete_directory") as mock_delete_dir,
+            patch("dd_clip_miner_llm.cut_copy.schedule_shutdown") as mock_shutdown,
+        ):
+            rc = run_batch_cut_copy(config, runs)
+
+        assert rc == 0
+        mock_copy.assert_not_called()
+        mock_delete_source.assert_not_called()
+        mock_delete_dir.assert_not_called()
+        mock_shutdown.assert_not_called()
+
+    def test_processes_successful_runs_from_current_batch(self, tmp_path):
+        config = self._config(tmp_path)
+        result_dir = tmp_path / "new_result"
+        result_dir.mkdir()
+        (result_dir / "out.txt").write_text("ok", encoding="utf-8")
+        video = tmp_path / "video_fix.mp4"
+        video.write_bytes(b"video")
+        runs = [{
+            "video": str(video),
+            "result_dir": str(result_dir),
+            "status": "success",
+            "processed_this_run": True,
+        }]
+
+        with (
+            patch("dd_clip_miner_llm.cut_copy.copy_to_destination", return_value=tmp_path / "dest" / "new_result") as mock_copy,
+            patch("dd_clip_miner_llm.cut_copy.verify_copy", return_value=True),
+            patch("dd_clip_miner_llm.cut_copy.delete_source_file") as mock_delete_source,
+            patch("dd_clip_miner_llm.cut_copy.delete_directory") as mock_delete_dir,
+            patch("dd_clip_miner_llm.cut_copy.schedule_shutdown") as mock_shutdown,
+        ):
+            rc = run_batch_cut_copy(config, runs)
+
+        assert rc == 0
+        mock_copy.assert_called_once()
+        mock_delete_source.assert_called_once_with(video)
+        mock_delete_dir.assert_called_once_with(result_dir)
+        mock_shutdown.assert_called_once_with(60)
 
 
 # ---------------------------------------------------------------------------

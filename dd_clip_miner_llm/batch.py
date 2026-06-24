@@ -81,8 +81,10 @@ def run_batch(
 
                 if marker_key in completed_videos and completed_videos[marker_key].get("status") == "success":
                     print(f"[skip] Already processed: {video}")
-                    folder_runs.append(completed_videos[marker_key])
-                    runs.append(completed_videos[marker_key])
+                    skipped = dict(completed_videos[marker_key])
+                    skipped["processed_this_run"] = False
+                    folder_runs.append(skipped)
+                    runs.append(skipped)
                     continue
 
                 has_work = True
@@ -110,6 +112,7 @@ def run_batch(
                         "song_count": total_count,
                         "content_counts": {k: len(v) for k, v in results.items()} if isinstance(results, dict) else {"song": len(results)},
                         "status": "success",
+                        "processed_this_run": True,
                     }
                     folder_runs.append(item)
                     runs.append(item)
@@ -168,7 +171,9 @@ def _process_folder_concat(
     marker_key = _profile_marker_key(folder_key, profile_name)
     if marker_key in completed_videos and completed_videos[marker_key].get("status") == "success":
         print(f"[skip] Already processed concat folder: {folder}")
-        folder_runs.append(completed_videos[marker_key])
+        skipped = dict(completed_videos[marker_key])
+        skipped["processed_this_run"] = False
+        folder_runs.append(skipped)
         return folder_runs, True, False
     
     has_work = True
@@ -193,6 +198,7 @@ def _process_folder_concat(
         # 尝试加载已有结果
         existing = _load_existing_concat_result(folder, folder_key, run_dir, result_dir, len(folder_videos), profile_name)
         if existing:
+            existing["processed_this_run"] = False
             folder_runs.append(existing)
             completed_videos[marker_key] = existing
             _write_marker(marker, completed_videos)
@@ -238,6 +244,7 @@ def _process_folder_concat(
             "song_count": total_count,
             "content_counts": {k: len(v) for k, v in results.items()} if isinstance(results, dict) else {"song": len(results)},
             "status": "success",
+            "processed_this_run": True,
         }
         folder_runs.append(item)
         completed_videos[marker_key] = item

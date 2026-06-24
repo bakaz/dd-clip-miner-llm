@@ -121,6 +121,7 @@ python -m dd_clip_miner_llm init-config --out config.yaml
 **勿提交**（已在 `.gitignore`）：`config.yaml`、`cut_copy.conf`、`streamer_dictionary.json`、`runs/`。真实 API key、SMB 密码、WebHook 目标、主播词典和运行产物都应只留在这些本地文件或环境变量里；仓库模板保持 `api_key: null` + `api_key_env`。
 
 `cut_copy.conf` 建议先用 `python -m dd_clip_miner_llm cut-copy --conf cut_copy.conf --dry-run` 验证扫描范围。确认归档路径和复制验证稳定后，再按需开启 `behavior.delete_source_after_copy`、`behavior.delete_work_dir` 和 `behavior.shutdown_after`。
+通过 `batch-run` 自动触发时，cut-copy 只后处理本轮实际新处理成功的 run；如果本轮全部来自 marker 跳过，不会复制、删除或关机。
 
 ASR 使用 `asr.mode: local | remote` 新结构（见 `config.example.yaml`）：
 

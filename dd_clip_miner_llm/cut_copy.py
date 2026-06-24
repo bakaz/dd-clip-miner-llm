@@ -527,9 +527,12 @@ def run_batch_cut_copy(
     dest_path = Path(config["destination"]["path"])
     skip = config["processing"].get("skip_on_failure", True)
 
-    successful = [r for r in runs if r.get("status") == "success"]
+    successful = [
+        r for r in runs
+        if r.get("status") == "success" and r.get("processed_this_run") is True
+    ]
     if not successful:
-        _log("No successful runs to post-process.", log_file)
+        _log("No newly processed successful runs to post-process.", log_file)
         return 0
 
     _log(f"Cut-copy post-processing: {len(successful)} successful run(s).", log_file)
