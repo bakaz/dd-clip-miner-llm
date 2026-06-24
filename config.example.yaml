@@ -37,6 +37,7 @@ audio:
 # GPU 安装: python install.py --config install.yaml --gpu cuda13
 asr:
   mode: local          # local=本机推理（推荐）| remote=云端 API（需网络和 Key）
+  hf_endpoint: https://hf-mirror.com  # load_config 时自动设置 HF_ENDPOINT；null=禁用镜像直连 HF
 
   local:
     backend: qwen3_asr # 主后端: qwen3_asr | faster_whisper | funasr(SenseVoice)
@@ -112,7 +113,7 @@ asr:
     gpu:
       funasr:
         model: Qwen/Qwen3-ASR-1.7B              # Qwen3 ASR 模型 ID
-        hub: ms                                 # ms=ModelScope（国内下载快）| hf=HuggingFace Hub
+        hub: hf                                 # hf=HuggingFace Hub（配合 asr.hf_endpoint 镜像）| ms=ModelScope
         device: cuda:0                          # 使用的 GPU 设备号
         dtype: bf16                             # 推理精度: bf16(推荐) | fp16 | fp32
         timestamp_chunk_seconds: 180            # 长直播按 N 秒切块识别再拼接时间轴

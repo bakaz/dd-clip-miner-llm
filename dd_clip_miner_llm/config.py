@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
+
+_DEFAULT_HF_ENDPOINT = "https://hf-mirror.com"
 
 
 DEFAULT_CONFIG: dict[str, Any] = {
@@ -14,6 +17,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "asr": {
         "mode": "local",
+        "hf_endpoint": _DEFAULT_HF_ENDPOINT,
         "local": {
             "backend": "qwen3_asr",
             "funasr": {
@@ -85,7 +89,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "gpu": {
                 "funasr": {
                     "model": "Qwen/Qwen3-ASR-1.7B",
-                    "hub": "ms",
+                    "hub": "hf",
                     "device": "cuda:0",
                     "dtype": "bf16",
                     "timestamp_chunk_seconds": 180,
@@ -384,6 +388,31 @@ def list_profile_names(loaded: dict[str, Any]) -> list[str]:
     return names
 
 
+def apply_hf_mirror(config: dict[str, Any]) -> str | None:
+    """Set HF_ENDPOINT before any HuggingFace Hub download in this process."""
+    asr = config.get("asr", {})
+    endpoint: Any = _DEFAULT_HF_ENDPOINT
+    if isinstance(asr, dict):
+        if "hf_endpoint" in asr:
+            endpoint = asr["hf_endpoint"]
+        else:
+            local = asr.get("local", {})
+            if isinstance(local, dict) and "hf_endpoint" in local:
+                endpoint = local["hf_endpoint"]
+    endpoint_text = str(endpoint).strip()
+    if not endpoint_text or endpoint_text.lower() in {"none", "null", "false", "0"}:
+        return None
+    endpoint_text = endpoint_text.rstrip("/")
+    os.environ.setdefault("HF_ENDPOINT", endpoint_text)
+    return endpoint_text
+
+
+def _finalize_loaded_config(config: dict[str, Any]) -> dict[str, Any]:
+    config = _migrate_padding_config(config)
+    apply_hf_mirror(config)
+    return config
+
+
 def load_config(
     path: str | Path | None = None,
     profile: str | None = None,
@@ -391,7 +420,7 @@ def load_config(
     if path is None:
         if profile:
             raise ValueError("A profile can only be selected from a YAML config with a profiles mapping.")
-        return _migrate_padding_config(deepcopy(DEFAULT_CONFIG))
+        return _finalize_loaded_config(deepcopy(DEFAULT_CONFIG))
 
     try:
         import yaml
@@ -409,7 +438,7 @@ def load_config(
         if profile:
             raise ValueError(f"Config does not define profiles; cannot select profile: {profile}")
         config = deep_merge(DEFAULT_CONFIG, loaded)
-        return _migrate_padding_config(config)
+        return _finalize_loaded_config(config)
 
     if not isinstance(profiles, dict) or not profiles:
         raise ValueError("Config profiles must be a non-empty mapping.")
@@ -442,12 +471,11 @@ def load_config(
     config["_profile_enabled"] = True
     # 只在 YAML 显式定义了 providers 时才解析 active_provider
     has_explicit_providers = "providers" in (loaded.get("llm") or {})
-    config = _migrate_padding_config(config)
     if has_explicit_providers:
         llm_cfg = config.get("llm") or {}
         if not llm_cfg.get("provider_route"):
             config = _resolve_llm_provider(config)
-    return config
+    return _finalize_loaded_config(config)
 
 
 def _resolve_llm_provider(config: dict[str, Any]) -> dict[str, Any]:
