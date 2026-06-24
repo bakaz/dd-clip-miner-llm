@@ -3,8 +3,8 @@
 # 需要以管理员权限运行
 #
 # batch 模式（默认）:
-#   batch-run --config config.yaml
-#   cut_copy 后处理由 config.yaml 的 cut_copy.enabled 自动触发，无需 --cut-copy-conf
+#   batch-run --config config.yaml --cut-copy-conf
+#   --cut-copy-conf 不带路径时，从 config.yaml 的 cut_copy.conf_path 读取 cut_copy.conf
 #
 # batch 模式扫描目录: config.yaml -> cut_copy.conf_path -> cut_copy.conf -> source.path
 # -InputRoot 可选手动覆盖
@@ -167,9 +167,9 @@ if ($Mode -eq "batch") {
             $detectedInputRoot = [string]$batchConfig.source_path
         }
         if ($batchConfig.enabled) {
-            Write-Host "  cut_copy post-process: enabled (auto via config.yaml)" -ForegroundColor Green
+            Write-Host "  cut_copy post-process: enabled in config.yaml (also via --cut-copy-conf)" -ForegroundColor Green
         } else {
-            Write-Host "  cut_copy post-process: disabled in config.yaml" -ForegroundColor Yellow
+            Write-Host "  cut_copy post-process: task uses --cut-copy-conf (reads conf_path from config.yaml)" -ForegroundColor Green
         }
         if ($cutCopyConfPath) {
             if (Test-Path -LiteralPath $cutCopyConfPath) {
@@ -253,10 +253,9 @@ $workingDir = $ProjectRoot
 $taskArgumentString = [string]::Empty
 
 if ($Mode -eq "batch") {
-    # cut_copy 后处理由 cli.py 根据 config.yaml 的 cut_copy 段自动触发
     $batchInputRoot = [string]$batchInputRoot
     $configYamlPath = [string]$configYamlPath
-    $taskArgumentString = '-m dd_clip_miner_llm batch-run "{0}" --result-root runs/batch --work-root runs/batch --config "{1}"' -f `
+    $taskArgumentString = '-m dd_clip_miner_llm batch-run "{0}" --result-root runs/batch --work-root runs/batch --config "{1}" --cut-copy-conf' -f `
         $batchInputRoot, $configYamlPath
     Write-Host "  Batch Input:  $batchInputRoot" -ForegroundColor Green
 } elseif ($Mode -eq "legacy") {
@@ -333,7 +332,7 @@ if ($Mode -eq "batch") {
     Write-Host "  Config File:    $configYamlPath"
     Write-Host "  Batch Input:    $batchInputRoot"
     if ($cutCopyConfPath) {
-        Write-Host "  Cut-Copy Conf:  $cutCopyConfPath (auto-triggered)"
+        Write-Host "  Cut-Copy Conf:  $cutCopyConfPath (via --cut-copy-conf)"
     }
 } else {
     Write-Host "  Cut-Copy Conf:  $cutCopyConfPath"
@@ -346,8 +345,8 @@ Write-Host ""
 
 Write-Host "Next Steps:" -ForegroundColor Yellow
 if ($Mode -eq "batch") {
-    Write-Host "  1. Ensure config.yaml has cut_copy.enabled: true and conf_path set"
-    Write-Host "  2. Ensure cut_copy.conf has source.path, destination, and behavior configured"
+    Write-Host "  1. Ensure config.yaml has cut_copy.conf_path set (enabled may be false)"
+    Write-Host "  2. Ensure cut_copy.conf has destination and behavior configured"
 } else {
     Write-Host "  1. Edit cut_copy config: $cutCopyConfPath"
 }
