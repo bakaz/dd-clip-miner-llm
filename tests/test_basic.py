@@ -354,10 +354,17 @@ profiles:
 
 
 class TestASRBackends:
-    def test_build_default_backend(self):
-        backend = build_asr_backend(DEFAULT_CONFIG["asr"])
-        assert isinstance(backend, FunASRBackend)
-        assert backend.funasr_settings["model"] == "Qwen/Qwen3-ASR-1.7B"
+    def test_build_default_backend(self, monkeypatch):
+        monkeypatch.setattr("dd_clip_miner_llm.asr_backends._is_gpu_available", lambda: True)
+        backend_gpu = build_asr_backend(DEFAULT_CONFIG["asr"])
+        assert isinstance(backend_gpu, FunASRBackend)
+        assert backend_gpu.funasr_settings["model"] == "Qwen/Qwen3-ASR-1.7B"
+
+        monkeypatch.setattr("dd_clip_miner_llm.asr_backends._is_gpu_available", lambda: False)
+        backend_cpu = build_asr_backend(DEFAULT_CONFIG["asr"])
+        assert isinstance(backend_cpu, FasterWhisperBackend)
+        assert backend_cpu.settings["model"] == "small"
+        assert backend_cpu.settings["compute_type"] == "int8"
 
     def test_build_faster_whisper_backend(self):
         local = deepcopy(DEFAULT_CONFIG["asr"]["local"])
