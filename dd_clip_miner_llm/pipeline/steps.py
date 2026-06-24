@@ -139,12 +139,24 @@ def _run_asr_step(
         )
 
         if is_faster_whisper_fallback_enabled(config.get("asr", {})):
-            print("[2/3] Running Whisper ASR... (batch + standard fallback)", flush=True)
+            fw_fallback = (
+                config.get("asr", {}).get("local", {}).get("faster_whisper", {}).get("fallback", {})
+            )
+            merge_policy = str(fw_fallback.get("merge_policy") or "replace_ranges")
+            print(
+                f"[2/3] Running Whisper ASR... "
+                f"({fw_fallback.get('primary_mode', 'batch')} + {fw_fallback.get('fallback_mode', 'standard')} fallback, "
+                f"{merge_policy})",
+                flush=True,
+            )
             segments, fallback_meta = transcribe_with_fallback(source_wav, config["asr"], asr_dir)
-            inference_mode = f"{fallback_meta['primary_mode']}+fallback:{fallback_meta['fallback_mode']}"
+            inference_mode = (
+                f"{fallback_meta['primary_mode']}+fallback:{fallback_meta['fallback_mode']}"
+                f":{fallback_meta.get('merge_policy', merge_policy)}"
+            )
             print(
                 "  ASR fallback ranges: "
-                f"{fallback_meta['fallback_range_count']}, "
+                f"{fallback_meta['fallback_range_count']} ({fallback_meta.get('range_detection', 'unknown')}), "
                 f"fallback segments: {fallback_meta['fallback_segment_count']}, "
                 f"merged: {fallback_meta['merged_segment_count']}",
                 flush=True,

@@ -611,6 +611,7 @@ class TestASRFallback:
         source.write_bytes(b"fake")
         asr_dir = tmp_path / "02_asr"
         config = deepcopy(DEFAULT_CONFIG["asr"])
+        config["local"]["faster_whisper"]["fallback"]["merge_policy"] = "fill_gaps"
 
         class Backend:
             def __init__(self, mode):
@@ -646,6 +647,51 @@ class TestASRFallback:
         assert (asr_dir / "transcript_primary.json").exists()
         assert (asr_dir / "fallback_ranges.json").exists()
         assert (asr_dir / "fallback_segments.json").exists()
+
+    def test_transcribe_with_fallback_replace_ranges_rewrites_suspicious_segments(self, tmp_path, monkeypatch):
+        from copy import deepcopy
+        from dd_clip_miner_llm import asr_fallback
+
+        source = tmp_path / "source.wav"
+        source.write_bytes(b"fake")
+        asr_dir = tmp_path / "02_asr"
+        config = deepcopy(DEFAULT_CONFIG["asr"])
+        config["local"]["faster_whisper"]["fallback"]["merge_policy"] = "replace_ranges"
+
+        class Backend:
+            def __init__(self, mode):
+                self.mode = mode
+
+            def transcribe(self, _path):
+                if self.mode == "batched":
+                    return [
+                        TranscriptSegment(0.0, 5.0, "keep"),
+                        TranscriptSegment(10.0, 30.0, "嗯"),
+                        TranscriptSegment(40.0, 45.0, "tail"),
+                    ]
+                return [TranscriptSegment(2.0, 4.0, "fixed")]
+
+        def fake_build_backend(settings):
+            return Backend(settings["inference_mode"])
+
+        def fake_cut_audio(_source, target, _start, _end):
+            Path(target).write_bytes(b"range")
+            return Path(target)
+
+        monkeypatch.setattr(asr_fallback, "build_asr_backend", fake_build_backend)
+        monkeypatch.setattr(asr_fallback, "cut_audio", fake_cut_audio)
+        monkeypatch.setattr(asr_fallback, "get_duration", lambda _path: 50.0)
+
+        segments, metadata = asr_fallback.transcribe_with_fallback(source, config, asr_dir)
+
+        assert metadata["merge_policy"] == "replace_ranges"
+        assert metadata["range_detection"] == "suspicious_segments"
+        assert metadata["fallback_range_count"] == 1
+        texts = [segment.text for segment in segments]
+        assert "keep" in texts
+        assert "tail" in texts
+        assert "嗯" not in texts
+        assert "fixed" in texts
 
 
 class TestSongMissedRecheck:

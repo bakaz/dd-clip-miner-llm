@@ -120,16 +120,27 @@ def transcribe_with_fallback(
     min_gap_seconds = float(fallback.get("min_gap_seconds", 4.0))
     padding_seconds = float(fallback.get("padding_seconds", 2.0))
     max_workers = max(1, int(fallback.get("max_workers", 1)))
-    merge_policy = str(fallback.get("merge_policy") or "fill_gaps")
-    if merge_policy != "fill_gaps":
+    merge_policy = str(fallback.get("merge_policy") or "replace_ranges")
+    if merge_policy not in {"fill_gaps", "replace_ranges"}:
         raise ValueError(f"Unsupported ASR fallback merge_policy: {merge_policy}")
 
     primary_settings = resolve_faster_whisper_mode_settings(asr_config, primary_mode)
     primary_backend = build_asr_backend(primary_settings)
     primary_segments = primary_backend.transcribe(source_wav)
+    primary_segments, repair_stats = repair_qwen3_zero_duration_segments(primary_segments)
     total_duration = get_duration(source_wav)
-    gaps = detect_transcript_gaps(primary_segments, total_duration, min_gap_seconds)
-    ranges = fallback_audio_ranges(gaps, total_duration, padding_seconds)
+
+    if merge_policy == "replace_ranges":
+        suspicious = detect_suspicious_fallback_ranges(
+            primary_segments,
+            _suspicious_detection_config(fallback),
+        )
+        ranges = pad_suspicious_ranges(suspicious, total_duration, padding_seconds)
+        range_detection = "suspicious_segments"
+    else:
+        gaps = detect_transcript_gaps(primary_segments, total_duration, min_gap_seconds)
+        ranges = fallback_audio_ranges(gaps, total_duration, padding_seconds)
+        range_detection = "gaps"
 
     asr_dir.mkdir(parents=True, exist_ok=True)
     (asr_dir / "transcript_primary.json").write_text(
@@ -140,6 +151,24 @@ def transcribe_with_fallback(
         json.dumps(ranges, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+
+    if not ranges:
+        metadata = {
+            "backend": "faster_whisper",
+            "primary_mode": primary_mode,
+            "fallback_mode": fallback_mode,
+            "min_gap_seconds": min_gap_seconds,
+            "padding_seconds": padding_seconds,
+            "max_workers": max_workers,
+            "merge_policy": merge_policy,
+            "range_detection": range_detection,
+            "primary_segment_count": len(primary_segments),
+            "fallback_range_count": 0,
+            "fallback_segment_count": 0,
+            "merged_segment_count": len(primary_segments),
+            "zero_duration_repair": repair_stats,
+        }
+        return primary_segments, metadata
 
     fallback_segments = _run_fallback_ranges(
         source_wav,
@@ -154,7 +183,6 @@ def transcribe_with_fallback(
         encoding="utf-8",
     )
 
-    # Cleanup fallback audio files (they're no longer needed after merging)
     if cleanup_fallback_audio:
         fallback_audio_dir = asr_dir / "fallback_audio"
         if fallback_audio_dir.exists():
@@ -164,19 +192,28 @@ def transcribe_with_fallback(
             except Exception as exc:
                 print(f"  Warning: failed to cleanup fallback audio: {exc}")
 
-    merged = merge_fill_gaps(primary_segments, fallback_segments)
+    if merge_policy == "replace_ranges":
+        merged = merge_replace_ranges(primary_segments, fallback_segments)
+    else:
+        merged = merge_fill_gaps(primary_segments, fallback_segments)
+
     metadata = {
+        "backend": "faster_whisper",
         "primary_mode": primary_mode,
         "fallback_mode": fallback_mode,
         "min_gap_seconds": min_gap_seconds,
         "padding_seconds": padding_seconds,
         "max_workers": max_workers,
         "merge_policy": merge_policy,
+        "range_detection": range_detection,
         "primary_segment_count": len(primary_segments),
         "fallback_range_count": len(ranges),
         "fallback_segment_count": sum(len(item.get("segments", [])) for item in fallback_segments),
         "merged_segment_count": len(merged),
+        "zero_duration_repair": repair_stats,
     }
+    if merge_policy == "replace_ranges":
+        metadata.update(_suspicious_detection_config(fallback))
     return merged, metadata
 
 
@@ -189,20 +226,30 @@ def _run_fallback_ranges(
     max_workers: int,
 ) -> list[dict[str, Any]]:
     audio_dir.mkdir(parents=True, exist_ok=True)
-    if max_workers == 1:
-        backend = build_asr_backend(resolve_faster_whisper_mode_settings(asr_config, fallback_mode))
-        return [
-            _run_one_fallback_range(source_wav, backend, audio_dir, item)
-            for item in ranges
-        ]
+    backend = build_asr_backend(resolve_faster_whisper_mode_settings(asr_config, fallback_mode))
 
-    def run_parallel(item: dict[str, Any]) -> dict[str, Any]:
-        backend = build_asr_backend(resolve_faster_whisper_mode_settings(asr_config, fallback_mode))
-        return _run_one_fallback_range(source_wav, backend, audio_dir, item)
+    def run_one(item: dict[str, Any]) -> dict[str, Any]:
+        result = _run_one_fallback_range(source_wav, backend, audio_dir, item)
+        repaired_segments = [
+            segment.to_dict()
+            for segment in repair_qwen3_zero_duration_segments([
+                TranscriptSegment(
+                    float(segment_data["start"]),
+                    float(segment_data["end"]),
+                    str(segment_data.get("text", "")),
+                )
+                for segment_data in result.get("segments", [])
+            ])[0]
+        ]
+        result["segments"] = repaired_segments
+        return result
+
+    if max_workers == 1:
+        return [run_one(item) for item in ranges]
 
     results: list[dict[str, Any]] = []
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = [executor.submit(run_parallel, item) for item in ranges]
+        futures = [executor.submit(run_one, item) for item in ranges]
         for future in as_completed(futures):
             results.append(future.result())
     return sorted(results, key=lambda item: int(item["index"]))
@@ -260,7 +307,7 @@ def is_qwen3_fallback_enabled(asr_config: dict[str, Any]) -> bool:
     return bool(fallback) and bool(fallback.get("enabled", False))
 
 
-def detect_qwen3_fallback_ranges(
+def detect_suspicious_fallback_ranges(
     segments: list[TranscriptSegment],
     fallback_cfg: dict[str, Any],
 ) -> list[dict[str, Any]]:
@@ -334,6 +381,17 @@ def detect_qwen3_fallback_ranges(
         "segment_indices": list(group_indices),
     })
     return ranges
+
+
+detect_qwen3_fallback_ranges = detect_suspicious_fallback_ranges
+
+
+def _suspicious_detection_config(fallback_cfg: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "max_segment_seconds": float(fallback_cfg.get("max_segment_seconds", 15.0)),
+        "sparse_chars_per_sec": float(fallback_cfg.get("sparse_chars_per_sec", 1.0)),
+        "repeat_threshold": max(2, int(fallback_cfg.get("repeat_threshold", 3))),
+    }
 
 
 def pad_suspicious_ranges(
@@ -462,7 +520,7 @@ def transcribe_qwen3_with_fallback(
     primary_segments, repair_stats = repair_qwen3_zero_duration_segments(primary_segments)
 
     total_duration = get_duration(source_wav)
-    suspicious = detect_qwen3_fallback_ranges(primary_segments, fallback_cfg)
+    suspicious = detect_suspicious_fallback_ranges(primary_segments, fallback_cfg)
     ranges = pad_suspicious_ranges(suspicious, total_duration, padding_seconds)
 
     asr_dir.mkdir(parents=True, exist_ok=True)
