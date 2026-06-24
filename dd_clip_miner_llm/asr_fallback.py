@@ -14,6 +14,19 @@ from .ffmpeg import cut_audio, get_duration
 from .models import TranscriptSegment
 
 _QWEN3_BACKENDS = {"qwen3", "qwen3_asr"}
+_VALID_MERGE_POLICIES = frozenset({"replace_ranges", "fill_gaps", "fill_fix_asr"})
+_DEFAULT_MERGE_POLICY = "fill_fix_asr"
+_DEFAULT_MIN_GAP_SECONDS = 10.0
+
+
+def normalize_merge_policy(policy: str | None) -> str:
+    normalized = str(policy or _DEFAULT_MERGE_POLICY)
+    if normalized not in _VALID_MERGE_POLICIES:
+        raise ValueError(
+            f"Unsupported ASR fallback merge_policy: {normalized}. "
+            f"Expected one of: {', '.join(sorted(_VALID_MERGE_POLICIES))}"
+        )
+    return normalized
 
 
 def faster_whisper_fallback_config(asr_config: dict[str, Any]) -> dict[str, Any]:
@@ -109,6 +122,155 @@ def merge_fill_gaps(
     return sorted([*primary_segments, *additions], key=lambda segment: (segment.start, segment.end))
 
 
+def collect_fallback_ranges(
+    segments: list[TranscriptSegment],
+    total_duration: float,
+    fallback_cfg: dict[str, Any],
+    merge_policy: str,
+) -> tuple[list[dict[str, Any]], str]:
+    policy = normalize_merge_policy(merge_policy)
+    padding_seconds = float(fallback_cfg.get("padding_seconds", 2.0))
+    min_gap_seconds = float(fallback_cfg.get("min_gap_seconds", _DEFAULT_MIN_GAP_SECONDS))
+    ranges: list[dict[str, Any]] = []
+    detection_parts: list[str] = []
+
+    if policy in {"replace_ranges", "fill_fix_asr"}:
+        suspicious = detect_suspicious_fallback_ranges(
+            segments,
+            _suspicious_detection_config(fallback_cfg),
+        )
+        fix_ranges = pad_suspicious_ranges(suspicious, total_duration, padding_seconds)
+        for item in fix_ranges:
+            item["range_kind"] = "fix"
+        ranges.extend(fix_ranges)
+        if fix_ranges:
+            detection_parts.append("suspicious_segments")
+
+    if policy in {"fill_gaps", "fill_fix_asr"}:
+        gaps = detect_transcript_gaps(segments, total_duration, min_gap_seconds)
+        fill_ranges = fallback_audio_ranges(gaps, total_duration, padding_seconds)
+        for item in fill_ranges:
+            item["range_kind"] = "fill"
+            existing = item.get("reasons")
+            if isinstance(existing, list):
+                item["reasons"] = sorted({*existing, "transcript_gap"})
+            else:
+                item["reasons"] = ["transcript_gap"]
+        ranges.extend(fill_ranges)
+        if fill_ranges:
+            detection_parts.append("gaps")
+
+    for index, item in enumerate(ranges):
+        item["index"] = index
+
+    if policy == "fill_fix_asr" and len(detection_parts) == 2:
+        range_detection = "gaps+suspicious_segments"
+    else:
+        range_detection = "+".join(detection_parts) if detection_parts else "none"
+    return ranges, range_detection
+
+
+def dedupe_transcription_ranges(ranges: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not ranges:
+        return []
+
+    sorted_ranges = sorted(
+        ranges,
+        key=lambda item: (float(item["padded_start"]), float(item["padded_end"])),
+    )
+    groups: list[dict[str, Any]] = []
+    for item in sorted_ranges:
+        padded_start = float(item["padded_start"])
+        padded_end = float(item["padded_end"])
+        if not groups or padded_start > float(groups[-1]["padded_end"]):
+            groups.append({
+                "padded_start": padded_start,
+                "padded_end": padded_end,
+                "padded_duration": padded_end - padded_start,
+                "source_ranges": [item],
+            })
+            continue
+        group = groups[-1]
+        group["padded_end"] = max(float(group["padded_end"]), padded_end)
+        group["padded_duration"] = float(group["padded_end"]) - float(group["padded_start"])
+        group["source_ranges"].append(item)
+
+    for index, group in enumerate(groups):
+        group["index"] = index
+    return groups
+
+
+def expand_deduped_fallback_results(transcribed_groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    expanded: list[dict[str, Any]] = []
+    for group in transcribed_groups:
+        segments = group.get("segments", [])
+        audio_path = group.get("audio_path")
+        transcription_group_index = int(group.get("index", 0))
+        for source in group.get("source_ranges", [group]):
+            expanded.append({
+                **source,
+                "segments": segments,
+                "audio_path": audio_path,
+                "transcription_group_index": transcription_group_index,
+            })
+    return sorted(expanded, key=lambda item: int(item["index"]))
+
+
+def _dedupe_transcript_segments(segments: list[TranscriptSegment]) -> list[TranscriptSegment]:
+    seen: set[tuple[float, float, str]] = set()
+    deduped: list[TranscriptSegment] = []
+    for segment in sorted(segments, key=lambda item: (item.start, item.end, item.text)):
+        key = (float(segment.start), float(segment.end), segment.text)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(segment)
+    return deduped
+
+
+def merge_fill_fix_asr(
+    primary_segments: list[TranscriptSegment],
+    fallback_items: list[dict[str, Any]],
+) -> list[TranscriptSegment]:
+    fix_items = [item for item in fallback_items if item.get("range_kind") == "fix"]
+    fill_items = [item for item in fallback_items if item.get("range_kind") == "fill"]
+    if fix_items and fill_items:
+        merged = merge_fill_gaps(merge_replace_ranges(primary_segments, fix_items), fill_items)
+    elif fix_items:
+        merged = merge_replace_ranges(primary_segments, fix_items)
+    elif fill_items:
+        merged = merge_fill_gaps(primary_segments, fill_items)
+    else:
+        merged = list(primary_segments)
+    return _dedupe_transcript_segments(merged)
+
+
+def merge_fallback_transcript(
+    primary_segments: list[TranscriptSegment],
+    fallback_items: list[dict[str, Any]],
+    merge_policy: str,
+) -> list[TranscriptSegment]:
+    policy = normalize_merge_policy(merge_policy)
+    if policy == "replace_ranges":
+        return merge_replace_ranges(primary_segments, fallback_items)
+    if policy == "fill_gaps":
+        return merge_fill_gaps(primary_segments, fallback_items)
+    return merge_fill_fix_asr(primary_segments, fallback_items)
+
+
+def _cleanup_fallback_audio_dir(asr_dir: Path, cleanup_fallback_audio: bool) -> None:
+    if not cleanup_fallback_audio:
+        return
+    fallback_audio_dir = asr_dir / "fallback_audio"
+    if not fallback_audio_dir.exists():
+        return
+    try:
+        shutil.rmtree(fallback_audio_dir)
+        print(f"  Cleaned up fallback audio: {fallback_audio_dir}")
+    except Exception as exc:
+        print(f"  Warning: failed to cleanup fallback audio: {exc}")
+
+
 def transcribe_with_fallback(
     source_wav: Path,
     asr_config: dict[str, Any],
@@ -118,12 +280,10 @@ def transcribe_with_fallback(
     fallback = faster_whisper_fallback_config(asr_config)
     primary_mode = str(fallback.get("primary_mode") or "batch")
     fallback_mode = str(fallback.get("fallback_mode") or "standard")
-    min_gap_seconds = float(fallback.get("min_gap_seconds", 4.0))
+    min_gap_seconds = float(fallback.get("min_gap_seconds", _DEFAULT_MIN_GAP_SECONDS))
     padding_seconds = float(fallback.get("padding_seconds", 2.0))
     max_workers = max(1, int(fallback.get("max_workers", 1)))
-    merge_policy = str(fallback.get("merge_policy") or "replace_ranges")
-    if merge_policy not in {"fill_gaps", "replace_ranges"}:
-        raise ValueError(f"Unsupported ASR fallback merge_policy: {merge_policy}")
+    merge_policy = normalize_merge_policy(fallback.get("merge_policy"))
 
     primary_settings = resolve_faster_whisper_mode_settings(asr_config, primary_mode)
     primary_backend = build_asr_backend(primary_settings)
@@ -131,17 +291,12 @@ def transcribe_with_fallback(
     primary_segments, repair_stats = repair_qwen3_zero_duration_segments(primary_segments)
     total_duration = get_duration(source_wav)
 
-    if merge_policy == "replace_ranges":
-        suspicious = detect_suspicious_fallback_ranges(
-            primary_segments,
-            _suspicious_detection_config(fallback),
-        )
-        ranges = pad_suspicious_ranges(suspicious, total_duration, padding_seconds)
-        range_detection = "suspicious_segments"
-    else:
-        gaps = detect_transcript_gaps(primary_segments, total_duration, min_gap_seconds)
-        ranges = fallback_audio_ranges(gaps, total_duration, padding_seconds)
-        range_detection = "gaps"
+    ranges, range_detection = collect_fallback_ranges(
+        primary_segments,
+        total_duration,
+        fallback,
+        merge_policy,
+    )
 
     asr_dir.mkdir(parents=True, exist_ok=True)
     (asr_dir / "transcript_primary.json").write_text(
@@ -154,67 +309,63 @@ def transcribe_with_fallback(
     )
 
     if not ranges:
-        metadata = {
-            "backend": "faster_whisper",
-            "primary_mode": primary_mode,
-            "fallback_mode": fallback_mode,
-            "min_gap_seconds": min_gap_seconds,
-            "padding_seconds": padding_seconds,
-            "max_workers": max_workers,
-            "merge_policy": merge_policy,
-            "range_detection": range_detection,
-            "primary_segment_count": len(primary_segments),
-            "fallback_range_count": 0,
-            "fallback_segment_count": 0,
-            "merged_segment_count": len(primary_segments),
-            "zero_duration_repair": repair_stats,
-        }
+        metadata = _build_fallback_metadata(
+            backend="faster_whisper",
+            fallback_cfg=fallback,
+            merge_policy=merge_policy,
+            range_detection=range_detection,
+            primary_segment_count=len(primary_segments),
+            fallback_range_count=0,
+            fallback_segment_count=0,
+            merged_segment_count=len(primary_segments),
+            zero_duration_repair=repair_stats,
+            extra={
+                "primary_mode": primary_mode,
+                "fallback_mode": fallback_mode,
+                "min_gap_seconds": min_gap_seconds,
+                "padding_seconds": padding_seconds,
+                "max_workers": max_workers,
+            },
+        )
         return primary_segments, metadata
 
-    fallback_segments = _run_fallback_ranges(
+    deduped_ranges = dedupe_transcription_ranges(ranges)
+    transcribed_groups = _run_fallback_ranges(
         source_wav,
         asr_config,
         fallback_mode,
-        ranges,
+        deduped_ranges,
         asr_dir / "fallback_audio",
         max_workers,
     )
+    fallback_segments = expand_deduped_fallback_results(transcribed_groups)
     (asr_dir / "fallback_segments.json").write_text(
         json.dumps(fallback_segments, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
 
-    if cleanup_fallback_audio:
-        fallback_audio_dir = asr_dir / "fallback_audio"
-        if fallback_audio_dir.exists():
-            try:
-                shutil.rmtree(fallback_audio_dir)
-                print(f"  Cleaned up fallback audio: {fallback_audio_dir}")
-            except Exception as exc:
-                print(f"  Warning: failed to cleanup fallback audio: {exc}")
+    _cleanup_fallback_audio_dir(asr_dir, cleanup_fallback_audio)
+    merged = merge_fallback_transcript(primary_segments, fallback_segments, merge_policy)
 
-    if merge_policy == "replace_ranges":
-        merged = merge_replace_ranges(primary_segments, fallback_segments)
-    else:
-        merged = merge_fill_gaps(primary_segments, fallback_segments)
-
-    metadata = {
-        "backend": "faster_whisper",
-        "primary_mode": primary_mode,
-        "fallback_mode": fallback_mode,
-        "min_gap_seconds": min_gap_seconds,
-        "padding_seconds": padding_seconds,
-        "max_workers": max_workers,
-        "merge_policy": merge_policy,
-        "range_detection": range_detection,
-        "primary_segment_count": len(primary_segments),
-        "fallback_range_count": len(ranges),
-        "fallback_segment_count": sum(len(item.get("segments", [])) for item in fallback_segments),
-        "merged_segment_count": len(merged),
-        "zero_duration_repair": repair_stats,
-    }
-    if merge_policy == "replace_ranges":
-        metadata.update(_suspicious_detection_config(fallback))
+    metadata = _build_fallback_metadata(
+        backend="faster_whisper",
+        fallback_cfg=fallback,
+        merge_policy=merge_policy,
+        range_detection=range_detection,
+        primary_segment_count=len(primary_segments),
+        fallback_range_count=len(ranges),
+        fallback_segment_count=sum(len(item.get("segments", [])) for item in fallback_segments),
+        merged_segment_count=len(merged),
+        zero_duration_repair=repair_stats,
+        extra={
+            "primary_mode": primary_mode,
+            "fallback_mode": fallback_mode,
+            "min_gap_seconds": min_gap_seconds,
+            "padding_seconds": padding_seconds,
+            "max_workers": max_workers,
+            "transcription_group_count": len(deduped_ranges),
+        },
+    )
     return merged, metadata
 
 
@@ -395,6 +546,40 @@ def _suspicious_detection_config(fallback_cfg: dict[str, Any]) -> dict[str, Any]
     }
 
 
+def _build_fallback_metadata(
+    *,
+    backend: str,
+    fallback_cfg: dict[str, Any],
+    merge_policy: str,
+    range_detection: str,
+    primary_segment_count: int,
+    fallback_range_count: int,
+    fallback_segment_count: int,
+    merged_segment_count: int,
+    zero_duration_repair: dict[str, Any],
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    metadata: dict[str, Any] = {
+        "backend": backend,
+        "merge_policy": merge_policy,
+        "range_detection": range_detection,
+        "primary_segment_count": primary_segment_count,
+        "fallback_range_count": fallback_range_count,
+        "fallback_segment_count": fallback_segment_count,
+        "merged_segment_count": merged_segment_count,
+        "zero_duration_repair": zero_duration_repair,
+    }
+    if extra:
+        metadata.update(extra)
+    if merge_policy in {"replace_ranges", "fill_fix_asr"}:
+        metadata.update(_suspicious_detection_config(fallback_cfg))
+    if merge_policy in {"fill_gaps", "fill_fix_asr"}:
+        metadata["min_gap_seconds"] = float(
+            fallback_cfg.get("min_gap_seconds", _DEFAULT_MIN_GAP_SECONDS)
+        )
+    return metadata
+
+
 def pad_suspicious_ranges(
     ranges: list[dict[str, Any]],
     total_duration: float,
@@ -519,17 +704,19 @@ def transcribe_qwen3_with_fallback(
     chunk_seconds = int(fallback_cfg.get("chunk_seconds", 5))
     padding_seconds = float(fallback_cfg.get("padding_seconds", 2.0))
     max_workers = max(1, int(fallback_cfg.get("max_workers", 1)))
-    merge_policy = str(fallback_cfg.get("merge_policy") or "replace_ranges")
-    if merge_policy != "replace_ranges":
-        raise ValueError(f"Unsupported Qwen3 fallback merge_policy: {merge_policy}")
+    merge_policy = normalize_merge_policy(fallback_cfg.get("merge_policy"))
 
     primary_backend = build_asr_backend(asr_config, runtime_context={"asr_dir": asr_dir})
     primary_segments = primary_backend.transcribe(source_wav)
     primary_segments, repair_stats = repair_qwen3_zero_duration_segments(primary_segments)
 
     total_duration = get_duration(source_wav)
-    suspicious = detect_suspicious_fallback_ranges(primary_segments, fallback_cfg)
-    ranges = pad_suspicious_ranges(suspicious, total_duration, padding_seconds)
+    ranges, range_detection = collect_fallback_ranges(
+        primary_segments,
+        total_duration,
+        fallback_cfg,
+        merge_policy,
+    )
 
     asr_dir.mkdir(parents=True, exist_ok=True)
     (asr_dir / "transcript_primary.json").write_text(
@@ -542,54 +729,58 @@ def transcribe_qwen3_with_fallback(
     )
 
     if not ranges:
-        metadata = {
-            "backend": "qwen3_asr",
-            "chunk_seconds": chunk_seconds,
-            "padding_seconds": padding_seconds,
-            "max_workers": max_workers,
-            "merge_policy": merge_policy,
-            "primary_segment_count": len(primary_segments),
-            "fallback_range_count": 0,
-            "fallback_segment_count": 0,
-            "merged_segment_count": len(primary_segments),
-            "zero_duration_repair": repair_stats,
-        }
+        metadata = _build_fallback_metadata(
+            backend="qwen3_asr",
+            fallback_cfg=fallback_cfg,
+            merge_policy=merge_policy,
+            range_detection=range_detection,
+            primary_segment_count=len(primary_segments),
+            fallback_range_count=0,
+            fallback_segment_count=0,
+            merged_segment_count=len(primary_segments),
+            zero_duration_repair=repair_stats,
+            extra={
+                "chunk_seconds": chunk_seconds,
+                "padding_seconds": padding_seconds,
+                "max_workers": max_workers,
+            },
+        )
         return primary_segments, metadata
 
-    fallback_segments = _run_qwen3_fallback_ranges(
+    deduped_ranges = dedupe_transcription_ranges(ranges)
+    transcribed_groups = _run_qwen3_fallback_ranges(
         source_wav,
         asr_config,
-        ranges,
+        deduped_ranges,
         asr_dir / "fallback_audio",
         max_workers,
         chunk_seconds=chunk_seconds,
         asr_dir=asr_dir,
     )
+    fallback_segments = expand_deduped_fallback_results(transcribed_groups)
     (asr_dir / "fallback_segments.json").write_text(
         json.dumps(fallback_segments, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
 
-    if cleanup_fallback_audio:
-        fallback_audio_dir = asr_dir / "fallback_audio"
-        if fallback_audio_dir.exists():
-            try:
-                shutil.rmtree(fallback_audio_dir)
-                print(f"  Cleaned up fallback audio: {fallback_audio_dir}")
-            except Exception as exc:
-                print(f"  Warning: failed to cleanup fallback audio: {exc}")
+    _cleanup_fallback_audio_dir(asr_dir, cleanup_fallback_audio)
+    merged = merge_fallback_transcript(primary_segments, fallback_segments, merge_policy)
 
-    merged = merge_replace_ranges(primary_segments, fallback_segments)
-    metadata = {
-        "backend": "qwen3_asr",
-        "chunk_seconds": chunk_seconds,
-        "padding_seconds": padding_seconds,
-        "max_workers": max_workers,
-        "merge_policy": merge_policy,
-        "primary_segment_count": len(primary_segments),
-        "fallback_range_count": len(ranges),
-        "fallback_segment_count": sum(len(item.get("segments", [])) for item in fallback_segments),
-        "merged_segment_count": len(merged),
-        "zero_duration_repair": repair_stats,
-    }
+    metadata = _build_fallback_metadata(
+        backend="qwen3_asr",
+        fallback_cfg=fallback_cfg,
+        merge_policy=merge_policy,
+        range_detection=range_detection,
+        primary_segment_count=len(primary_segments),
+        fallback_range_count=len(ranges),
+        fallback_segment_count=sum(len(item.get("segments", [])) for item in fallback_segments),
+        merged_segment_count=len(merged),
+        zero_duration_repair=repair_stats,
+        extra={
+            "chunk_seconds": chunk_seconds,
+            "padding_seconds": padding_seconds,
+            "max_workers": max_workers,
+            "transcription_group_count": len(deduped_ranges),
+        },
+    )
     return merged, metadata

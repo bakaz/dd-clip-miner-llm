@@ -160,7 +160,8 @@ class TestConfig:
         funasr = local["funasr"]
         assert funasr["device"] == "auto"
         assert funasr["fallback"]["enabled"] is True
-        assert funasr["fallback"]["merge_policy"] == "replace_ranges"
+        assert funasr["fallback"]["merge_policy"] == "fill_fix_asr"
+        assert funasr["fallback"]["min_gap_seconds"] == 10.0
         assert local["gpu"]["funasr"]["model"] == "Qwen/Qwen3-ASR-1.7B"
         assert local["cpu"]["backend"] == "faster_whisper"
         assert "funasr" not in local["cpu"]
@@ -763,6 +764,103 @@ class TestASRFallback:
         assert "tail" in texts
         assert "嗯" not in texts
         assert "fixed" in texts
+
+    def test_collect_fallback_ranges_fill_fix_asr_includes_gap_and_suspicious(self):
+        from dd_clip_miner_llm.asr_fallback import collect_fallback_ranges
+
+        segments = [
+            TranscriptSegment(0.0, 5.0, "keep"),
+            TranscriptSegment(40.0, 45.0, "tail"),
+            TranscriptSegment(18.0, 35.0, "嗯"),
+        ]
+        ranges, detection = collect_fallback_ranges(
+            segments,
+            total_duration=50.0,
+            fallback_cfg={
+                "min_gap_seconds": 10.0,
+                "padding_seconds": 2.0,
+                "max_segment_seconds": 15.0,
+                "sparse_chars_per_sec": 1.0,
+                "repeat_threshold": 3,
+            },
+            merge_policy="fill_fix_asr",
+        )
+
+        kinds = {item["range_kind"] for item in ranges}
+        assert kinds == {"fill", "fix"}
+        assert detection == "gaps+suspicious_segments"
+        assert any("transcript_gap" in item.get("reasons", []) for item in ranges if item["range_kind"] == "fill")
+
+    def test_dedupe_transcription_ranges_merges_overlap(self):
+        from dd_clip_miner_llm.asr_fallback import dedupe_transcription_ranges
+
+        ranges = [
+            {"index": 0, "range_kind": "fill", "start": 10.0, "end": 20.0, "padded_start": 8.0, "padded_end": 22.0},
+            {"index": 1, "range_kind": "fix", "start": 15.0, "end": 30.0, "padded_start": 13.0, "padded_end": 32.0},
+        ]
+        deduped = dedupe_transcription_ranges(ranges)
+
+        assert len(deduped) == 1
+        assert deduped[0]["padded_start"] == 8.0
+        assert deduped[0]["padded_end"] == 32.0
+        assert len(deduped[0]["source_ranges"]) == 2
+
+    def test_transcribe_with_fallback_fill_fix_asr_fixes_and_fills(self, tmp_path, monkeypatch):
+        from copy import deepcopy
+        from dd_clip_miner_llm import asr_fallback
+
+        source = tmp_path / "source.wav"
+        source.write_bytes(b"fake")
+        asr_dir = tmp_path / "02_asr"
+        config = deepcopy(DEFAULT_CONFIG["asr"])
+        config["local"]["backend"] = "faster_whisper"
+        config["local"]["faster_whisper"]["fallback"]["merge_policy"] = "fill_fix_asr"
+        config["local"]["faster_whisper"]["fallback"]["min_gap_seconds"] = 10.0
+
+        class Backend:
+            def __init__(self, mode):
+                self.mode = mode
+                self.calls = 0
+
+            def transcribe(self, _path):
+                self.calls += 1
+                if self.mode == "batched":
+                    return [
+                        TranscriptSegment(0.0, 5.0, "keep"),
+                        TranscriptSegment(40.0, 45.0, "tail"),
+                        TranscriptSegment(18.0, 35.0, "嗯"),
+                    ]
+                return [TranscriptSegment(12.0, 14.0, "recovered")]
+
+        backends: list[Backend] = []
+
+        def fake_build_backend(settings):
+            backend = Backend(settings["inference_mode"])
+            backends.append(backend)
+            return backend
+
+        def fake_cut_audio(_source, target, _start, _end):
+            Path(target).write_bytes(b"range")
+            return Path(target)
+
+        monkeypatch.setattr(asr_fallback, "build_asr_backend", fake_build_backend)
+        monkeypatch.setattr(asr_fallback, "cut_audio", fake_cut_audio)
+        monkeypatch.setattr(asr_fallback, "get_duration", lambda _path: 50.0)
+
+        segments, metadata = asr_fallback.transcribe_with_fallback(source, config, asr_dir)
+
+        assert metadata["merge_policy"] == "fill_fix_asr"
+        assert metadata["range_detection"] == "gaps+suspicious_segments"
+        assert metadata["fallback_range_count"] == 2
+        texts = [segment.text for segment in segments]
+        assert "keep" in texts
+        assert "tail" in texts
+        assert "嗯" not in texts
+        assert texts.count("recovered") == 1
+        assert metadata["transcription_group_count"] == 1
+        fallback_backends = [backend for backend in backends if backend.mode == "standard"]
+        assert len(fallback_backends) == 1
+        assert fallback_backends[0].calls == 1
 
 
 class TestSongMissedRecheck:

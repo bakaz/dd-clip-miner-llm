@@ -8,9 +8,11 @@ import pytest
 
 from dd_clip_miner_llm.asr_fallback import (
     _build_qwen3_local_config,
+    collect_fallback_ranges,
     detect_qwen3_fallback_ranges,
     faster_whisper_fallback_config,
     is_qwen3_fallback_enabled,
+    merge_fill_fix_asr,
     merge_replace_ranges,
     qwen3_fallback_config,
     transcribe_qwen3_with_fallback,
@@ -70,6 +72,55 @@ class TestFallbackDetection:
         })
         assert len(ranges) == 1
         assert "repeated_segment" in ranges[0]["reasons"]
+
+
+class TestMergeFillFixAsr:
+    def test_merge_fill_fix_asr_replaces_fix_and_fills_gap(self):
+        primary = [
+            TranscriptSegment(0.0, 5.0, "keep"),
+            TranscriptSegment(40.0, 45.0, "tail"),
+            TranscriptSegment(18.0, 35.0, "bad"),
+        ]
+        fallback_items = [
+            {
+                "range_kind": "fix",
+                "start": 18.0,
+                "end": 35.0,
+                "padded_start": 16.0,
+                "padded_end": 37.0,
+                "segments": [{"start": 12.0, "end": 14.0, "text": "recovered"}],
+            },
+            {
+                "range_kind": "fill",
+                "start": 5.0,
+                "end": 18.0,
+                "padded_start": 3.0,
+                "padded_end": 20.0,
+                "segments": [{"start": 12.0, "end": 14.0, "text": "recovered"}],
+            },
+        ]
+        merged = merge_fill_fix_asr(primary, fallback_items)
+        texts = [segment.text for segment in merged]
+        assert "keep" in texts
+        assert "tail" in texts
+        assert "bad" not in texts
+        assert texts.count("recovered") == 1
+
+    def test_collect_fallback_ranges_fill_fix_asr_detects_gap(self):
+        segments = [
+            TranscriptSegment(0.0, 5.0, "hello"),
+            TranscriptSegment(20.0, 25.0, "world"),
+        ]
+        ranges, detection = collect_fallback_ranges(
+            segments,
+            total_duration=30.0,
+            fallback_cfg={"min_gap_seconds": 10.0, "padding_seconds": 2.0},
+            merge_policy="fill_fix_asr",
+        )
+        assert detection == "gaps"
+        assert len(ranges) == 1
+        assert ranges[0]["range_kind"] == "fill"
+        assert ranges[0]["reasons"] == ["transcript_gap"]
 
 
 class TestMergeReplaceRanges:

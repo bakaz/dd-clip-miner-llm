@@ -67,7 +67,8 @@ asr:
         repeat_threshold: 3           # 同文本连续重复 ≥N 次视为 ASR 幻觉，触发回退
         padding_seconds: 2.0          # 回退切片在问题区间两侧各扩展 (秒)
         max_workers: 1                # 回退并行线程数；1 更稳，显存/CPU 紧时可保持 1
-        merge_policy: replace_ranges  # replace_ranges=用回退结果替换原区间
+        min_gap_seconds: 10.0         # transcript 间隙 ≥N 秒触发 fill；默认 10s 平衡覆盖与回退次数
+        merge_policy: fill_fix_asr    # fill_fix_asr=补间隙+修坏段 | replace_ranges | fill_gaps
         zero_duration_policy: merge_adjacent  # 零时长段: merge_adjacent=并入邻段
 
     # --- faster_whisper：Whisper 本地推理 ---
@@ -98,13 +99,13 @@ asr:
         enabled: true                 # true=batch 质量差时自动用 standard 重跑问题区间
         primary_mode: batch           # 首选推理模式名，对应上面 batch/standard 节
         fallback_mode: standard       # 回退目标模式
-        min_gap_seconds: 4.0          # transcript 中静音间隙 ≥N 秒才触发回退
+        min_gap_seconds: 10.0         # transcript 间隙 ≥N 秒触发 fill；可调低(4)或调高(30)
         padding_seconds: 2.0          # 回退音频区间两侧扩展 (秒)
         max_workers: 1                # 回退并行度
         max_segment_seconds: 15.0     # 回退段最长 (秒)
         sparse_chars_per_sec: 1.0     # 稀疏判定阈值 (字/秒)
         repeat_threshold: 3           # 重复幻觉判定次数
-        merge_policy: replace_ranges  # 回退结果合并策略
+        merge_policy: fill_fix_asr    # fill_fix_asr=补间隙+修坏段 | replace_ranges | fill_gaps
 
     # --- gpu：有 CUDA 时自动合并到此节 ---
     # 【流程】device=auto 且检测到 GPU → funasr/faster_whisper 参数被本节覆盖。

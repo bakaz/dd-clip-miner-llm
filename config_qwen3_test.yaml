@@ -38,7 +38,8 @@ asr:
         repeat_threshold: 3
         padding_seconds: 2.0
         max_workers: 1
-        merge_policy: replace_ranges
+        min_gap_seconds: 10.0
+        merge_policy: fill_fix_asr
         zero_duration_policy: merge_adjacent
 
     faster_whisper:
@@ -58,7 +59,8 @@ asr:
         enabled: true                 # batch→standard 回退
         primary_mode: batch
         fallback_mode: standard
-        merge_policy: replace_ranges
+        min_gap_seconds: 10.0
+        merge_policy: fill_fix_asr
 
     gpu:
       funasr:
