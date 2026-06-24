@@ -3,14 +3,16 @@
 核心步骤为 `pip install -e .`（依赖定义见 pyproject.toml）。可选：
   - `.[funasr]`  FunASR / Qwen3-ASR
   - `.[test]`    pytest
-  - requirements-cu12.txt  faster-whisper GPU
+  - requirements-cu12.txt  faster-whisper GPU (CUDA 12, CC ≤ 9.0)
+  - requirements-cu13.txt  PyTorch cu130 + GPU (CUDA 13, CC ≥ 12.0)
 
 用法：
-    python install.py                    # 自动检测并安装
-    python install.py --config install.yaml  # 使用配置文件
-    python install.py --check            # 只检查环境，不安装
-    python install.py --dev              # 含测试工具
-    python install.py --gpu cuda12       # 指定 GPU 类型
+    python install.py                         # 自动检测并安装
+    python install.py --config install.yaml   # 使用配置文件
+    python install.py --check                 # 只检查环境，不安装
+    python install.py --dev                   # 含测试工具
+    python install.py --gpu cuda12            # 强制 CUDA 12
+    python install.py --gpu cuda13            # 强制 CUDA 13 (Blackwell)
 """
 from __future__ import annotations
 
@@ -32,9 +34,11 @@ class SystemInfo:
     os_version: str = ""
     python_version: str = ""
     has_cuda: bool = False
-    cuda_version: str | None = None
+    cuda_version: str | None = None        # nvcc --version (installed CUDA toolkit)
+    cuda_driver_version: str | None = None # nvidia-smi header (max CUDA driver supports)
     gpu_name: str | None = None
     gpu_memory_mb: int | None = None
+    gpu_cc_major: int | None = None        # compute capability major (e.g. 12 for Blackwell)
     has_ffmpeg: bool = False
     ffmpeg_version: str | None = None
     has_ffprobe: bool = False
@@ -49,7 +53,7 @@ class InstallConfig:
     asr_backend: str = "faster_whisper"  # faster_whisper | funasr
     
     # GPU 支持
-    gpu_type: str = "auto"  # auto | cuda12 | cpu
+    gpu_type: str = "auto"  # auto | cuda12 | cuda13 | cpu
     
     # 可选组件
     install_funasr: bool = False
@@ -72,7 +76,8 @@ def detect_system() -> SystemInfo:
     info.python_version = platform.python_version()
     
     # GPU 检测
-    info.has_cuda, info.cuda_version, info.gpu_name, info.gpu_memory_mb = _detect_gpu()
+    (info.has_cuda, info.cuda_version, info.gpu_name,
+     info.gpu_memory_mb, info.cuda_driver_version, info.gpu_cc_major) = _detect_gpu()
     
     # FFmpeg 检测
     info.has_ffmpeg, info.ffmpeg_version = _detect_ffmpeg()
@@ -85,8 +90,12 @@ def detect_system() -> SystemInfo:
     return info
 
 
-def _detect_gpu() -> tuple[bool, str | None, str | None, int | None]:
-    """检测 GPU 信息"""
+def _detect_gpu() -> tuple[bool, str | None, str | None, int | None, str | None, int | None]:
+    """检测 GPU 信息
+
+    Returns:
+        (has_cuda, cuda_toolkit_version, gpu_name, gpu_memory_mb, cuda_driver_version, gpu_cc_major)
+    """
     # 尝试 nvidia-smi
     try:
         result = subprocess.run(
@@ -102,23 +111,29 @@ def _detect_gpu() -> tuple[bool, str | None, str | None, int | None]:
                     memory_mb = int(memory_str)
                 except ValueError:
                     memory_mb = None
-                
-                # 检测 CUDA 版本
+
+                # 检测 CUDA Toolkit 版本（nvcc）
                 cuda_result = subprocess.run(
                     ["nvcc", "--version"],
                     capture_output=True, text=True, timeout=10
                 )
-                cuda_version = None
+                cuda_toolkit_version = None
                 if cuda_result.returncode == 0:
                     for line in cuda_result.stdout.splitlines():
                         if "release" in line:
-                            cuda_version = line.split("release")[-1].strip().split(",")[0]
+                            cuda_toolkit_version = line.split("release")[-1].strip().split(",")[0]
                             break
-                
-                return True, cuda_version, gpu_name, memory_mb
+
+                # 检测 Driver CUDA 版本（nvidia-smi 表头 "CUDA Version: X.Y"）
+                cuda_driver_version = _detect_cuda_driver_version()
+
+                # 检测 Compute Capability
+                gpu_cc_major = _detect_gpu_cc_major()
+
+                return True, cuda_toolkit_version, gpu_name, memory_mb, cuda_driver_version, gpu_cc_major
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
-    
+
     # 尝试通过 PowerShell 检测 Intel/AMD GPU
     if platform.system() == "Windows":
         try:
@@ -139,16 +154,53 @@ def _detect_gpu() -> tuple[bool, str | None, str | None, int | None]:
                         continue
                     if ram and ram > 0:
                         memory_mb = ram // (1024 * 1024)
-                        return False, None, name, memory_mb
+                        return False, None, name, memory_mb, None, None
                 # 如果没有找到有 RAM 的，返回第一个非虚拟 GPU
                 for gpu in data:
                     name = gpu.get("Name", "")
                     if name and "Remote" not in name and "Virtual" not in name:
-                        return False, None, name, None
+                        return False, None, name, None, None, None
         except Exception:
             pass
-    
-    return False, None, None, None
+
+    return False, None, None, None, None, None
+
+
+def _detect_cuda_driver_version() -> str | None:
+    """从 nvidia-smi 表头解析驱动支持的 CUDA 版本（如 "13.2"）。"""
+    try:
+        header_result = subprocess.run(
+            ["nvidia-smi"],
+            capture_output=True, text=True, timeout=10
+        )
+        if header_result.returncode == 0:
+            import re
+            for line in header_result.stdout.splitlines():
+                m = re.search(r'CUDA Version:\s*([\d.]+)', line)
+                if m:
+                    return m.group(1)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    return None
+
+
+def _detect_gpu_cc_major() -> int | None:
+    """检测 GPU Compute Capability 主版本号（如 RTX 5070 Ti = 12）。"""
+    try:
+        # Try nvidia-smi -q -d COMPUTE
+        result = subprocess.run(
+            ["nvidia-smi", "-q", "-d", "COMPUTE"],
+            capture_output=True, text=True, timeout=10
+        )
+        if result.returncode == 0:
+            import re
+            for line in result.stdout.splitlines():
+                m = re.search(r'Compute\s+Capability\s*:\s*(\d+)\.', line)
+                if m:
+                    return int(m.group(1))
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    return None
 
 
 def _detect_ffmpeg() -> tuple[bool, str | None]:
@@ -390,37 +442,52 @@ def generate_install_plan(info: SystemInfo, config: InstallConfig) -> list[dict[
             "check": _detect_mkvmerge,
             "custom_install": _install_mkvmerge,
         })
-    
+
     # 1. 核心依赖（editable install，元数据见 pyproject.toml）
     steps.append({
         "name": "核心依赖",
         "command": [sys.executable, "-m", "pip", "install", "-e", "."],
         "check": lambda: _check_package("dd_clip_miner_llm"),
     })
-    
-    # 2. GPU 支持
+
+    # 2. GPU 支持 — 自动检测 CUDA 版本
     gpu_type = config.gpu_type
     if gpu_type == "auto":
-        if info.has_cuda and info.cuda_version and info.cuda_version.startswith("12"):
-            gpu_type = "cuda12"
-        else:
-            gpu_type = "cpu"
-    
-    if gpu_type == "cuda12":
+        gpu_type = _auto_detect_gpu_type(info)
+
+    needs_cuda = gpu_type in ("cuda12", "cuda13")
+    requirements_file = {"cuda12": "requirements-cu12.txt", "cuda13": "requirements-cu13.txt"}[gpu_type] if needs_cuda else None
+
+    # 2a. CUDA PyTorch —— 必须在 FunASR 之前安装
+    #     [funasr] extra 会从 PyPI 拉 CPU torch；先装 CUDA torch 可以避免被覆盖
+    if needs_cuda and (config.asr_backend == "funasr" or config.install_funasr):
+        torch_index = "https://download.pytorch.org/whl/cu130" if gpu_type == "cuda13" else "https://download.pytorch.org/whl/cu121"
         steps.append({
-            "name": "CUDA 12 支持",
-            "command": [sys.executable, "-m", "pip", "install", "-r", "requirements-cu12.txt"],
+            "name": f"CUDA PyTorch ({gpu_type})",
+            "command": [
+                sys.executable, "-m", "pip", "install",
+                "torch>=2.12.0", "torchaudio>=2.12.0",
+                "--extra-index-url", torch_index,
+            ],
+            "check": _check_cuda_torch,
+        })
+
+    # 2b. CUDA 支持库（ctranslate2 + nvidia DLLs）
+    if needs_cuda and requirements_file:
+        steps.append({
+            "name": f"CUDA 支持库 ({gpu_type})",
+            "command": [sys.executable, "-m", "pip", "install", "-r", requirements_file],
             "check": lambda: _check_package("ctranslate2"),
         })
-    
-    # 3. FunASR 后端
+
+    # 3. FunASR 后端（此时 CUDA torch 已就位，不会被 CPU 版覆盖）
     if config.asr_backend == "funasr" or config.install_funasr:
         steps.append({
             "name": "FunASR 后端",
             "command": [sys.executable, "-m", "pip", "install", "-e", ".[funasr]"],
             "check": lambda: _check_package("funasr"),
         })
-    
+
     # 4. 开发/测试工具
     if config.install_dev_tools:
         steps.append({
@@ -428,8 +495,40 @@ def generate_install_plan(info: SystemInfo, config: InstallConfig) -> list[dict[
             "command": [sys.executable, "-m", "pip", "install", "-e", ".[test]"],
             "check": lambda: _check_package("pytest"),
         })
-    
+
     return steps
+
+
+def _auto_detect_gpu_type(info: SystemInfo) -> str:
+    """根据 SystemInfo 自动判断应使用哪个 CUDA 版本。"""
+    # 优先看 Compute Capability：CC >= 12 需要 cu130
+    if info.gpu_cc_major is not None and info.gpu_cc_major >= 12:
+        return "cuda13"
+
+    # 次优先：Driver CUDA 版本 >= 13
+    if info.cuda_driver_version:
+        major = int(info.cuda_driver_version.split(".")[0])
+        if major >= 13:
+            return "cuda13"
+
+    # Toolkit CUDA 版本以 "12" 开头 → cu12
+    if info.cuda_version and info.cuda_version.startswith("12"):
+        return "cuda12"
+
+    # 有 NVIDIA GPU 但版本未知 — 默认 cu130（cu130 向后兼容 cuda12.x driver）
+    if info.has_cuda:
+        return "cuda13"
+
+    return "cpu"
+
+
+def _check_cuda_torch() -> bool:
+    """检查 PyTorch 是否已安装且 CUDA 可用。"""
+    try:
+        import torch  # noqa: F811
+        return torch.cuda.is_available()
+    except Exception:
+        return False
 
 
 def _check_package(package_name: str) -> bool:
@@ -508,8 +607,11 @@ def print_system_info(info: SystemInfo) -> None:
         print(f"GPU: {info.gpu_name}")
         if info.gpu_memory_mb:
             print(f"  显存: {info.gpu_memory_mb} MB")
+        if info.gpu_cc_major is not None:
+            print(f"  Compute Capability: {info.gpu_cc_major}.x")
         if info.has_cuda:
-            print(f"  CUDA: {info.cuda_version}")
+            print(f"  CUDA Toolkit: {info.cuda_version or '未安装'}")
+            print(f"  Driver CUDA: {info.cuda_driver_version or '未知'}")
         else:
             print(f"  类型: 非 NVIDIA (无 CUDA)")
     else:
@@ -526,7 +628,7 @@ def main():
     parser = argparse.ArgumentParser(description="智能安装脚本")
     parser.add_argument("--config", help="安装配置文件路径")
     parser.add_argument("--check", action="store_true", help="只检查环境，不安装")
-    parser.add_argument("--gpu", choices=["auto", "cuda12", "cpu"], default="auto", help="GPU 类型")
+    parser.add_argument("--gpu", choices=["auto", "cuda12", "cuda13", "cpu"], default="auto", help="GPU 类型")
     parser.add_argument("--asr", choices=["faster_whisper", "funasr"], default="faster_whisper", help="ASR 后端")
     parser.add_argument("--funasr", action="store_true", help="安装 FunASR 支持")
     parser.add_argument("--no-funasr", action="store_true", help="不安装 FunASR 支持")
@@ -588,11 +690,12 @@ def main():
         print("\n下一步：")
         if platform.system() == "Windows":
             print("  1. 复制配置文件: copy config.example.yaml config.yaml")
-            print("  2. 设置 API key: $env:LLM_API_KEY='your-key'")
+            print("  2. 设置 API key: $env:OPENCODE_API_KEY='your-key'  # 或 DEEPSEEK_API_KEY / MIMO_API_KEY")
         else:
             print("  1. 复制配置文件: cp config.example.yaml config.yaml")
-            print("  2. 设置 API key: export LLM_API_KEY='your-key'")
-        print("  3. 运行: python -m dd_clip_miner_llm run video.mp4 --config config.yaml")
+            print("  2. 设置 API key: export OPENCODE_API_KEY='your-key'  # 或 DEEPSEEK_API_KEY / MIMO_API_KEY")
+        print("  3. GPU 生产管线: python install.py --gpu cuda13 --funasr  (已安装可跳过)")
+        print("  4. 运行: python -m dd_clip_miner_llm run video.mp4 --config config.yaml")
     else:
         print("\n✗ 安装过程中出现错误，请检查日志。")
         sys.exit(1)

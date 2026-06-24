@@ -46,7 +46,7 @@
 
 ```powershell
 cd path\to\dd-clip-miner-llm
-python install.py
+python install.py --gpu cuda13 --funasr   # GPU 生产管线；无 GPU 可用 python install.py
 
 copy config.example.yaml config.yaml
 $env:OPENCODE_API_KEY = "<your-api-key>"      # 或设置 DEEPSEEK_API_KEY / MIMO_API_KEY
@@ -67,10 +67,11 @@ python install.py                          # 自动检测并安装
 python install.py --config install.yaml    # 使用配置文件
 python install.py --check                  # 只检测环境，不安装
 python install.py --dev                    # 含 pytest
-python install.py --gpu cuda12             # 指定 GPU 类型
+python install.py --gpu cuda13             # 指定 CUDA 13 (Blackwell / RTX 50xx)
+python install.py --gpu cuda12             # 指定 CUDA 12 (Ampere / Ada)
 ```
 
-自动检测 FFmpeg / mkvmerge / GPU，执行 `pip install -e .`，可选安装 `[funasr]`、`requirements-cu12.txt`、`[test]`。
+自动检测 FFmpeg / mkvmerge / GPU，执行 `pip install -e .`，可选安装 `[funasr]`、`requirements-cu13.txt` / `requirements-cu12.txt`、`[test]`。Blackwell GPU (RTX 50xx, CC ≥ 12.0) 默认走 cu130；Ampere/Ada (CC 8.x–9.x) 走 cu121。
 
 ### 手动安装
 
@@ -80,9 +81,14 @@ py -3.12 -m venv .venv
 python -m pip install -U pip
 pip install -e .                           # 核心依赖
 pip install -e ".[test]"                   # 可选：pytest
-pip install -e ".[funasr]"                 # 可选：FunASR
-pip install -r requirements-cu12.txt       # 可选：CUDA 12 GPU
+pip install -e ".[funasr]"                 # 可选：FunASR（会拉 CPU torch）
+
+# GPU 支持（二选一，按显卡架构）：
+pip install -r requirements-cu13.txt       # Blackwell / RTX 50xx (CUDA 13)
+pip install -r requirements-cu12.txt       # Ampere / Ada (CUDA 12)
 ```
+
+> **注意**：`[funasr]` 会从 PyPI 拉 CPU-only torch。先装 CUDA torch 再装 funasr 可避免被覆盖（`install.py` 已处理此顺序）。手动安装时建议先 `pip install -r requirements-cu13.txt`，再 `pip install -e ".[funasr]"`。
 
 ### 系统依赖
 
@@ -92,7 +98,7 @@ pip install -r requirements-cu12.txt       # 可选：CUDA 12 GPU
 | mkvmerge | 多段合并（可选，更稳） | `winget install MKVToolNix` |
 | libsndfile | soundfile（Linux CI 需 `libsndfile1`） | 一般随环境已有 |
 
-无 mkvmerge 时合并回退纯 FFmpeg。无 CUDA 12 DLL 时 faster-whisper 回退 CPU。
+无 mkvmerge 时合并回退纯 FFmpeg。无 CUDA DLL 时 faster-whisper 回退 CPU。
 
 `setup.py` 仅为 setuptools 入口（`pip install -e .` 需要）。
 
@@ -109,17 +115,20 @@ python -m dd_clip_miner_llm init-config --out config.yaml
 |------|------|
 | `config.example.yaml` | 主配置模板（含注释） |
 | `config.daily-summary.example.yaml` | 仅当天总结 |
+| `cut_copy.example.conf` | 录播自动处理工作流（复制为 `cut_copy.conf`） |
 | `streamer_dictionary.example.json` | 主播词典 |
 
-**勿提交**（已在 `.gitignore`）：`config.yaml`、`streamer_dictionary.json`、`runs/`。
+**勿提交**（已在 `.gitignore`）：`config.yaml`、`cut_copy.conf`、`streamer_dictionary.json`、`runs/`。
 
 ASR 使用 `asr.mode: local | remote` 新结构（见 `config.example.yaml`）：
 
-- 本地：`local.backend: faster_whisper | funasr`
-- faster-whisper 默认拆成 `batch` 和 `standard` 两个模式：先用 `small + batched + vad_filter=true` 跑完整音频，再对 `>= 4s` 的 ASR 空洞用 `turbo + standard + vad_filter=false` 补漏。
-- 补漏结果会写回最终 `02_asr/transcript.json`，并额外保留 `transcript_primary.json`、`fallback_ranges.json`、`fallback_segments.json` 供审计。
+- **硬件自动分流**（`device: auto` + `local.gpu` / `local.cpu`）：
+  - **GPU（默认 backend: qwen3_asr）**：Qwen3-1.7B + chunk180 + funasr fallback；FW **turbo** 供对比/fallback
+  - **CPU（自动切 backend: faster_whisper）**：FW **small** + `int8` batch 主路径 + standard fallback
+  - 安装 GPU 生产管线：`python install.py --gpu cuda13 --funasr`
+- 二轮 fallback 结果会写回 `02_asr/transcript.json`，并保留 `transcript_primary.json`、`fallback_ranges.json`、`fallback_segments.json` 供审计。
 
-**faster-whisper 设备自动检测**：设置 `device: auto` + `compute_type: default` 时，系统自动检测 CUDA 可用性。有 GPU 时使用 float16，无 GPU（CPU）时自动切换 `int8` 以获得最佳性能。无需手动配置 `gpu:`/`cpu:` 分流节。
+**硬件分流**：`funasr`/`faster_whisper` 设 `device: auto`，并在 `local.gpu` / `local.cpu` 下分别写硬件专用配置（见 `config.example.yaml`）。无 `gpu:`/`cpu:` 节时，FW 在无 CUDA 时自动将 `compute_type` 降为 `int8`。
 
 LLM Key 优先环境变量：默认模板使用 `OPENCODE_API_KEY`、`DEEPSEEK_API_KEY`、`MIMO_API_KEY`，也可在 provider 的 `api_key_env` 中改成自己的变量名。
 
@@ -396,7 +405,7 @@ GitHub Actions（`.github/workflows/tests.yml`）在 Ubuntu + Python 3.10–3.12
 |------|------|
 | `Binary not found: ffprobe` | 安装完整 FFmpeg |
 | `Binary not found: mkvmerge` | `winget install MKVToolNix` |
-| `cublas64_12.dll is not found` | `pip install -r requirements-cu12.txt`，或接受 CPU 回退 |
+| `cublas64_12.dll is not found` | `pip install -r requirements-cu13.txt`（Blackwell）或 `requirements-cu12.txt`（Ampere/Ada），或接受 CPU 回退 |
 | 中文路径乱码 | 用 PowerShell 7；或 `batch-run` 扫目录 |
 | LLM 返回 0 条 | 查 `02_asr/llm/<type>/` 下 JSON；检查 key / `base_url`；网络是否可达 |
 | `clip_naming` 未生效 | 确认 `enabled`、词典路径、路径含日期、`apply_to` |

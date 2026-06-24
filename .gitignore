@@ -38,12 +38,19 @@ runs/
 results/
 results*/
 dd_clip_miner_llm/concat.zip
+*.zip
+dd-clip-miner-llm.zip
 
-# Config (with API keys)
+# Test results
+test_result/
+
+# Config (with API keys / private paths)
 config.yaml
 config.yaml.bak
 config.yaml.bak.*
 streamer_dictionary.json
+cut_copy.conf
+wol_webhook.py
 
 # Logs
 *.log
@@ -53,9 +60,16 @@ batch_run_*.log
 .DS_Store
 Thumbs.db
 
+# Tool generated
+.codegraph/
+
 # Agent / local tooling
 agent-tools/
 terminals/
+
+# Local ASR benchmark outputs (may contain real transcript text)
+asr_benchmark*.json
+asr_largev3*.json
 
 # Testing
 .tmp/

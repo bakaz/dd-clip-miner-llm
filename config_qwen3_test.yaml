@@ -1,7 +1,3 @@
-# dd-clip-miner-llm daily summary config
-# Usage:
-#   python -m dd_clip_miner_llm run live.mp4 --config config.daily-summary.example.yaml
-
 audio:
   sample_rate: 16000
   channels: 1
@@ -17,7 +13,6 @@ asr:
       language: null
       generate_kwargs:
         return_time_stamps: true
-      keep_chunk_audio: false
       lyrics:
         enabled: false
         max_line_chars: 24
@@ -44,6 +39,7 @@ asr:
       standard:
         model: small
         inference_mode: standard
+        batch_size: 0
         vad_filter: false
       fallback:
         enabled: true
@@ -74,20 +70,9 @@ asr:
         standard:
           model: small
 
-  remote:
-    provider: mimo
-    base_url: https://token-plan-cn.xiaomimimo.com/v1
-    api_key: null
-    api_key_env: MIMO_API_KEY
-    model: mimo-v2.5-asr
-    timestamp_chunk_seconds: 5
-    language: null
-
 llm:
   provider_route:
   - opencode
-  - deepseek
-  - mimo
   providers:
     opencode:
       api_key: null
@@ -100,68 +85,60 @@ llm:
       retry_backoff_seconds: [2, 5]
       retry_jitter_ratio: 0.25
       result_retries: 2
-    deepseek:
-      api_key: null
-      api_key_env: DEEPSEEK_API_KEY
-      base_url: https://api.deepseek.com
-      model: deepseek-v4-flash
-      temperature: 0.1
-      max_tokens: 8192
-      timeout_schedule: [60, 120, 180]
-      retry_backoff_seconds: [2, 5]
-      retry_jitter_ratio: 0.25
-      result_retries: 2
-    mimo:
-      api_key: null
-      api_key_env: MIMO_API_KEY
-      base_url: https://token-plan-cn.xiaomimimo.com/v1
-      model: mimo-v2.5-pro
-      temperature: 0.1
-      max_tokens: 8192
-      timeout_schedule: [60, 120, 180]
-      retry_backoff_seconds: [2, 5]
-      retry_jitter_ratio: 0.25
-      result_retries: 2
-  retry_empty_with_reasoning: true
-  reasoning_followup_rounds: 5
-  reasoning_followup_max_tokens: 32768
-  max_completion_tokens: 32768
-  batch_size: null
-  cache_friendly_prompt_layout: false
-  use_tools: false
-  verify_with_search: false
-  json_fix_rounds: 3
 
-# 必须显式关闭其他类型（否则会与 DEFAULT_CONFIG 合并后仍启用 song）
+default_profile: kv_optimized
+profiles:
+  kv_optimized:
+    llm:
+      cache_friendly_prompt_layout: true
+      compact_segment_ranges: true
+    song:
+      normalization:
+        force_merge_same_title: true
+        chorus_aware_split: true
+        chorus_gap_seconds: 130.0
+        chorus_similarity_threshold: 0.3
+        chorus_context_segments: 3
+      pipeline:
+        strategy: risk_routed_kv
+        runtime_adaptive: fixed_three_stage
+        temporal_adjudication:
+          enabled: true
+          preserve_source_names: true
+          max_completion_tokens: 8192
+        stages:
+          discovery: precision
+          recall_audit: uncovered_evidence
+          adjudication: full_transcript
+        continuation_overlap_segments: 50
+        allow_final_discovery: true
+        anchor_boundary_expansion: false
+      naming:
+        search_query_source: lyric_anchors
+        preserve_unknown_on_weak_evidence: true
+      search:
+        enabled: false
+        search_unknown_only: true
+        max_searches: 25
+      missed_recheck:
+        enabled: true
+        output_mode: anchors
+        min_uncovered_seconds: 10.0
+        check_all_uncovered: true
+        max_tool_rounds: 0
+      review:
+        enabled: false
+
 content_types:
-  song: false
+  song: true
   dialogue: false
   highlight: false
   funny: false
   cringe: false
-  daily_summary: true
-
-song:
-  enabled: false
-
-daily_summary:
-  enabled: true
-  summary_only: true
-  language: zh-CN
-  title: 当天直播内容总结
-  max_level1_items: 6
-  max_level2_per_level1: 5
-  max_level3_per_level2: 4
-  include_timeline: true
-  include_quotes: true
-  include_open_questions: true
+  daily_summary: false
 
 output:
   video_clips: false
-  audio_segments: false
+  audio_segments: true
   audio_extension: mp3
   audio_bitrate_kbps: 320
-  video_extension: mp4
-  video_codec: copy
-  match_context_segments: 10
-  concat_videos: false

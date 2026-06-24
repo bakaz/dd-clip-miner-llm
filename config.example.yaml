@@ -1,10 +1,41 @@
 audio:
   sample_rate: 16000
   channels: 1
+
+# 默认 backend: qwen3_asr (GPU) / faster_whisper (CPU 自动切换)
+# GPU: Qwen3-1.7B chunk180 + funasr fallback；FW turbo 供 fallback/对比
+# CPU: FW small int8 batch + standard fallback（主路径）
+# 安装 GPU 生产管线：python install.py --gpu cuda13 --funasr
 asr:
   mode: local
   local:
-    backend: faster_whisper
+    backend: qwen3_asr
+    funasr:
+      device: auto
+      trust_remote_code: true
+      batch_size: null
+      language: null
+      vad_model: null
+      punc_model: null
+      spk_model: null
+      generate_kwargs:
+        return_time_stamps: true
+      keep_chunk_audio: false
+      lyrics:
+        enabled: false
+        max_line_chars: 24
+        sentence_punctuation: "。！？.!?\n"
+        max_sentence_duration_ms: 5000
+      fallback:
+        enabled: true
+        chunk_seconds: 5
+        max_segment_seconds: 15
+        sparse_chars_per_sec: 1.0
+        repeat_threshold: 3
+        padding_seconds: 2.0
+        max_workers: 2
+        merge_policy: replace_ranges
+        zero_duration_policy: merge_adjacent
     faster_whisper:
       device: auto
       compute_type: default
@@ -23,7 +54,7 @@ asr:
         batch_size: 8
         vad_filter: true
       standard:
-        model: turbo
+        model: small
         inference_mode: standard
         batch_size: 0
         vad_filter: false
@@ -34,20 +65,34 @@ asr:
         min_gap_seconds: 4.0
         padding_seconds: 2.0
         max_workers: 1
-        merge_policy: fill_gaps
-    funasr:
-      model: iic/SenseVoiceSmall
-      hub: ms
-      trust_remote_code: true
-      device: auto
-      batch_size: 1
-      timestamp_chunk_seconds: 5
-      max_workers: 4
-      language: null
-      vad_model: null
-      punc_model: null
-      spk_model: null
-      generate_kwargs: {}
+        max_segment_seconds: 15.0
+        sparse_chars_per_sec: 1.0
+        repeat_threshold: 3
+        merge_policy: replace_ranges
+    # device: auto 时按硬件自动合并 gpu/cpu 节
+    gpu:
+      funasr:
+        model: Qwen/Qwen3-ASR-1.7B
+        hub: hf
+        device: cuda:0
+        dtype: bf16
+        timestamp_chunk_seconds: 180
+        max_workers: 2
+        forced_aligner: Qwen/Qwen3-ForcedAligner-0.6B
+        forced_aligner_kwargs: {}
+      faster_whisper:
+        batch:
+          model: turbo
+        standard:
+          model: turbo
+    cpu:
+      backend: faster_whisper
+      faster_whisper:
+        compute_type: int8
+        batch:
+          model: small
+        standard:
+          model: small
   remote:
     provider: mimo
     base_url: https://token-plan-cn.xiaomimimo.com/v1
@@ -359,8 +404,8 @@ output:
 # 4. 验证后删除源文件和工作目录
 # 5. 关机
 #
-# 配置详情见 cut_copy.example.conf
+# 配置详情见 cut_copy.example.conf（复制为 cut_copy.conf 后修改路径）
 # 计划任务设置: scripts/setup_cut_copy_task.ps1
 cut_copy:
   enabled: false
-  conf_path: "cut_copy.conf"
+  conf_path: "cut_copy.conf"   # 本地文件，从 cut_copy.example.conf 复制

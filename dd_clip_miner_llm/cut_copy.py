@@ -65,6 +65,7 @@ def load_cut_copy_config(path: str | Path) -> dict:
         )
 
     # Defaults for optional sections / fields
+    cfg.setdefault("enabled", True)
     cfg.setdefault("behavior", {})
     cfg["behavior"].setdefault("shutdown_after", True)
     cfg["behavior"].setdefault("shutdown_delay", 60)
@@ -276,8 +277,14 @@ def _smb_auth(dest_path: str, username: str, password: str) -> None:
 def _format_folder(template: str, video: Path, config: dict) -> str:
     """Format *template* with date and streamer placeholders."""
     date_str = datetime.now().strftime("%y%m%d")
+    # Use original video path from batch-run if available (for streamer extraction)
+    src_video = config.get("_batch_video_path")
+    if src_video is not None:
+        src_video = Path(src_video)
+    else:
+        src_video = video
     # Try to extract streamer from parent folder name
-    streamer = video.parent.name if video.parent.name else "unknown"
+    streamer = src_video.parent.name if src_video.parent.name else "unknown"
     folder = template.replace("{date}", date_str).replace("{streamer}", streamer)
     # Remove characters invalid in Windows paths
     folder = re.sub(r'[<>:"/\\|?*]', "_", folder)
@@ -466,6 +473,106 @@ def run_cut_copy(
         processed.append(video)
 
     _log(f"Done. Processed {len(processed)}/{len(pending)} file(s).", log_file)
+
+    # Shutdown
+    if (
+        not no_shutdown
+        and config["behavior"].get("shutdown_after", True)
+        and processed
+    ):
+        delay = config["behavior"].get("shutdown_delay", 60)
+        _log(f"Shutting down in {delay} seconds...", log_file)
+        schedule_shutdown(delay)
+
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Batch-run post-processing entry point
+# ---------------------------------------------------------------------------
+
+def run_batch_cut_copy(
+    config: dict,
+    runs: list[dict],
+    *,
+    no_shutdown: bool = False,
+) -> int:
+    """Run cut_copy post-processing after a batch-run completes.
+
+    Iterates successful runs, copies results to SMB destination,
+    verifies, optionally deletes source/work, and schedules shutdown.
+
+    Parameters
+    ----------
+    config : dict
+        Cut-copy config loaded by :func:`load_cut_copy_config`.
+    runs : list[dict]
+        Batch-run result records (from :func:`batch.run_batch`).
+        Each dict must have at least ``video``, ``result_dir``, ``status``.
+    no_shutdown : bool
+        If *True*, skip shutdown even if config says to.
+
+    Returns
+    -------
+    int
+        0 on success, 1 on failure.
+    """
+    log_file = Path(config["behavior"]["log_file"])
+
+    # Check enabled flag (default True for backward compat)
+    if not config.get("enabled", True):
+        _log("Cut-copy post-processing is disabled.", log_file)
+        return 0
+
+    dest_path = Path(config["destination"]["path"])
+    skip = config["processing"].get("skip_on_failure", True)
+
+    successful = [r for r in runs if r.get("status") == "success"]
+    if not successful:
+        _log("No successful runs to post-process.", log_file)
+        return 0
+
+    _log(f"Cut-copy post-processing: {len(successful)} successful run(s).", log_file)
+
+    processed: list[dict] = []
+    for run in successful:
+        video_path = Path(run["video"])
+        result_dir = Path(run["result_dir"])
+
+        if not result_dir.is_dir():
+            _log(f"  [skip] Result dir not found: {result_dir}", log_file)
+            continue
+
+        _log(f"  Processing: {video_path.name}", log_file)
+
+        # Store original video path for _format_folder to extract streamer name
+        config["_batch_video_path"] = video_path
+
+        # Copy to destination
+        try:
+            dest = copy_to_destination(result_dir, dest_path, config)
+            verify_copy(result_dir, dest)
+            _log(f"    Copied to: {dest}", log_file)
+        except Exception as exc:
+            _log(f"    Copy failed: {exc}", log_file)
+            if skip:
+                continue
+            return 1
+
+        # Delete source file
+        if config["behavior"].get("delete_source_after_copy", True):
+            delete_source_file(video_path)
+
+        # Delete work dir (result_dir)
+        if config["behavior"].get("delete_work_dir", True):
+            delete_directory(result_dir)
+
+        processed.append(run)
+
+    _log(
+        f"Cut-copy done. Post-processed {len(processed)}/{len(successful)} run(s).",
+        log_file,
+    )
 
     # Shutdown
     if (

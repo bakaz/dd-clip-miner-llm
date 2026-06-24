@@ -12,6 +12,17 @@ from ..config import deep_merge
 
 
 _FASTER_WHISPER_MODE_KEYS = {"batch", "standard", "fallback"}
+_FUNASR_BACKENDS = frozenset({"funasr", "fun_asr", "qwen3", "qwen3_asr", "sensevoice"})
+_FW_BACKENDS = frozenset({"faster_whisper", "whisper"})
+
+
+def _backend_config_key(backend: str) -> str:
+    normalized = str(backend or "faster_whisper").lower().replace("-", "_")
+    if normalized in _FUNASR_BACKENDS:
+        return "funasr"
+    if normalized in _FW_BACKENDS:
+        return "faster_whisper"
+    return normalized
 
 
 def _is_gpu_available() -> bool:
@@ -37,7 +48,8 @@ def _resolve_hardware_local_config(local_cfg: dict[str, Any]) -> dict[str, Any]:
         return local_cfg
     local_cfg = deepcopy(local_cfg)
     backend = str(local_cfg.get("backend", "faster_whisper")).lower().replace("-", "_")
-    backend_cfg = local_cfg.get(backend, {})
+    config_key = _backend_config_key(backend)
+    backend_cfg = local_cfg.get(config_key, {})
     if not isinstance(backend_cfg, dict):
         backend_cfg = {}
     device = str(backend_cfg.get("device", local_cfg.get("device", "auto"))).lower()
@@ -50,12 +62,12 @@ def _resolve_hardware_local_config(local_cfg: dict[str, Any]) -> dict[str, Any]:
     if "gpu" not in hardware_cfg and "cpu" not in hardware_cfg:
         # No explicit gpu/cpu sections: auto-detect hardware and set
         # compute_type=int8 for CPU to avoid performance pitfalls.
-        if not _is_gpu_available():
+        if not _is_gpu_available() and config_key == "faster_whisper":
             effective = dict(backend_cfg)
             current_ct = str(effective.get("compute_type", "default")).lower()
             if current_ct in ("", "default"):
                 effective["compute_type"] = "int8"
-            local_cfg[backend] = effective
+            local_cfg[config_key] = effective
         return local_cfg
 
     is_gpu = _is_gpu_available()
@@ -72,11 +84,18 @@ def _resolve_hardware_local_config(local_cfg: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(hw_section, dict):
         return local_cfg
 
-    if backend in hw_section and isinstance(hw_section[backend], dict):
-        selected_backend_cfg = hw_section[backend]
-    else:
-        selected_backend_cfg = hw_section
-    local_cfg[backend] = deep_merge(backend_cfg, selected_backend_cfg)
+    for section_key in ("funasr", "faster_whisper"):
+        section_override = hw_section.get(section_key)
+        if not isinstance(section_override, dict):
+            continue
+        base_cfg = local_cfg.get(section_key, {})
+        if not isinstance(base_cfg, dict):
+            base_cfg = {}
+        local_cfg[section_key] = deep_merge(base_cfg, section_override)
+
+    # Legacy flat hardware blocks without nested backend keys.
+    if "funasr" not in hw_section and "faster_whisper" not in hw_section:
+        local_cfg[config_key] = deep_merge(backend_cfg, hw_section)
 
     # Preserve generic hardware-specific keys for legacy flat configurations.
     for k, v in hw_section.items():
@@ -117,7 +136,10 @@ def resolve_faster_whisper_mode_settings(
     return resolved
 
 
-def build_asr_backend(settings: dict[str, Any]) -> ASRBackend:
+def build_asr_backend(
+    settings: dict[str, Any],
+    runtime_context: dict[str, Any] | None = None,
+) -> ASRBackend:
     """构建 ASR 后端，支持 local/remote 配置格式，以及 gpu/cpu 硬件自动分流。
 
     新格式支持 gpu/cpu 分流（当存在 gpu: 或 cpu: 节时，基于硬件检测自动选择并合并）：
@@ -165,7 +187,7 @@ def build_asr_backend(settings: dict[str, Any]) -> ASRBackend:
         flat = {**local_cfg}
         if backend in flat:
             flat = {**flat, **flat[backend]}
-        return _build_local_backend(backend, flat)
+        return _build_local_backend(backend, flat, runtime_context)
 
     if mode == "remote":
         remote_cfg = settings.get("remote", {})
@@ -183,14 +205,18 @@ def build_asr_backend(settings: dict[str, Any]) -> ASRBackend:
     flat = {**settings}
     if isinstance(flat.get(backend), dict):
         flat = {**flat, **flat[backend]}
-    return _build_local_backend(backend, flat)
+    return _build_local_backend(backend, flat, runtime_context)
 
 
-def _build_local_backend(backend: str, settings: dict[str, Any]) -> ASRBackend:
+def _build_local_backend(
+    backend: str,
+    settings: dict[str, Any],
+    runtime_context: dict[str, Any] | None = None,
+) -> ASRBackend:
     if backend in {"whisper", "faster_whisper"}:
         return FasterWhisperBackend(settings)
     if backend in {"funasr", "fun_asr", "qwen3", "qwen3_asr", "sensevoice"}:
-        return FunASRBackend(settings)
+        return FunASRBackend(settings, runtime_context=runtime_context)
     raise ValueError(f"Unsupported local ASR backend: {backend}")
 
 

@@ -131,23 +131,51 @@ def _run_asr_step(
             do_reuse = False
 
     if not do_reuse:
-        from ..asr_fallback import is_faster_whisper_fallback_enabled, transcribe_with_fallback
+        from ..asr_fallback import (
+            is_faster_whisper_fallback_enabled,
+            is_qwen3_fallback_enabled,
+            transcribe_qwen3_with_fallback,
+            transcribe_with_fallback,
+        )
 
         if is_faster_whisper_fallback_enabled(config.get("asr", {})):
-            print("[2/3] Running Whisper ASR... (batch + standard fallback)", flush=True)
+            fw_fallback = (
+                config.get("asr", {}).get("local", {}).get("faster_whisper", {}).get("fallback", {})
+            )
+            merge_policy = str(fw_fallback.get("merge_policy") or "replace_ranges")
+            print(
+                f"[2/3] Running Whisper ASR... "
+                f"({fw_fallback.get('primary_mode', 'batch')} + {fw_fallback.get('fallback_mode', 'standard')} fallback, "
+                f"{merge_policy})",
+                flush=True,
+            )
             segments, fallback_meta = transcribe_with_fallback(source_wav, config["asr"], asr_dir)
-            inference_mode = f"{fallback_meta['primary_mode']}+fallback:{fallback_meta['fallback_mode']}"
+            inference_mode = (
+                f"{fallback_meta['primary_mode']}+fallback:{fallback_meta['fallback_mode']}"
+                f":{fallback_meta.get('merge_policy', merge_policy)}"
+            )
             print(
                 "  ASR fallback ranges: "
+                f"{fallback_meta['fallback_range_count']} ({fallback_meta.get('range_detection', 'unknown')}), "
+                f"fallback segments: {fallback_meta['fallback_segment_count']}, "
+                f"merged: {fallback_meta['merged_segment_count']}",
+                flush=True,
+            )
+        elif is_qwen3_fallback_enabled(config.get("asr", {})):
+            print("[2/3] Running Qwen3 ASR... (primary + suspicious-range fallback)", flush=True)
+            segments, fallback_meta = transcribe_qwen3_with_fallback(source_wav, config["asr"], asr_dir)
+            inference_mode = f"qwen3+fallback:chunk{fallback_meta['chunk_seconds']}"
+            print(
+                "  Qwen3 fallback ranges: "
                 f"{fallback_meta['fallback_range_count']}, "
                 f"fallback segments: {fallback_meta['fallback_segment_count']}, "
                 f"merged: {fallback_meta['merged_segment_count']}",
                 flush=True,
             )
         else:
-            transcriber = Transcriber(config)
+            transcriber = Transcriber(config, asr_dir=asr_dir)
             inference_mode = transcriber.inference_mode
-            print(f"[2/3] Running Whisper ASR... (inference_mode: {transcriber.inference_mode})", flush=True)
+            print(f"[2/3] Running ASR... (inference_mode: {transcriber.inference_mode})", flush=True)
             segments = transcriber.transcribe(source_wav)
         transcript_path.write_text(
             json.dumps([s.to_dict() for s in segments], ensure_ascii=False, indent=2),

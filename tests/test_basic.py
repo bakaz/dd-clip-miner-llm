@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import tempfile
+from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -154,11 +155,19 @@ class TestConfig:
         assert "audio" in DEFAULT_CONFIG
         assert "asr" in DEFAULT_CONFIG
         assert DEFAULT_CONFIG["asr"]["mode"] == "local"
-        fw = DEFAULT_CONFIG["asr"]["local"]["faster_whisper"]
+        local = DEFAULT_CONFIG["asr"]["local"]
+        assert local["backend"] == "qwen3_asr"
+        funasr = local["funasr"]
+        assert funasr["device"] == "auto"
+        assert funasr["fallback"]["enabled"] is True
+        assert funasr["fallback"]["merge_policy"] == "replace_ranges"
+        assert local["gpu"]["funasr"]["model"] == "Qwen/Qwen3-ASR-1.7B"
+        assert local["cpu"]["backend"] == "faster_whisper"
+        assert "funasr" not in local["cpu"]
+        fw = local["faster_whisper"]
         assert fw["batch"]["model"] == "small"
-        assert fw["batch"]["inference_mode"] == "batched"
-        assert fw["standard"]["model"] == "turbo"
-        assert fw["standard"]["vad_filter"] is False
+        assert local["gpu"]["faster_whisper"]["batch"]["model"] == "turbo"
+        assert local["cpu"]["faster_whisper"]["batch"]["model"] == "small"
         assert fw["fallback"]["enabled"] is True
         assert "llm" in DEFAULT_CONFIG
         assert "padding" in DEFAULT_CONFIG
@@ -345,14 +354,22 @@ profiles:
 
 
 class TestASRBackends:
-    def test_build_default_backend(self):
-        backend = build_asr_backend(DEFAULT_CONFIG["asr"])
-        assert isinstance(backend, FasterWhisperBackend)
-        assert backend.settings["model"] == "small"
-        assert backend.inference_mode == "batched"
+    def test_build_default_backend(self, monkeypatch):
+        monkeypatch.setattr("dd_clip_miner_llm.asr_backends._is_gpu_available", lambda: True)
+        backend_gpu = build_asr_backend(DEFAULT_CONFIG["asr"])
+        assert isinstance(backend_gpu, FunASRBackend)
+        assert backend_gpu.funasr_settings["model"] == "Qwen/Qwen3-ASR-1.7B"
+
+        monkeypatch.setattr("dd_clip_miner_llm.asr_backends._is_gpu_available", lambda: False)
+        backend_cpu = build_asr_backend(DEFAULT_CONFIG["asr"])
+        assert isinstance(backend_cpu, FasterWhisperBackend)
+        assert backend_cpu.settings["model"] == "small"
+        assert backend_cpu.settings["compute_type"] == "int8"
 
     def test_build_faster_whisper_backend(self):
-        backend = build_asr_backend(DEFAULT_CONFIG["asr"]["local"])
+        local = deepcopy(DEFAULT_CONFIG["asr"]["local"])
+        local["backend"] = "faster_whisper"
+        backend = build_asr_backend(local)
         assert isinstance(backend, FasterWhisperBackend)
 
     def test_build_funasr_backend_for_qwen3_alias(self):
@@ -380,21 +397,28 @@ class TestASRBackends:
         assert asr["model"] == "new-model"
         assert asr["local"]["funasr"]["model"] == "new-model"
 
-    def test_resolve_faster_whisper_batch_and_standard_modes(self):
+    def test_resolve_faster_whisper_batch_and_standard_modes(self, monkeypatch):
         from dd_clip_miner_llm.asr_backends import resolve_faster_whisper_mode_settings
 
-        batch = resolve_faster_whisper_mode_settings(DEFAULT_CONFIG["asr"], "batch")
-        standard = resolve_faster_whisper_mode_settings(DEFAULT_CONFIG["asr"], "standard")
+        monkeypatch.setattr("dd_clip_miner_llm.asr_backends._is_gpu_available", lambda: True)
+        batch_gpu = resolve_faster_whisper_mode_settings(DEFAULT_CONFIG["asr"], "batch")
+        standard_gpu = resolve_faster_whisper_mode_settings(DEFAULT_CONFIG["asr"], "standard")
+        assert batch_gpu["model"] == "turbo"
+        assert standard_gpu["model"] == "turbo"
 
-        assert batch["model"] == "small"
-        assert batch["inference_mode"] == "batched"
-        assert batch["batch_size"] == 8
-        assert batch["vad_filter"] is True
-        assert standard["model"] == "turbo"
-        assert standard["inference_mode"] == "standard"
-        assert standard["batch_size"] == 0
-        assert standard["vad_filter"] is False
-        assert standard["word_gap_seconds"] == 2.0
+        monkeypatch.setattr("dd_clip_miner_llm.asr_backends._is_gpu_available", lambda: False)
+        batch_cpu = resolve_faster_whisper_mode_settings(DEFAULT_CONFIG["asr"], "batch")
+        standard_cpu = resolve_faster_whisper_mode_settings(DEFAULT_CONFIG["asr"], "standard")
+        assert batch_cpu["model"] == "small"
+        assert batch_cpu["compute_type"] == "int8"
+        assert standard_cpu["model"] == "small"
+        assert batch_cpu["inference_mode"] == "batched"
+        assert batch_cpu["batch_size"] == 8
+        assert batch_cpu["vad_filter"] is True
+        assert standard_cpu["inference_mode"] == "standard"
+        assert standard_cpu["batch_size"] == 0
+        assert standard_cpu["vad_filter"] is False
+        assert standard_cpu["word_gap_seconds"] == 2.0
 
     def test_funasr_timestamp_result_to_segments(self):
         result = [
@@ -425,6 +449,51 @@ class TestASRBackends:
         resolved = _resolve_hardware_local_config(cfg)
         assert resolved["faster_whisper"]["device"] == "cuda"
         assert resolved["faster_whisper"]["compute_type"] == "float16"
+
+    def test_resolve_qwen3_funasr_and_fw_hardware_sections(self, monkeypatch):
+        from dd_clip_miner_llm.asr_backends import _resolve_hardware_local_config
+
+        cfg = {
+            "backend": "qwen3_asr",
+            "funasr": {"device": "auto", "fallback": {"enabled": True}},
+            "faster_whisper": {
+                "device": "auto",
+                "batch": {"model": "small"},
+                "standard": {"model": "small"},
+            },
+            "gpu": {
+                "funasr": {
+                    "model": "Qwen/Qwen3-ASR-1.7B",
+                    "device": "cuda:0",
+                    "timestamp_chunk_seconds": 180,
+                },
+                "faster_whisper": {
+                    "batch": {"model": "turbo"},
+                    "standard": {"model": "turbo"},
+                },
+            },
+            "cpu": {
+                "backend": "faster_whisper",
+                "faster_whisper": {
+                    "compute_type": "int8",
+                    "batch": {"model": "small"},
+                    "standard": {"model": "small"},
+                },
+            },
+        }
+
+        monkeypatch.setattr("dd_clip_miner_llm.asr_backends._is_gpu_available", lambda: True)
+        resolved_gpu = _resolve_hardware_local_config(cfg)
+        assert resolved_gpu["backend"] == "qwen3_asr"
+        assert resolved_gpu["funasr"]["model"] == "Qwen/Qwen3-ASR-1.7B"
+        assert resolved_gpu["faster_whisper"]["batch"]["model"] == "turbo"
+
+        monkeypatch.setattr("dd_clip_miner_llm.asr_backends._is_gpu_available", lambda: False)
+        resolved_cpu = _resolve_hardware_local_config(cfg)
+        assert resolved_cpu["backend"] == "faster_whisper"
+        assert resolved_cpu["faster_whisper"]["batch"]["model"] == "small"
+        assert resolved_cpu["faster_whisper"]["standard"]["model"] == "small"
+        assert resolved_cpu["faster_whisper"]["compute_type"] == "int8"
 
     def test_resolve_hardware_cpu_section_fallback(self, monkeypatch):
         from dd_clip_miner_llm.asr_backends import _resolve_hardware_local_config
@@ -611,6 +680,8 @@ class TestASRFallback:
         source.write_bytes(b"fake")
         asr_dir = tmp_path / "02_asr"
         config = deepcopy(DEFAULT_CONFIG["asr"])
+        config["local"]["backend"] = "faster_whisper"
+        config["local"]["faster_whisper"]["fallback"]["merge_policy"] = "fill_gaps"
 
         class Backend:
             def __init__(self, mode):
@@ -646,6 +717,52 @@ class TestASRFallback:
         assert (asr_dir / "transcript_primary.json").exists()
         assert (asr_dir / "fallback_ranges.json").exists()
         assert (asr_dir / "fallback_segments.json").exists()
+
+    def test_transcribe_with_fallback_replace_ranges_rewrites_suspicious_segments(self, tmp_path, monkeypatch):
+        from copy import deepcopy
+        from dd_clip_miner_llm import asr_fallback
+
+        source = tmp_path / "source.wav"
+        source.write_bytes(b"fake")
+        asr_dir = tmp_path / "02_asr"
+        config = deepcopy(DEFAULT_CONFIG["asr"])
+        config["local"]["backend"] = "faster_whisper"
+        config["local"]["faster_whisper"]["fallback"]["merge_policy"] = "replace_ranges"
+
+        class Backend:
+            def __init__(self, mode):
+                self.mode = mode
+
+            def transcribe(self, _path):
+                if self.mode == "batched":
+                    return [
+                        TranscriptSegment(0.0, 5.0, "keep"),
+                        TranscriptSegment(10.0, 30.0, "嗯"),
+                        TranscriptSegment(40.0, 45.0, "tail"),
+                    ]
+                return [TranscriptSegment(2.0, 4.0, "fixed")]
+
+        def fake_build_backend(settings):
+            return Backend(settings["inference_mode"])
+
+        def fake_cut_audio(_source, target, _start, _end):
+            Path(target).write_bytes(b"range")
+            return Path(target)
+
+        monkeypatch.setattr(asr_fallback, "build_asr_backend", fake_build_backend)
+        monkeypatch.setattr(asr_fallback, "cut_audio", fake_cut_audio)
+        monkeypatch.setattr(asr_fallback, "get_duration", lambda _path: 50.0)
+
+        segments, metadata = asr_fallback.transcribe_with_fallback(source, config, asr_dir)
+
+        assert metadata["merge_policy"] == "replace_ranges"
+        assert metadata["range_detection"] == "suspicious_segments"
+        assert metadata["fallback_range_count"] == 1
+        texts = [segment.text for segment in segments]
+        assert "keep" in texts
+        assert "tail" in texts
+        assert "嗯" not in texts
+        assert "fixed" in texts
 
 
 class TestSongMissedRecheck:
@@ -3040,6 +3157,20 @@ class TestCLI:
         assert config["song"]["review"]["max_completion_tokens"] == 32768
         assert config["song"]["missed_recheck"]["max_completion_tokens"] == 32768
         assert config["song"]["padding"]["merge_gap_seconds"] == 40.0
+
+    def test_daily_summary_example_disables_other_content_types(self):
+        from dd_clip_miner_llm.pipeline.utils import _get_content_types
+
+        config = load_config("config.daily-summary.example.yaml")
+        assert config["content_types"]["song"] is False
+        assert config["content_types"]["daily_summary"] is True
+        assert config["song"]["enabled"] is False
+        assert _get_content_types(config) == ["daily_summary"]
+
+    def test_init_config_matches_config_example_yaml(self):
+        from dd_clip_miner_llm.cli import _config_example_path, _generate_config_yaml
+
+        assert _generate_config_yaml() == _config_example_path().read_text(encoding="utf-8")
 
     @pytest.mark.parametrize(
         "path",

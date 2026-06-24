@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import argparse
 from pathlib import Path
@@ -56,6 +56,7 @@ def build_parser() -> argparse.ArgumentParser:
     batch_parser.add_argument("--concat", action="store_true", help="合并目录下的多个视频后再处理")
     batch_parser.add_argument("--video-codec", default=None, help="视频编码器")
     batch_parser.add_argument("--audio-bitrate-kbps", type=int, default=None, help="音频码率")
+    batch_parser.add_argument("--cut-copy-conf", default=None, help="cut_copy 配置文件路径，batch-run 完成后自动执行 cut_copy 后处理")
 
     # manual-cut 命令（兼容旧项目）
     manual_parser = subparsers.add_parser("manual-cut", help="从编辑后的 CSV 重新切割片段")
@@ -110,388 +111,19 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _config_example_path() -> Path:
+    return Path(__file__).resolve().parent.parent / "config.example.yaml"
+
+
 def _generate_config_yaml() -> str:
-    lines = [
-        "# dd-clip-miner-llm 配置文件",
-        "",
-        "# 音频预处理",
-        "audio:",
-        "  sample_rate: 16000",
-        "  channels: 1",
-        "",
-        "# ASR 配置",
-        "asr:",
-        "  mode: local",
-        "  local:",
-        "    backend: faster_whisper  # faster_whisper | funasr",
-        "    faster_whisper:",
-        "      device: auto            # auto: 自动检测 GPU，无 GPU 时 compute_type 自动设为 int8",
-        "      compute_type: default   # default=float16(GPU) / int8(CPU auto-detect)",
-        "      cpu_threads: 8",
-        "      num_workers: 1",
-        "      language: null",
-        "      beam_size: 5",
-        "      initial_prompt: null",
-        "      word_timestamps: true",
-        "      split_on_word_gaps: true",
-        "      word_gap_seconds: 2.0",
-        "      max_segment_seconds: 15.0",
-        "      batch:",
-        "        model: small",
-        "        inference_mode: batched",
-        "        batch_size: 8",
-        "        vad_filter: true",
-        "      standard:",
-        "        model: turbo",
-        "        inference_mode: standard",
-        "        batch_size: 0",
-        "        vad_filter: false",
-        "      fallback:",
-        "        enabled: true",
-        "        primary_mode: batch",
-        "        fallback_mode: standard",
-        "        min_gap_seconds: 4.0",
-        "        padding_seconds: 2.0",
-        "        max_workers: 1",
-        "        merge_policy: fill_gaps",
-        "    funasr:",
-        "      model: iic/SenseVoiceSmall",
-        "      hub: ms",
-        "      trust_remote_code: true",
-        "      device: auto",
-        "      batch_size: 1",
-        "      timestamp_chunk_seconds: 5",
-        "      max_workers: 4",
-        "      language: null",
-        "",
-        "# LLM 配置",
-        "llm:",
-        "  provider_route:",
-        "    - opencode",
-        "    - deepseek",
-        "    - mimo",
-        "  providers:",
-        "    opencode:",
-        "      api_key: null",
-        "      api_key_env: OPENCODE_API_KEY",
-        "      base_url: https://opencode.ai/zen/go/v1",
-        "      model: deepseek-v4-flash",
-        "      temperature: 0.1",
-        "      max_tokens: 8192",
-        "      timeout_schedule:",
-        "        - 60",
-        "        - 120",
-        "        - 180",
-        "      retry_backoff_seconds:",
-        "        - 2",
-        "        - 5",
-        "      retry_jitter_ratio: 0.25",
-        "      result_retries: 2",
-        "    deepseek:",
-        "      api_key: null",
-        "      api_key_env: DEEPSEEK_API_KEY",
-        "      base_url: https://api.deepseek.com",
-        "      model: deepseek-v4-flash",
-        "      thinking: disabled",
-        "      temperature: 0.1",
-        "      max_tokens: 8192",
-        "      timeout_schedule:",
-        "        - 60",
-        "        - 120",
-        "        - 180",
-        "      retry_backoff_seconds:",
-        "        - 2",
-        "        - 5",
-        "      retry_jitter_ratio: 0.25",
-        "      result_retries: 2",
-        "    mimo:",
-        "      api_key: null",
-        "      api_key_env: MIMO_API_KEY",
-        "      base_url: https://token-plan-cn.xiaomimimo.com/v1",
-        "      model: mimo-v2.5-pro",
-        "      temperature: 0.1",
-        "      max_tokens: 8192",
-        "      timeout_schedule:",
-        "        - 60",
-        "        - 120",
-        "        - 180",
-        "      retry_backoff_seconds:",
-        "        - 2",
-        "        - 5",
-        "      retry_jitter_ratio: 0.25",
-        "      result_retries: 2",
-        "  retry_empty_with_reasoning: true",
-        "  reasoning_followup_rounds: 5",
-        "  reasoning_followup_max_tokens: 32768",
-        "  max_completion_tokens: 32768",
-        "  batch_size: null",
-        "  max_tool_rounds: 2",
-        "  final_tool_max_tokens: 32768",
-        "  continuation_on_length: true",
-        "  max_continuation_rounds: 8",
-        "  debug_store_requests: false",
-        "  reuse_valid_batches: true",
-        "  use_tools: true",
-        "  verify_with_search: true",
-        "  json_fix_rounds: 3",
-        "",
-        "default_profile: kv_optimized",
-        "",
-        "profiles:",
-        "  accuracy:",
-        "    llm:",
-        "      cache_friendly_prompt_layout: false",
-        "      compact_segment_ranges: false",
-        "    song:",
-        "      pipeline:",
-        "        strategy: legacy",
-        "        runtime_adaptive: disabled",
-        "        temporal_adjudication:",
-        "          enabled: false",
-        "      review:",
-        "        enabled: true",
-        "        transcript_scope: local",
-        "      missed_recheck:",
-        "        enabled: true",
-        "        strategy: windowed",
-        "        output_mode: matches",
-        "  kv_v2:",
-        "    llm:",
-        "      cache_friendly_prompt_layout: true",
-        "      compact_segment_ranges: true",
-        "    song:",
-        "      pipeline:",
-        "        strategy: legacy",
-        "        runtime_adaptive: disabled",
-        "        temporal_adjudication:",
-        "          enabled: false",
-        "      review:",
-        "        enabled: true",
-        "        transcript_scope: full",
-        "        merge_policy: llm_guided",
-        "      missed_recheck:",
-        "        enabled: true",
-        "        strategy: full_transcript",
-        "        output_mode: matches",
-        "        fallback_strategy: windowed_on_structural_failure",
-        "  kv_v3_old:",
-        "    llm:",
-        "      cache_friendly_prompt_layout: true",
-        "      compact_segment_ranges: true",
-        "    song:",
-        "      pipeline:",
-        "        strategy: legacy",
-        "        runtime_adaptive: disabled",
-        "        temporal_adjudication:",
-        "          enabled: false",
-        "      review:",
-        "        enabled: true",
-        "        transcript_scope: full",
-        "        merge_policy: llm_guided",
-        "      missed_recheck:",
-        "        enabled: true",
-        "        strategy: full_transcript",
-        "        output_mode: matches",
-        "        fallback_strategy: windowed_on_structural_failure",
-        "      kv_v2:",
-        "        min_cluster_size_for_review: 2",
-        "        deletion_confidence_threshold: 0.75",
-        "        unknown_deletion_confidence_threshold: 0.60",
-        "  kv_optimized:",
-        "    llm:",
-        "      cache_friendly_prompt_layout: true",
-        "      compact_segment_ranges: true",
-        "    song:",
-        "      normalization:",
-        "        force_merge_same_title: true",
-        "        chorus_aware_split: true",
-        "        chorus_gap_seconds: 120.0",
-        "        chorus_similarity_threshold: 0.3",
-        "        chorus_context_segments: 3",
-        "      pipeline:",
-        "        strategy: risk_routed_kv",
-        "        runtime_adaptive: fixed_three_stage",
-        "        temporal_adjudication:",
-        "          enabled: true",
-        "          preserve_source_names: true",
-        "          max_completion_tokens: 8192",
-        "        stages:",
-        "          discovery: precision",
-        "          recall_audit: uncovered_evidence",
-        "          adjudication: full_transcript",
-        "        continuation_overlap_segments: 50",
-        "        allow_final_discovery: true",
-        "        anchor_boundary_expansion: false",
-        "      naming:",
-        "        search_query_source: lyric_anchors",
-        "        preserve_unknown_on_weak_evidence: true",
-        "      search:",
-        "        enabled: false",
-        "        search_unknown_only: true",
-        "        max_searches: 25",
-        "      missed_recheck:",
-        "        enabled: true",
-        "        output_mode: anchors",
-        "        min_uncovered_seconds: 10.0",
-        "        check_all_uncovered: true",
-        "        max_tool_rounds: 0",
-        "      review:",
-        "        enabled: false",
-        "",
-        "# 时间 padding（兼容旧项目配置）",
-        "padding:",
-        "  before_seconds: 15.0",
-        "  after_seconds: 15.0",
-        "  after_next_asr_end_guard_seconds: 2.0",
-        "  adaptive_silence_padding: true",
-        "  adaptive_silence_gap_threshold_seconds: 25.0",
-        "  adaptive_silence_gap_ratio: 0.95",
-        "  adaptive_max_before_seconds: 45.0",
-        "  adaptive_max_after_seconds: 45.0",
-        "  min_song_seconds: 75.0",
-        "  max_song_seconds: 360.0",
-        "  merge_gap_seconds: 40.0",
-        "",
-        "# 要识别的内容类型（true/false 控制启用/禁用）",
-        "content_types:",
-        "  song: true",
-        "  dialogue: false",
-        "  highlight: false",
-        "  funny: false",
-        "  cringe: false",
-        "  daily_summary: true",
-        "",
-        "# 歌曲识别配置",
-        "song:",
-        "  enabled: true",
-        "  normalization:",
-        "    force_merge_same_title: false",
-        "    chorus_aware_split: false",
-        "    chorus_gap_seconds: 120.0",
-        "    chorus_similarity_threshold: 0.3",
-        "    chorus_context_segments: 3",
-        "  search:",
-        "    enabled: false",
-        "    search_unknown_only: true",
-        "    max_searches: 25",
-        "  risk:",
-        "    duration_weight: 1.0",
-        "    boundary_expansion_weight: 2.0",
-        "    overlap_weight: 2.0",
-        "    evidence_weight: 2.0",
-        "    review_threshold: 0.55",
-        "    reject_threshold: 0.90",
-        "    soft_min_seconds: 150",
-        "    soft_max_seconds: 360",
-        "    boundary_gap_seconds: 20",
-        "    low_confidence: 0.65",
-        "  padding:",
-        "    before_seconds: 15.0",
-        "    after_seconds: 15.0",
-        "    after_next_asr_end_guard_seconds: 2.0",
-        "    adaptive_silence_padding: true",
-        "    adaptive_silence_gap_threshold_seconds: 25.0",
-        "    adaptive_silence_gap_ratio: 0.95",
-        "    adaptive_max_before_seconds: 45.0",
-        "    adaptive_max_after_seconds: 45.0",
-        "    min_song_seconds: 75.0",
-        "    max_song_seconds: 360.0",
-        "    merge_gap_seconds: 40.0",
-        "  missed_recheck:",
-        "    fallback_strategy: windowed_on_structural_failure",
-        "    batch_size: 500",
-        "    min_gap_segments: 1",
-        "    context_segments: 10",
-        "    max_completion_tokens: 32768",
-        "    max_tool_rounds: 1",
-        "    max_anchor_segments: 12",
-        "    anchor_max_expansion_seconds: 420",
-        "  review:",
-        "    transcript_scope: local",
-        "    context_segments: 10",
-        "    max_window_segments: 500",
-        "    max_candidates_per_request: 6",
-        "    max_completion_tokens: 32768",
-        "    max_tool_rounds: 1",
-        "    fallback: local_best",
-        "",
-        "# 对话识别配置",
-        "dialogue:",
-        "  enabled: true",
-        "  min_duration: 10.0",
-        "  max_duration: 300.0",
-        "  min_confidence: 0.6",
-        "  merge_gap_seconds: 10.0",
-        "  tags:",
-        "    - 搞笑",
-        "    - 吐槽",
-        "    - 名场面",
-        "    - 金句",
-        "    - 互动",
-        "    - 高能",
-        "",
-        "# 高能时刻配置",
-        "highlight:",
-        "  enabled: false",
-        "  min_duration: 5.0",
-        "  max_duration: 120.0",
-        "  min_confidence: 0.6",
-        "  merge_gap_seconds: 15.0",
-        "",
-        "# 搞笑片段配置",
-        "funny:",
-        "  enabled: false",
-        "  min_duration: 5.0",
-        "  max_duration: 180.0",
-        "  min_confidence: 0.6",
-        "  merge_gap_seconds: 15.0",
-        "",
-        "# 下头对话配置",
-        "cringe:",
-        "  enabled: true",
-        "  min_duration: 5.0",
-        "  max_duration: 120.0",
-        "  min_confidence: 0.6",
-        "  merge_gap_seconds: 15.0",
-        "",
-        "# 当天直播结构化总结配置",
-        "daily_summary:",
-        "  enabled: true",
-        "  summary_only: true",
-        "  language: zh-CN",
-        "  title: 当天直播内容总结",
-        "  max_level1_items: 6",
-        "  max_level2_per_level1: 5",
-        "  max_level3_per_level2: 4",
-        "  include_timeline: true",
-        "  include_quotes: true",
-        "  include_open_questions: true",
-        "",
-        "# 输出配置",
-        "output:",
-        "  video_clips: true",
-        "  audio_segments: true",
-        "  audio_extension: mp3",
-        "  audio_bitrate_kbps: 320",
-        "  video_extension: mp4",
-        "  video_codec: copy",
-        "  match_context_segments: 10",
-        "  max_export_workers: 4",
-        "  concat_videos: true   # 合并目录下的多个视频后再处理（ConcatPipeline + pre-sanitize + ProblemProfile 智能 fallback）",
-        "  single_file_policy: copy   # copy | remux | normalize；单文件批处理时的输入准备策略",
-        "  concat_force_normalize: false",
-        "  # 歌曲导出目录会自动写入 merge_mp4.bat 和 merge_recut_context.json。",
-        "  # 拖入两个 .mp4 会从原始 input/concat 重新切出一个 .mp4；拖入两个 .mp3 会重新切出一个 .mp3。",
-        "  # 输出写回拖入文件所在目录，并自动避让同名文件。",
-        "  clip_naming:",
-        "    enabled: true",
-        "    dictionary_path: streamer_dictionary.json",
-        "    default_streamer: StreamerName",
-        "    min_score: 0.65",
-        "    apply_to:",
-        "      - song",
-    ]
-    return "\n".join(lines) + "\n"
+    """Return the shipped config template (config.example.yaml)."""
+    template = _config_example_path()
+    if not template.is_file():
+        raise FileNotFoundError(
+            f"Config template not found: {template}. "
+            "Copy config.example.yaml manually if running outside the project tree."
+        )
+    return template.read_text(encoding="utf-8")
 
 
 def _apply_run_overrides(config: dict, args: argparse.Namespace) -> None:
@@ -625,7 +257,7 @@ def main(argv: list[str] | None = None) -> int:
         content = _generate_config_yaml()
         out_path = Path(args.out)
         out_path.write_text(content, encoding="utf-8")
-        print(f"Wrote config: {out_path}")
+        print(f"Wrote config from {_config_example_path()}: {out_path}")
         return 0
 
     if args.command == "ffmpeg-info":
@@ -696,6 +328,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.extensions:
             extensions = {item.strip() for item in args.extensions.split(",") if item.strip()}
 
+        all_runs: list[dict] = []
         for profile_name in profile_names:
             label = profile_name or "default"
             try:
@@ -718,6 +351,7 @@ def main(argv: list[str] | None = None) -> int:
                     extensions=extensions,
                     config_path=args.config,
                 )
+                all_runs.extend(runs)
                 print(f"Profile {label}: {len(runs)} run records.")
             except Exception as exc:
                 failures.append((label, exc))
@@ -730,6 +364,35 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
         print("\nDone! Batch run completed.")
+
+        # Cut-copy post-processing
+        cut_copy_conf = args.cut_copy_conf
+        # Auto-detect from config if not specified via CLI
+        if not cut_copy_conf:
+            try:
+                main_config = load_config(args.config)
+                cc_cfg = main_config.get("cut_copy", {})
+                if cc_cfg.get("enabled", False):
+                    cut_copy_conf = cc_cfg.get("conf_path", "cut_copy.conf")
+                    # Resolve relative path against config file directory
+                    config_dir = Path(args.config).parent
+                    cut_copy_conf = str(config_dir / cut_copy_conf)
+                    print(f"[cut-copy] Auto-detected from config: {cut_copy_conf}")
+            except Exception:
+                pass  # Ignore config loading errors here
+
+        if cut_copy_conf:
+            from .cut_copy import load_cut_copy_config, run_batch_cut_copy
+            try:
+                cc_config = load_cut_copy_config(cut_copy_conf)
+                rc = run_batch_cut_copy(cc_config, all_runs, no_shutdown=False)
+                if rc != 0:
+                    print("[error] Cut-copy post-processing failed.")
+                    return rc
+            except Exception as exc:
+                print(f"[error] Cut-copy post-processing failed: {exc}")
+                return 1
+
         return 0
 
     if args.command == "manual-cut":
