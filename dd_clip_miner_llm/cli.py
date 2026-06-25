@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from .config import DEFAULT_CONFIG, PROFILE_ALL, list_profile_names, load_config
+from .config import DEFAULT_CONFIG, PROFILE_ALL, _load_yaml_with_includes, list_profile_names, load_config
 from .ffmpeg import detect_ffmpeg_environment
 
 _CUT_COPY_CONF_FROM_CONFIG = object()
@@ -155,16 +155,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _config_example_path() -> Path:
-    return Path(__file__).resolve().parent.parent / "config.example.yaml"
+    return Path(__file__).resolve().parent.parent / "config" / "example" / "main.yaml"
 
 
 def _generate_config_yaml() -> str:
-    """Return the shipped config template (config.example.yaml)."""
+    """Return the shipped config template (config/example/main.yaml)."""
     template = _config_example_path()
     if not template.is_file():
         raise FileNotFoundError(
             f"Config template not found: {template}. "
-            "Copy config.example.yaml manually if running outside the project tree."
+            "Copy config/example/main.yaml manually if running outside the project tree."
         )
     return template.read_text(encoding="utf-8")
 
@@ -243,16 +243,12 @@ def _has_api_key(config: dict) -> bool:
 
 
 def _load_raw_yaml_config(path: str | Path) -> dict:
-    try:
-        import yaml
-    except ImportError as exc:
-        raise RuntimeError("PyYAML is required. Install with: pip install PyYAML") from exc
-    config_path = Path(path)
-    with config_path.open("r", encoding="utf-8") as handle:
-        loaded = yaml.safe_load(handle) or {}
-    if not isinstance(loaded, dict):
-        raise ValueError(f"Config file must contain a mapping: {config_path}")
-    return loaded
+    """Load a YAML config file as a raw dict using the !include-aware loader.
+
+    Unlike load_config(), this does NOT merge DEFAULT_CONFIG or resolve
+    profiles — it returns the raw loaded dict for profile enumeration.
+    """
+    return _load_yaml_with_includes(Path(path))
 
 
 def _resolve_profile_names(

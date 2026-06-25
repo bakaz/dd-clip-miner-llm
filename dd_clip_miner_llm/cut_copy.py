@@ -27,13 +27,43 @@ _REQUIRED_SOURCE = ("path",)
 _REQUIRED_DEST = ("path",)
 _REQUIRED_PROC = ("config_path",)
 
+_LOCAL_CONFIG_PATH = Path("config/local/cut_copy.yaml")
+_EXAMPLE_CONFIG_PATH = Path("config/example/cut_copy.yaml")
 
-def load_cut_copy_config(path: str | Path) -> dict:
+
+def _resolve_cut_copy_path(path: str | Path | None) -> Path:
+    """Resolve the cut_copy config file path.
+
+    Resolution order:
+    1. If *path* is provided, use it directly.
+    2. Try ``config/local/cut_copy.yaml``.
+    3. Fall back to ``config/example/cut_copy.yaml``.
+    4. Raise :class:`FileNotFoundError` with both paths listed if neither exists.
+    """
+    if path is not None:
+        return Path(path)
+
+    candidates = (_LOCAL_CONFIG_PATH, _EXAMPLE_CONFIG_PATH)
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+
+    raise FileNotFoundError(
+        f"No cut_copy config found. Tried: "
+        + ", ".join(str(c) for c in candidates)
+    )
+
+
+def load_cut_copy_config(path: str | Path | None = None) -> dict:
     """Load and validate a cut_copy YAML config file.
 
+    If *path* is not provided, resolves to ``config/local/cut_copy.yaml``
+    (with fallback to ``config/example/cut_copy.yaml``).
+
+    Raises :class:`FileNotFoundError` if the config file cannot be found.
     Raises :class:`ValueError` on missing required fields.
     """
-    p = Path(path)
+    p = _resolve_cut_copy_path(path)
     if not p.is_file():
         raise FileNotFoundError(f"Config file not found: {p}")
 
