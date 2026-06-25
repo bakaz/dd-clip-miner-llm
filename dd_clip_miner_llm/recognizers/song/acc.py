@@ -9,6 +9,7 @@ import json as _json
 from pathlib import Path
 from typing import Any
 
+from ...config import PROFILE_ACCURACY, PROFILE_KV_V2
 from ...models import ContentMatch, TranscriptSegment
 
 
@@ -120,9 +121,9 @@ def _build_survival_audit(
         "review_after_deletion_events": deletion_events,
     }
     if is_kv_v2:
-        audit["profile"] = "kv_v2"
+        audit["profile"] = PROFILE_KV_V2
         kv_usage = _load_json(llm_dir.parent / "usage_summary.json")
-        accuracy_usage = _load_json(llm_dir.parent.parent / "accuracy" / "usage_summary.json")
+        accuracy_usage = _load_json(llm_dir.parent.parent / PROFILE_ACCURACY / "usage_summary.json")
         kv_tokens = _usage_total_tokens(kv_usage)
         accuracy_tokens = _usage_total_tokens(accuracy_usage)
         if kv_tokens is not None and accuracy_tokens:
@@ -152,7 +153,7 @@ def run(
         _review_song_matches,
     )
 
-    is_kv_v2 = config.get("_profile_name") == "kv_v2"
+    is_kv_v2 = config.get("_profile_name") == PROFILE_KV_V2
     stages: list[dict[str, Any]] = []
 
     def _log_stage(

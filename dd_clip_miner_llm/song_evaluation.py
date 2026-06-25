@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .config import PROFILE_ACCURACY
+
 
 DEFAULT_PRICING = {
     "input_cache_hit_per_1m": 0.0028,
@@ -236,7 +238,7 @@ def evaluate_song_profile(
 def evaluate_song_run(
     run_dir: Path,
     *,
-    baseline_profile: str = "accuracy",
+    baseline_profile: str = PROFILE_ACCURACY,
     pricing: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     transcript = _load_json(run_dir / "02_asr" / "transcript.json", [])

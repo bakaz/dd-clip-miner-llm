@@ -13,6 +13,7 @@ from typing import Any
 from .. import register
 from ..base import BaseRecognizer
 from ...config import (
+    PROFILE_KV_V2,
     get_llm_config,
     is_risk_routed_kv,
     song_pipeline_strategy,
@@ -32,7 +33,7 @@ _KV_V2_MAIN_OVERLAY = """【KV_V2 召回强化】
 
 def _kv_v2_main_overlay(config: dict[str, Any]) -> str:
     """Return kv_v2 main-only prompt overlay, empty for other profiles/phases."""
-    if config.get("_profile_name") == "kv_v2" and config.get("_debug_phase") == "main":
+    if config.get("_profile_name") == PROFILE_KV_V2 and config.get("_debug_phase") == "main":
         return _KV_V2_MAIN_OVERLAY
     return ""
 
@@ -42,8 +43,8 @@ def _detect_pipeline(config: dict[str, Any]) -> str:
     strategy = song_pipeline_strategy(config)
     if strategy == "risk_routed_kv":
         return "kv"
-    if config.get("_profile_name") == "kv_v2":
-        return "kv_v2"
+    if config.get("_profile_name") == PROFILE_KV_V2:
+        return PROFILE_KV_V2
     return "acc"
 
 
@@ -261,7 +262,7 @@ Whisper ASR 转写特性（重要）：
         if pipeline == "kv":
             from .kv import run as run_kv
             return run_kv(segments, config, self, llm_dir, matches=matches)
-        elif pipeline == "kv_v2":
+        elif pipeline == PROFILE_KV_V2:
             from .kv_v2 import run as run_kv_v2
             return run_kv_v2(segments, config, self, llm_dir, matches=matches)
         else:

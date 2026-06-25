@@ -5,7 +5,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-from ..config import get_llm_config, get_padding_config, get_song_recheck_config, get_song_review_config
+from ..config import PROFILE_KV_V2, get_llm_config, get_padding_config, get_song_recheck_config, get_song_review_config
 from ..models import ContentMatch, TranscriptSegment
 from ..recognizers.base import format_transcript_lines
 from ..song_adaptive import (
@@ -1104,7 +1104,7 @@ def _review_song_matches(
 
     kv_v2_deletion_events: list[dict[str, Any]] = []
     if (
-        config.get("_profile_name") == "kv_v2"
+        config.get("_profile_name") == PROFILE_KV_V2
         and phase == "after_missed_recheck"
         and full_audit_candidates
     ):

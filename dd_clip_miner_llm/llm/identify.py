@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from ..config import get_llm_config
+from ..config import PROFILE_KV_V2, get_llm_config
 from ..llm_debug import (
     _attach_request_debug,
     _cache_usage_summary,
@@ -49,7 +49,7 @@ def _is_kv_v2_main_song(
     debug_phase: str | None,
 ) -> bool:
     return (
-        config.get("_profile_name") == "kv_v2"
+        config.get("_profile_name") == PROFILE_KV_V2
         and debug_phase == "main"
         and content_type == "song"
     )

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ....config import PROFILE_KV_V2
 from ....models import ContentMatch, TranscriptSegment
 from ....song_postprocess.normalize import (
     _clone_match_with_indices,
@@ -362,7 +363,7 @@ def _should_skip_review(
     """
     min_cluster_size = int(
         config.get("song", {})
-        .get("kv_v2", {})
+        .get(PROFILE_KV_V2, {})
         .get("min_cluster_size_for_review", KV_V3_MIN_CLUSTER_SIZE_FOR_REVIEW)
     )
     return len(cluster) < min_cluster_size

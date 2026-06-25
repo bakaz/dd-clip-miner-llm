@@ -13,6 +13,8 @@ import json as _json
 from pathlib import Path
 from typing import Any
 
+from ....config import PROFILE_KV_V2
+
 from ....models import ContentMatch, TranscriptSegment
 from ....song_postprocess.normalize import (
     _clone_match_with_indices,
@@ -280,7 +282,7 @@ def _build_survival_audit(
     audit = {
         "stages": stages,
         "total_stages": len(stages),
-        "profile": "kv_v2",
+        "profile": PROFILE_KV_V2,
         "kv_v2_optimizations": {
             "deletion_threshold": KV_V3_DELETION_CONFIDENCE_THRESHOLD,
             "opening_humming_events": opening_events,

@@ -7,7 +7,99 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
+__all__ = [
+    "ConfigError",
+    "DEFAULT_CONFIG",
+    "PROFILE_ALL",
+    "PROFILE_KV_OPTIMIZED",
+    "PROFILE_KV_V2",
+    "PROFILE_KV_V3",
+    "PROFILE_ACCURACY",
+    "apply_hf_mirror",
+    "deep_merge",
+    "get_asr_fingerprint",
+    "get_asr_inference_mode",
+    "get_llm_config",
+    "get_llm_setting",
+    "get_output_config",
+    "get_padding_config",
+    "get_song_normalization_config",
+    "get_song_recheck_config",
+    "get_song_review_config",
+    "get_song_search_config",
+    "is_kv_v3",
+    "is_risk_routed",
+    "is_risk_routed_kv",
+    "is_risk_routed_v2",
+    "list_profile_names",
+    "load_config",
+    "song_pipeline_strategy",
+    "yaml_loader_with_include",
+    "_load_yaml_with_includes",
+    "_load_profiles_from_dir",
+]
+
 _DEFAULT_HF_ENDPOINT = "https://hf-mirror.com"
+
+
+class ConfigError(Exception):
+    """Raised when a configuration file is invalid or needs migration."""
+
+
+def _yaml_loader_with_include() -> "type[yaml.SafeLoader]":
+    """Return a SafeLoader subclass that supports !include custom tags.
+
+    The !include tag accepts a scalar path.  When the path resolves to a:
+    - file:  its parsed YAML/JSON content is inlined
+    - directory:  all .yaml/.yml files are loaded and returned as a dict
+      keyed by stem (filename without extension)
+
+    Relative paths are resolved against the directory of the YAML file
+    containing the tag.  Nested includes work because each sub-load reuses
+    the same loader class.
+    """
+    import yaml as _yaml
+
+    class _IncludeLoader(_yaml.SafeLoader):
+        pass
+
+    def _include_constructor(loader: _yaml.SafeLoader, node: _yaml.Node) -> Any:
+        if not isinstance(node, _yaml.nodes.ScalarNode):
+            raise TypeError(
+                f"!include tag requires a scalar value (file path), "
+                f"got {type(node).__name__}"
+            )
+        include_rel = str(node.value)
+        base_dir = Path(loader.name or ".").parent
+        resolved = (base_dir / include_rel).resolve()
+
+        # Directory include → load all .yaml/.yml files as a dict
+        if resolved.is_dir():
+            result: dict[str, Any] = {}
+            for child in sorted(resolved.iterdir()):
+                if child.suffix.lower() not in (".yaml", ".yml"):
+                    continue
+                with open(child, "r", encoding="utf-8") as handle:
+                    value = _yaml.load(handle, Loader=_IncludeLoader)
+                result[child.stem] = value if value is not None else {}
+            return result
+
+        if not resolved.is_file():
+            raise FileNotFoundError(f"Included file not found: {resolved}")
+        suffix = resolved.suffix.lower()
+        if suffix in (".yaml", ".yml"):
+            with open(resolved, "r", encoding="utf-8") as handle:
+                return _yaml.load(handle, Loader=_IncludeLoader)
+        if suffix == ".json":
+            with open(resolved, "r", encoding="utf-8") as handle:
+                return json.load(handle)
+        raise ValueError(
+            f"Unsupported include file type: {suffix} "
+            f"(expected .yaml, .yml, or .json)"
+        )
+
+    _IncludeLoader.add_constructor("!include", _include_constructor)
+    return _IncludeLoader
 
 
 DEFAULT_CONFIG: dict[str, Any] = {
@@ -275,6 +367,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
                 "full_min_segments": 2000,
             },
         },
+        "kv_v2": {
+            "min_cluster_size_for_review": 2,
+            "deletion_confidence_threshold": 0.75,
+            "unknown_deletion_confidence_threshold": 0.6,
+        },
     },
     # 对话识别配置
     "dialogue": {
@@ -335,7 +432,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "concat_force_normalize": False,  # 新 pipeline 下仍先做 health probe + pre-sanitize + ProblemProfile 分类
         "clip_naming": {
             "enabled": True,
-            "dictionary_path": "streamer_dictionary.json",
+            "dictionary_path": "config/local/streamer_dictionary.json",
             "default_streamer": "StreamerName",
             "min_score": 0.65,
             "apply_to": ["song"],
@@ -372,20 +469,93 @@ def _migrate_padding_config(config: dict[str, Any]) -> dict[str, Any]:
 
 
 PROFILE_ALL = "all"
+PROFILE_KV_OPTIMIZED = "kv_optimized"
+PROFILE_KV_V2 = "kv_v2"
+PROFILE_KV_V3 = "kv_v3"
+PROFILE_ACCURACY = "accuracy"
 
 
-def list_profile_names(loaded: dict[str, Any]) -> list[str]:
-    profiles = loaded.get("profiles")
-    if not isinstance(profiles, dict) or not profiles:
-        return []
-    default_profile = loaded.get("default_profile")
-    names = [str(name) for name in profiles]
-    if default_profile and str(default_profile) in names:
-        ordered = [str(default_profile), *[
-            name for name in names if name != str(default_profile)
-        ]]
-        return ordered
-    return names
+def _load_yaml_with_includes(config_path: Path) -> dict[str, Any]:
+    """Load a YAML file using the !include-aware loader."""
+    try:
+        import yaml
+    except ImportError as exc:
+        raise RuntimeError("PyYAML is required. Install with: pip install PyYAML") from exc
+
+    Loader = _yaml_loader_with_include()
+    with config_path.open("r", encoding="utf-8") as handle:
+        loaded = yaml.load(handle, Loader=Loader) or {}
+    if not isinstance(loaded, dict):
+        raise ValueError(f"Config file must contain a mapping: {config_path}")
+    return loaded
+
+
+def _detect_old_format(config_path: Path, raw_text: str) -> None:
+    """Raise ConfigError if the file appears to be old single-file format."""
+    if "!include" in raw_text:
+        return
+    if config_path.name == "main.yaml":
+        return
+    if "config" in config_path.parts:
+        return
+    # Only flag files at the project root level (not temp/test dirs)
+    parent = config_path.resolve().parent
+    cwd = Path.cwd().resolve()
+    if parent != cwd:
+        return
+    raise ConfigError(
+        f"Old-format single-file config detected: {config_path.name}\n"
+        f"This config format is no longer supported. "
+        f"Please migrate to the modular config structure.\n"
+        f"See docs/MIGRATION.md for migration guide."
+    )
+
+
+yaml_loader_with_include = _yaml_loader_with_include
+
+
+def _load_profiles_from_dir(profiles_dir: Path) -> dict[str, Any]:
+    """Load all .yaml/.yml files from a profiles directory as a profiles dict."""
+    profiles: dict[str, Any] = {}
+    if not profiles_dir.is_dir():
+        return profiles
+    for child in sorted(profiles_dir.iterdir()):
+        if child.suffix.lower() not in (".yaml", ".yml"):
+            continue
+        profiles[child.stem] = _load_yaml_with_includes(child)
+    return profiles
+
+
+def list_profile_names(
+    loaded: dict[str, Any] | None = None,
+    config_dir: Path | None = None,
+) -> list[str]:
+    """Return a list of available profile names.
+
+    If *loaded* is provided with inline profiles, use those.
+    Otherwise, scan the *config_dir*/profiles/ directory for .yaml files.
+    """
+    profiles = loaded.get("profiles") if isinstance(loaded, dict) else None
+    if isinstance(profiles, dict) and profiles:
+        default_profile = loaded.get("default_profile") if isinstance(loaded, dict) else None
+        names = [str(name) for name in profiles]
+        if default_profile and str(default_profile) in names:
+            ordered = [str(default_profile), *[
+                name for name in names if name != str(default_profile)
+            ]]
+            return ordered
+        return names
+
+    # Fallback: scan profiles directory
+    if config_dir is not None:
+        profiles_dir = config_dir / "profiles"
+        if profiles_dir.is_dir():
+            names = sorted(
+                child.stem for child in profiles_dir.iterdir()
+                if child.suffix.lower() in (".yaml", ".yml")
+            )
+            return names
+    return []
 
 
 def apply_hf_mirror(config: dict[str, Any]) -> str | None:
@@ -417,32 +587,68 @@ def load_config(
     path: str | Path | None = None,
     profile: str | None = None,
 ) -> dict[str, Any]:
+    # ── 1. Resolve config path ─────────────────────────────────────
     if path is None:
         if profile:
-            raise ValueError("A profile can only be selected from a YAML config with a profiles mapping.")
-        return _finalize_loaded_config(deepcopy(DEFAULT_CONFIG))
+            raise ValueError(
+                "A profile can only be selected from a YAML config "
+                "with a profiles mapping."
+            )
+        local = Path("config/local/config.yaml")
+        if local.is_file():
+            path = local
+        else:
+            path = Path("config/example/main.yaml")
 
-    try:
-        import yaml
-    except ImportError as exc:
-        raise RuntimeError("PyYAML is required. Install with: pip install PyYAML") from exc
+    config_path = Path(path).resolve()
+    if config_path.is_dir():
+        for name in ("config.yaml", "main.yaml"):
+            candidate = config_path / name
+            if candidate.is_file():
+                config_path = candidate
+                break
+        else:
+            raise ConfigError(
+                f"Directory '{config_path}' does not contain config.yaml or main.yaml"
+            )
 
-    config_path = Path(path)
-    with config_path.open("r", encoding="utf-8") as handle:
-        loaded = yaml.safe_load(handle) or {}
-    if not isinstance(loaded, dict):
-        raise ValueError(f"Config file must contain a mapping: {config_path}")
+    raw_text = config_path.read_text(encoding="utf-8")
 
+    # ── 2. Old-format detection ────────────────────────────────────
+    _detect_old_format(config_path, raw_text)
+
+    # ── 3. Load YAML with !include support ─────────────────────────
+    loaded = _load_yaml_with_includes(config_path)
+    config_dir = config_path.parent
+
+    # ── 4. Resolve profiles ────────────────────────────────────────
     profiles = loaded.get("profiles")
-    if profiles is None:
+    if not isinstance(profiles, dict) or not profiles:
+        # Auto-detect profiles directory
+        profiles_dir = config_dir / "profiles"
+        if profiles_dir.is_dir():
+            profiles = _load_profiles_from_dir(profiles_dir)
+        else:
+            profiles = None
+
+    # ── 5. No profiles → plain merge ───────────────────────────────
+    if profiles is None or (isinstance(profiles, dict) and not profiles):
         if profile:
-            raise ValueError(f"Config does not define profiles; cannot select profile: {profile}")
-        config = deep_merge(DEFAULT_CONFIG, loaded)
+            raise ValueError(
+                f"Config does not define profiles; cannot select profile: {profile}"
+            )
+        common = {
+            key: value
+            for key, value in loaded.items()
+            if key not in {"profiles", "default_profile"}
+        }
+        config = deep_merge(DEFAULT_CONFIG, common)
         return _finalize_loaded_config(config)
 
     if not isinstance(profiles, dict) or not profiles:
         raise ValueError("Config profiles must be a non-empty mapping.")
 
+    # ── 6. Select and apply profile ────────────────────────────────
     selected_profile = profile or loaded.get("default_profile")
     if not selected_profile:
         selected_profile = next(iter(profiles))
@@ -454,11 +660,14 @@ def load_config(
     if selected_profile not in profiles:
         available = ", ".join(sorted(str(name) for name in profiles))
         raise ValueError(
-            f"Unknown config profile {selected_profile!r}. Available profiles: {available}"
+            f"Unknown config profile {selected_profile!r}. "
+            f"Available profiles: {available}"
         )
     profile_override = profiles[selected_profile]
     if not isinstance(profile_override, dict):
-        raise ValueError(f"Config profile {selected_profile!r} must be a mapping.")
+        raise ValueError(
+            f"Config profile {selected_profile!r} must be a mapping."
+        )
 
     common = {
         key: value
@@ -469,7 +678,7 @@ def load_config(
     config = deep_merge(config, profile_override)
     config["_profile_name"] = selected_profile
     config["_profile_enabled"] = True
-    # 只在 YAML 显式定义了 providers 时才解析 active_provider
+    # Only resolve active_provider when providers are explicitly defined
     has_explicit_providers = "providers" in (loaded.get("llm") or {})
     if has_explicit_providers:
         llm_cfg = config.get("llm") or {}
@@ -584,7 +793,7 @@ def is_risk_routed_kv(config: dict[str, Any]) -> bool:
 
 def is_kv_v3(config: dict[str, Any]) -> bool:
     """Return whether the kv_v3 optimized pipeline is enabled (now in kv_v2)."""
-    return config.get("_profile_name") in {"kv_v2", "kv_v3"}
+    return config.get("_profile_name") in {PROFILE_KV_V2, PROFILE_KV_V3}
 
 
 def is_risk_routed(config: dict[str, Any]) -> bool:

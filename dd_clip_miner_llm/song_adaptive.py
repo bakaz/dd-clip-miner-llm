@@ -5,14 +5,14 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .config import get_llm_config, get_song_recheck_config, get_song_review_config
+from .config import PROFILE_ACCURACY, PROFILE_KV_OPTIMIZED, get_llm_config, get_song_recheck_config, get_song_review_config
 from .models import ContentMatch, TranscriptSegment
 
 ADAPTIVE_STRATEGIES_FILENAME = "adaptive_strategies.json"
 
 REVIEW_SCOPES = frozenset({"local", "full", "adaptive"})
 MISSED_STRATEGIES = frozenset({"windowed", "full_transcript", "adaptive"})
-KV_PROFILE = "kv_optimized"
+KV_PROFILE = PROFILE_KV_OPTIMIZED
 ADAPTIVE_MODES = frozenset({"heuristic", "cost_estimate"})
 
 DEFAULT_REVIEW_ADAPTIVE: dict[str, int] = {
@@ -218,7 +218,7 @@ def resolve_song_adaptive_strategies(
     review_requested = str(review_config.get("transcript_scope", "local")).strip().lower()
     missed_requested = str(recheck_config.get("strategy", "windowed")).strip().lower()
 
-    if str(config.get("_profile_name") or "") == "accuracy":
+    if str(config.get("_profile_name") or "") == PROFILE_ACCURACY:
         return {
             "resolution_mode": "accuracy_profile_fixed",
             "review_scope_requested": review_requested,
@@ -529,7 +529,7 @@ def resolve_review_transcript_scope(
         len(segments) if segments is not None else int(segment_count or 0)
     )
 
-    if str(config.get("_profile_name") or "") == "accuracy":
+    if str(config.get("_profile_name") or "") == PROFILE_ACCURACY:
         return "local", "accuracy_profile_forced_local", _empty_details()
 
     if requested in {"local", "full"}:
@@ -672,7 +672,7 @@ def resolve_missed_recheck_strategy(
         else int(target_range_count or 0)
     )
 
-    if str(config.get("_profile_name") or "") == "accuracy":
+    if str(config.get("_profile_name") or "") == PROFILE_ACCURACY:
         return "windowed", "accuracy_profile_forced_windowed", _empty_details()
 
     if requested in {"windowed", "full_transcript"}:
