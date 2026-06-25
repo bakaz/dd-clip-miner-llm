@@ -45,11 +45,13 @@ dd-clip-miner-llm.zip
 test_result/
 
 # Config (with API keys / private paths)
+# User secrets — everything in config/local/ is private (except .gitkeep)
+config/local/*
+!config/local/.gitkeep
+# Root-level user config (not in config/local/)
 config.yaml
-config.yaml.bak
 config.yaml.bak.*
-streamer_dictionary.json
-cut_copy.conf
+# Root-level user script (not in config/local/)
 wol_webhook.py
 
 # Logs
