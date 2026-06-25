@@ -151,6 +151,39 @@ def build_parser() -> argparse.ArgumentParser:
         help="本次运行不关机（覆盖配置文件设置）",
     )
 
+    # cut-copy-task 命令（计划任务启动器，Python 内完成 SMB 就绪检测）
+    task_parser = subparsers.add_parser(
+        "cut-copy-task",
+        help="等待 SMB 路径就绪后执行 batch-run（Windows 计划任务用）",
+    )
+    task_parser.add_argument("--conf", required=True, help="cut_copy.conf 路径")
+    task_parser.add_argument("--project-root", default=".", help="项目根目录")
+    task_parser.add_argument("--input-root", default="", help="覆盖 source.path")
+    task_parser.add_argument(
+        "--network-wait-minutes", type=int, default=45,
+        help="等待 SMB 就绪的最长时间（分钟）",
+    )
+    task_parser.add_argument(
+        "--network-poll-seconds", type=int, default=30,
+        help="就绪探测间隔（秒）",
+    )
+    task_parser.add_argument(
+        "--log-file", default="cut_copy_task.log",
+        help="启动器日志（相对 project-root）",
+    )
+    task_parser.add_argument(
+        "--resolve-json", action="store_true",
+        help="输出解析后的路径 JSON 后退出",
+    )
+    task_parser.add_argument(
+        "--resolve-json-file", default="",
+        help="将路径 JSON 写入 UTF-8 文件后退出",
+    )
+    task_parser.add_argument(
+        "--probe-json", action="store_true",
+        help="探测路径就绪状态并输出 JSON（未就绪时 exit 1）",
+    )
+
     return parser
 
 
@@ -306,6 +339,21 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "cut-copy":
         from .cut_copy import run_cut_copy
         return run_cut_copy(args.conf, dry_run=args.dry_run, no_shutdown=args.no_shutdown)
+
+    if args.command == "cut-copy-task":
+        from .cut_copy_task import main as cut_copy_task_main
+
+        return cut_copy_task_main([
+            "--conf", args.conf,
+            "--project-root", args.project_root,
+            "--input-root", args.input_root,
+            "--network-wait-minutes", str(args.network_wait_minutes),
+            "--network-poll-seconds", str(args.network_poll_seconds),
+            "--log-file", args.log_file,
+            *([] if not args.resolve_json else ["--resolve-json"]),
+            *([] if not args.resolve_json_file else ["--resolve-json-file", args.resolve_json_file]),
+            *([] if not args.probe_json else ["--probe-json"]),
+        ])
 
     if args.command == "run":
         from .pipeline import run_pipeline

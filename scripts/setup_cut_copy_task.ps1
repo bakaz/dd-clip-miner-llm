@@ -128,32 +128,22 @@ function Get-CutCopyWorkflow {
         [Parameter(Mandatory=$true)][string]$BasePath
     )
 
-    $escapedConf = $CutCopyConfPath.Replace("'", "''")
-    $raw = & $PythonPath -c @"
-import json
-from pathlib import Path
-from dd_clip_miner_llm.cut_copy import load_cut_copy_config
-cfg = load_cut_copy_config(r'$escapedConf')
-base = Path(r'$($BasePath.Replace("'", "''"))')
-pipeline = str(cfg.get('processing', {}).get('config_path', '') or '')
-if pipeline and not Path(pipeline).is_absolute():
-    pipeline = str((base / pipeline).resolve())
-print(json.dumps({
-    'source_path': str(cfg.get('source', {}).get('path', '') or ''),
-    'destination_path': str(cfg.get('destination', {}).get('path', '') or ''),
-    'pipeline_config': pipeline,
-}, ensure_ascii=False))
-"@ 2>&1
+    $jsonFile = [System.IO.Path]::GetTempFileName()
+    try {
+        $pyErr = & $PythonPath -m dd_clip_miner_llm cut-copy-task `
+            --conf $CutCopyConfPath `
+            --project-root $BasePath `
+            --resolve-json-file $jsonFile 2>&1
 
-    if ($LASTEXITCODE -ne 0 -or -not $raw) {
-        $detail = if ($raw) { ($raw | Out-String).Trim() } else { "(no output)" }
-        throw "Failed to load cut_copy conf (python exit=$LASTEXITCODE): $detail"
-    }
+        if ($LASTEXITCODE -ne 0) {
+            $detail = if ($pyErr) { ($pyErr | Out-String).Trim() } else { "(no output)" }
+            throw "Failed to load cut_copy conf (python exit=$LASTEXITCODE): $detail"
+        }
 
-    if ($raw -is [System.Array]) {
-        $raw = ($raw | Where-Object { $_ -and $_.Trim() } | Select-Object -Last 1)
+        return ((Get-Content -LiteralPath $jsonFile -Raw -Encoding UTF8) | ConvertFrom-Json)
+    } finally {
+        Remove-Item -LiteralPath $jsonFile -ErrorAction SilentlyContinue
     }
-    return ($raw | ConvertFrom-Json)
 }
 
 # --- Admin check ---

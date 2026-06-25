@@ -51,6 +51,8 @@ config/local/*
 # Root-level user config (not in config/local/)
 config.yaml
 config.yaml.bak.*
+/cut_copy.conf
+/streamer_dictionary.json
 # Root-level user script (not in config/local/)
 wol_webhook.py
 

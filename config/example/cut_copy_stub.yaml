@@ -1,0 +1,14 @@
+# =============================================================================
+# cut_copy 域配置桩（双文件布局）
+# =============================================================================
+# 迁移后 cut_copy.yaml 通常只有 enabled + conf_path；完整工作流在 cut_copy.conf。
+#
+# 部署:
+#   copy config/example/cut_copy_stub.yaml config/local/cut_copy.yaml
+#   copy config/example/cut_copy.conf config/local/cut_copy.conf
+#
+# load_cut_copy_config() 会自动跟随 conf_path 读取 cut_copy.conf。
+# =============================================================================
+
+enabled: true
+conf_path: cut_copy.conf
