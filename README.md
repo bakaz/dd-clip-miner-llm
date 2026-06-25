@@ -125,8 +125,26 @@ python -m dd_clip_miner_llm init-config --out config/local/main.yaml
 
 **勿提交**（已在 `.gitignore`）：`config/local/`、`runs/`。真实 API key、SMB 密码、WebHook 目标、主播词典和运行产物都应只留在本地文件或环境变量里；仓库模板保持 `api_key: null` + `api_key_env`。
 
-`config/local/cut_copy.yaml` 建议先用 `python -m dd_clip_miner_llm cut-copy --conf config/local/cut_copy.yaml --dry-run` 验证扫描范围。确认归档路径和复制验证稳定后，再按需开启 `behavior.delete_source_after_copy`、`behavior.delete_work_dir` 和 `behavior.shutdown_after`。
+**cut-copy 配置有两种布局**（二选一）：
+
+| 布局 | 文件 | 适用场景 |
+|------|------|----------|
+| 单文件 | `config/local/cut_copy.yaml` 含完整 `source`/`destination`/`processing` | 新部署，从 `config/example/cut_copy.yaml` 复制 |
+| 迁移双文件 | `config/local/cut_copy.yaml` 仅 `enabled` + `conf_path`，工作流在 `config/local/cut_copy.conf` | 从旧版 `migrate_config.py` 迁移 |
+
+`load_cut_copy_config()` 会自动识别域桩并跟随 `conf_path` 读取 `cut_copy.conf`。
+
+验证扫描范围：
+
+```powershell
+python -m dd_clip_miner_llm cut-copy --conf config/local/cut_copy.conf --dry-run
+# 或（域桩会自动跳转到 cut_copy.conf）
+python -m dd_clip_miner_llm cut-copy --dry-run
+```
+
+确认归档路径和复制验证稳定后，再按需开启 `behavior.delete_source_after_copy`、`behavior.delete_work_dir` 和 `behavior.shutdown_after`。
 通过 `batch-run` 自动触发时，cut-copy 只后处理本轮实际新处理成功的 run；如果本轮全部来自 marker 跳过，不会复制、删除或关机。
+`processing.config_path` 应指向 `config/local/main.yaml`。
 
 ASR 使用 `asr.mode: local | remote` 新结构（见 `config/example/asr.yaml`）：
 
@@ -192,11 +210,11 @@ asr:
 ### 单视频
 
 ```powershell
-python -m dd_clip_miner_llm run "D:\videos\live.mp4" --config config.yaml
-python -m dd_clip_miner_llm run "D:\videos\live.mp4" --config config.yaml --content-types song,dialogue
-python -m dd_clip_miner_llm run "D:\videos\live.mp4" --config config.yaml --video-codec auto --no-video-clips
-python -m dd_clip_miner_llm run "D:\videos\live.mp4" --config config.yaml --profile accuracy
-python -m dd_clip_miner_llm run "D:\videos\live.mp4" --config config.yaml --profile kv_optimized
+python -m dd_clip_miner_llm run "D:\videos\live.mp4" --config config/local/main.yaml
+python -m dd_clip_miner_llm run "D:\videos\live.mp4" --config config/local/main.yaml --content-types song,dialogue
+python -m dd_clip_miner_llm run "D:\videos\live.mp4" --config config/local/main.yaml --video-codec auto --no-video-clips
+python -m dd_clip_miner_llm run "D:\videos\live.mp4" --config config/local/main.yaml --profile accuracy
+python -m dd_clip_miner_llm run "D:\videos\live.mp4" --config config/local/main.yaml --profile kv_optimized
 ```
 
 `config/example/main.yaml` 默认使用 `kv_optimized` profile，并默认启用 `song` 与 `daily_summary`。其他内容类型可通过配置或 `--content-types song,dialogue` 临时开启。
@@ -204,10 +222,13 @@ python -m dd_clip_miner_llm run "D:\videos\live.mp4" --config config.yaml --prof
 ### 批量
 
 ```powershell
-python -m dd_clip_miner_llm batch-run "D:\input" --config config.yaml --work-root "D:\work" --result-root "D:\results"
-python -m dd_clip_miner_llm batch-run "D:\input" --config config.yaml --work-root "D:\work" --result-root "D:\results" --concat
-python -m dd_clip_miner_llm batch-run "D:\input" --config config.yaml --profile kv_optimized --work-root "D:\work" --result-root "D:\results"
+python -m dd_clip_miner_llm batch-run "D:\input" --config config/local/main.yaml --work-root "D:\work" --result-root "D:\results"
+python -m dd_clip_miner_llm batch-run "D:\input" --config config/local/main.yaml --work-root "D:\work" --result-root "D:\results" --concat
+python -m dd_clip_miner_llm batch-run "D:\input" --config config/local/main.yaml --profile kv_optimized --work-root "D:\work" --result-root "D:\results"
+python -m dd_clip_miner_llm batch-run "\\nas\recordings" --config config/local/main.yaml --work-root runs/batch --result-root runs/batch --cut-copy-conf
 ```
+
+`--cut-copy-conf` 不带路径时，从 `main.yaml` 的 `cut_copy.conf_path` 解析工作流配置（默认 `cut_copy.conf`，相对 `config/local/`）。
 
 配置包含 `profiles` 时，音频和 ASR 由两个 profile 共享，LLM、切片和报告分别写入
 `02_asr/llm/<profile>`、`03_clips/<profile>`、`04_reports/<profile>`。
@@ -246,8 +267,44 @@ python scripts/evaluate_song_pipeline_v2.py "results\<date>\<run>" --output ".tm
 编辑 `04_reports/<type>/*.csv` 中的 `start` / `end`，然后：
 
 ```powershell
-python -m dd_clip_miner_llm manual-cut "D:\runs\某次运行" --config config.yaml
+python -m dd_clip_miner_llm manual-cut "D:\runs\某次运行" --config config/local/main.yaml
 ```
+
+### 录播自动处理（cut-copy + 计划任务）
+
+典型拓扑：DDTV 录播 → SMB 共享 → GPU 机 `batch-run` → NAS 归档 → 可选关机。
+
+```powershell
+# 手动跑一次（先 dry-run）
+python -m dd_clip_miner_llm cut-copy --conf config/local/cut_copy.conf --dry-run
+python -m dd_clip_miner_llm cut-copy --conf config/local/cut_copy.conf
+```
+
+**Windows 计划任务**（需管理员 PowerShell）：
+
+```powershell
+.\scripts\setup_cut_copy_task.ps1 -ConfPath "D:\path\to\dd-clip-miner-llm\config\local\cut_copy.conf"
+```
+
+计划任务以 **`cut_copy.conf` 为入口**（非 `main.yaml`，也非独立 `cut-copy` CLI）：
+
+| cut_copy.conf 字段 | 用途 |
+|--------------------|------|
+| `source.path` | `batch-run` 扫描目录 |
+| `processing.config_path` | `batch-run --config`（通常 `config/local/main.yaml`） |
+| 同一文件路径 | `batch-run --cut-copy-conf`（批完成后归档/关机） |
+
+默认触发策略 `logon`：**仅在用户登录时**触发一次；启动器 `scripts/run_cut_copy_task.ps1` 会轮询等待 SMB/UNC 路径就绪（默认最多 45 分钟）后再执行 `batch-run`。
+
+| 参数 | 说明 |
+|------|------|
+| `-TriggerProfile logon` | 默认：仅登录时触发（推荐，SMB 凭据在登录后可用） |
+| `-TriggerProfile wol` | WOL 唤醒、无人登录：开机延迟 + 登录 + 定时重复（需存 Windows 密码） |
+| `-TriggerProfile repeat` | 仅定时重复，不绑登录/开机 |
+| `-NetworkWaitMinutes 45` | 单次运行等待 UNC 可达的最长时间 |
+| `-RepeatMinutes 15` | 定时重复间隔（仅 `wol` / `repeat` profile 生效） |
+
+日志：`cut_copy_task.log`（启动器）、`cut_copy.log`（cut-copy 工作流）。
 
 ### 拖拽重切合并
 
@@ -277,14 +334,15 @@ python -m dd_clip_miner_llm post-merge --context "...\merge_recut_context.json" 
 |------|------|
 | `run` | 单视频流水线 |
 | `batch-run` | 批量目录 |
+| `cut-copy` | 录播自动处理（扫描 SMB → run → 归档） |
 | `manual-cut` | 从 CSV 重切 |
 | `post-merge` | 从两个已导出歌曲片段反查 ASR 并重新切为一个片段 |
-| `init-config` | 生成默认 YAML |
+| `init-config` | 从 `config/example/main.yaml` 生成主配置（需配合 `xcopy config\example config\local`） |
 | `ffmpeg-info` | GPU / 硬件编码器探测 |
 
 ## 切片命名
 
-在 `output.clip_naming` 启用后，歌曲导出文件名形如 `【主播】晴天-周杰伦-260603.mp4`（日期 **仅** 从路径解析，如 `2026_06_03`）。需配置 `streamer_dictionary.json`；未命中则用 `default_streamer`。详情见 `config/example/main.yaml` 与 `clip_naming.py`。
+在 `output.clip_naming` 启用后，歌曲导出文件名形如 `【主播】晴天-周杰伦-260603.mp4`（日期 **仅** 从路径解析，如 `2026_06_03`）。`dictionary_path` 相对主配置所在目录解析（模块化配置下即 `config/local/streamer_dictionary.json`）；未命中则用 `default_streamer`。详情见 `config/example/output.yaml` 与 `clip_naming.py`。
 
 后处理可拖拽 `rename_drag_drop.bat`（逻辑在 `scripts/rename_drag_drop.py`）。
 
@@ -302,12 +360,17 @@ dd-clip-miner-llm/
 │   └── local/                  # 本地配置（不提交）
 ├── rename_drag_drop.bat
 ├── scripts/
+│   ├── setup_cut_copy_task.ps1   # 创建 Windows 计划任务
+│   ├── run_cut_copy_task.ps1     # 计划任务启动器（等待 UNC 后 batch-run）
+│   ├── migrate_config.py         # 旧单文件配置迁移工具
+│   ├── resolve_batch_config.py   # 解析 main.yaml → cut_copy.conf 链路
 │   ├── rename_drag_drop.py
 │   ├── fix_garbled_clip_names.py
 │   ├── evaluate_song_pipeline_v2.py
 │   ├── adaptive_cost_probe.py
 │   ├── review_scope_ab.py
 │   └── probe_concat_strategies.ps1
+├── docs/MIGRATION.md             # 配置迁移指南
 ├── tests/                      # 单元测试
 ├── .github/workflows/tests.yml
 └── dd_clip_miner_llm/
@@ -422,6 +485,9 @@ GitHub Actions（`.github/workflows/tests.yml`）在 Ubuntu + Python 3.10–3.12
 | concat 输出时长异常 | 查 `concat_attempts/*.log`；确认输入文件无损坏 |
 | MiMo ASR 连接失败 | 检查 `base_url` 和 `api_key`；确认网络可达 |
 | Qwen3 fallback 仍访问 Hugging Face | 确认 `local.gpu.funasr.hub: ms`；fallback 会继承 GPU FunASR 设置，旧配置可从 `config/example/main.yaml` 重新同步 |
+| 计划任务开机后 UNC 不可用 | 使用默认 `logon` 触发 + `run_cut_copy_task.ps1` 网络等待；或重新注册任务：`.\scripts\setup_cut_copy_task.ps1` |
+| `cut-copy` 报缺少 source/destination | 迁移后检查 `config/local/cut_copy.conf` 是否存在；或把完整工作流写入 `cut_copy.yaml` |
+| 计划任务仍指向旧 `config.yaml` | 管理员运行 `setup_cut_copy_task.ps1 -ConfPath ...\config\local\cut_copy.conf` 更新任务 |
 
 ## 与 dd-song-miner-llm 的兼容性
 

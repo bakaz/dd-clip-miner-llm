@@ -64,6 +64,28 @@ class TestLoadCutCopyConfig:
         assert cfg["behavior"]["max_files"] == 0
         assert cfg["destination"]["folder_format"] == "{date}_{streamer}"
 
+    def test_load_cut_copy_config_follows_domain_stub_conf_path(self, tmp_path):
+        """Domain stub with conf_path delegates to the workflow file."""
+        workflow = {
+            "source": {"path": str(tmp_path / "source")},
+            "destination": {"path": str(tmp_path / "dest")},
+            "processing": {"config_path": "config/local/main.yaml"},
+        }
+        (tmp_path / "cut_copy.conf").write_text(
+            yaml.dump(workflow, allow_unicode=True), encoding="utf-8"
+        )
+        stub = {
+            "enabled": False,
+            "conf_path": "cut_copy.conf",
+        }
+        stub_file = tmp_path / "cut_copy.yaml"
+        stub_file.write_text(yaml.dump(stub, allow_unicode=True), encoding="utf-8")
+
+        cfg = load_cut_copy_config(stub_file)
+
+        assert cfg["source"]["path"] == str(tmp_path / "source")
+        assert cfg["processing"]["config_path"] == "config/local/main.yaml"
+
     def test_load_cut_copy_config_missing_required(self, tmp_path):
         """Missing source.path → ValueError."""
         cfg = {
@@ -116,6 +138,26 @@ class TestScanPendingFiles:
         assert "video2_fix.mp4" in names
         assert "video1_fix.mp4" not in names
         assert "video3.mp4" not in names
+
+    def test_scan_pending_files_includes_date_subfolders(self, tmp_path):
+        """Videos under date subdirectories (e.g. 2026_06_25/) are included."""
+        source = tmp_path / "source"
+        day_dir = source / "2026_06_25"
+        day_dir.mkdir(parents=True)
+        (day_dir / "stream_fix.mp4").write_bytes(b"X" * 10)
+
+        config = {
+            "source": {
+                "path": str(source),
+                "pattern": "*_fix.mp4",
+                "done_marker": ".dd_clip_miner_cut_copy_done.json",
+            },
+            "behavior": {"max_files": 0},
+        }
+
+        pending = scan_pending_files(config)
+
+        assert [p.name for p in pending] == ["stream_fix.mp4"]
 
     def test_scan_pending_files_respects_max_files(self, tmp_path):
         """max_files=1 → only 1 file returned."""

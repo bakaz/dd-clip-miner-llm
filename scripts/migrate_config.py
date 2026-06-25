@@ -21,7 +21,7 @@ Produces:
         profiles/
             <profile_name>.yaml         # one file per profile
         streamer_dictionary.json        # copied from source if present
-        cut_copy.conf                   # copied from source if present
+        cut_copy.conf                   # copied + processing.config_path patched
 
 Usage:
     python scripts/migrate_config.py <old-config.yaml> --output config/local/
@@ -87,6 +87,9 @@ COMPANION_FILES: tuple[tuple[str, str], ...] = (
     ("cut_copy.conf", "cut_copy.conf"),
 )
 
+# Legacy standalone workflow filenames (YAML body, any extension)
+WORKFLOW_FILENAMES: tuple[str, ...] = ("cut_copy.conf", "cut_copy.yaml")
+
 # ── YAML helpers ────────────────────────────────────────────────────────────
 
 
@@ -126,6 +129,47 @@ def _write_file(dest: Path, content: str) -> None:
     """Write content to dest, creating parent directories."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_text(content, encoding="utf-8")
+
+
+def _main_config_path_for_workflow(source_dir: Path, output_dir: Path) -> str:
+    """Path to main.yaml for cut_copy.processing.config_path (relative to project cwd)."""
+    main_yaml = output_dir / "main.yaml"
+    try:
+        return main_yaml.relative_to(source_dir).as_posix()
+    except ValueError:
+        return str(main_yaml)
+
+
+def _load_workflow_yaml(path: Path) -> dict | None:
+    """Load a cut_copy workflow file if it contains the required top-level sections."""
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            data = yaml.safe_load(handle) or {}
+    except (yaml.YAMLError, OSError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    if not all(key in data for key in ("source", "destination", "processing")):
+        return None
+    return data
+
+
+def _patch_cut_copy_workflow(data: dict, main_config_path: str) -> dict:
+    """Point processing.config_path at the migrated main.yaml."""
+    patched = dict(data)
+    processing = dict(patched.get("processing") or {})
+    processing["config_path"] = main_config_path
+    patched["processing"] = processing
+    return patched
+
+
+def _find_workflow_source(source_dir: Path) -> Path | None:
+    """Return the first companion workflow file with full cut_copy sections."""
+    for name in WORKFLOW_FILENAMES:
+        candidate = source_dir / name
+        if candidate.is_file() and _load_workflow_yaml(candidate) is not None:
+            return candidate
+    return None
 
 
 def _strip_header(content: str) -> str:
@@ -192,12 +236,23 @@ def migrate(config_path: str, output_dir: str, *, dry_run: bool = False, overwri
     main_parts.append("")
     files_to_write["main.yaml"] = "\n".join(main_parts)
 
-    # Companion files
+    main_config_path = _main_config_path_for_workflow(source_dir, dest)
+
+    # Companion files (plain copy)
     copies: list[tuple[Path, str]] = []
     for src_filename, dst_filename in COMPANION_FILES:
+        if src_filename == "cut_copy.conf":
+            continue
         candidate = source_dir / src_filename
         if candidate.is_file():
             copies.append((candidate, dst_filename))
+
+    # cut_copy workflow: copy + patch processing.config_path → main.yaml
+    workflow_patches: list[tuple[str, str]] = []
+    workflow_src = _find_workflow_source(source_dir)
+    if workflow_src is not None:
+        workflow_dst = "cut_copy.conf"
+        workflow_patches.append((workflow_dst, workflow_src.name))
 
     # Warn about unrecognised top-level keys
     extra_keys = set(old.keys()) - set(DOMAIN_KEYS) - META_KEYS
@@ -207,12 +262,22 @@ def migrate(config_path: str, output_dir: str, *, dry_run: bool = False, overwri
 
     # ── Dry run ──────────────────────────────────────────────────────────
     if dry_run:
-        count = len(files_to_write) + len(copies)
+        count = len(files_to_write) + len(copies) + len(workflow_patches)
         print(f"DRY RUN — would create {count} file(s) in {dest}:")
         for fname in sorted(files_to_write):
             print(f"  [WRITE] {fname}")
         for _, dst_name in copies:
             print(f"  [COPY]  {dst_name}")
+        for dst_name, src_name in workflow_patches:
+            print(
+                f"  [PATCH] {dst_name} "
+                f"(from {src_name}; processing.config_path -> {main_config_path})"
+            )
+        if "cut_copy" in old:
+            print(
+                "  [NOTE]  cut_copy.yaml is the domain stub (enabled/conf_path); "
+                "workflow lives in cut_copy.conf"
+            )
         print("\nNo files were written.")
         return True
 
@@ -238,6 +303,20 @@ def migrate(config_path: str, output_dir: str, *, dry_run: bool = False, overwri
             shutil.copy2(src_path, target)
             created.append(f"{dst_name} (copy)")
 
+    for dst_name, src_name in workflow_patches:
+        target = dest / dst_name
+        if target.exists() and not overwrite:
+            skipped.append(f"{dst_name} (patch)")
+            continue
+        workflow_src = source_dir / src_name
+        workflow_data = _load_workflow_yaml(workflow_src)
+        if workflow_data is None:
+            print(f"  WARNING: Could not parse workflow file: {workflow_src}")
+            continue
+        patched = _patch_cut_copy_workflow(workflow_data, main_config_path)
+        _write_file(target, _yaml_dump(patched))
+        created.append(f"{dst_name} (patched from {src_name})")
+
     # ── Report ───────────────────────────────────────────────────────────
     print(f"Migration complete → {dest}")
     if created:
@@ -248,15 +327,17 @@ def migrate(config_path: str, output_dir: str, *, dry_run: bool = False, overwri
         print(f"  Skipped {len(skipped)} file(s) (use --overwrite to replace):")
         for item in skipped:
             print(f"    {item}")
+    if workflow_patches:
+        print(f"  cut_copy workflow config_path -> {main_config_path}")
 
     # ── Validate round-trip ──────────────────────────────────────────────
-    return _validate(dest, old)
+    return _validate(dest, old, main_config_path=main_config_path)
 
 
 # ── Validation ──────────────────────────────────────────────────────────────
 
 
-def _validate(output_dir: Path, old_config: dict) -> bool:
+def _validate(output_dir: Path, old_config: dict, *, main_config_path: str = "") -> bool:
     """Verify that the migrated files contain the same data as the original."""
     print("\n--- Round-trip validation ---")
 
@@ -309,6 +390,22 @@ def _validate(output_dir: Path, old_config: dict) -> bool:
         if expected_line not in main_text:
             print(f"  MISMATCH: default_profile '{old_default}' not found in main.yaml")
             all_ok = False
+
+    workflow_conf = output_dir / "cut_copy.conf"
+    if workflow_conf.is_file():
+        workflow_data = yaml.safe_load(workflow_conf.read_text(encoding="utf-8")) or {}
+        expected_path = main_config_path or _main_config_path_for_workflow(
+            output_dir.parent, output_dir
+        )
+        actual_path = str((workflow_data.get("processing") or {}).get("config_path", ""))
+        if actual_path != expected_path:
+            print(
+                f"  MISMATCH: cut_copy.conf processing.config_path "
+                f"expected '{expected_path}', got '{actual_path}'"
+            )
+            all_ok = False
+        else:
+            print(f"  PASS — cut_copy.conf processing.config_path -> {actual_path}")
 
     if all_ok:
         print("  PASS — all key/values match the original config.")

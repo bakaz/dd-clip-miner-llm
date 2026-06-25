@@ -73,6 +73,17 @@ def load_cut_copy_config(path: str | Path | None = None) -> dict:
     if not isinstance(cfg, dict):
         raise ValueError(f"Config file must be a YAML mapping: {p}")
 
+    # Migrated modular layouts may keep a domain stub (enabled/conf_path only)
+    # in cut_copy.yaml and the real workflow in cut_copy.conf beside main.yaml.
+    if "source" not in cfg:
+        conf_rel = str(cfg.get("conf_path", "")).strip()
+        if conf_rel:
+            delegated = Path(conf_rel)
+            if not delegated.is_absolute():
+                delegated = p.parent / delegated
+            if delegated.is_file() and delegated.resolve() != p.resolve():
+                return load_cut_copy_config(delegated)
+
     missing: list[str] = []
     for section in _REQUIRED_TOP:
         if section not in cfg:
@@ -200,12 +211,17 @@ def scan_pending_files(config: dict) -> list[Path]:
         _log(f"Source directory does not exist: {source_path}", Path(config.get("behavior", {}).get("log_file", "cut_copy.log")))
         return []
 
-    all_files = sorted(source_path.glob(pattern), key=lambda p: p.stat().st_mtime)
+    # Recursive: DDTV 录播通常落在 source.path 下的日期子目录（如 2026_06_25/）。
+    all_files = sorted(source_path.rglob(pattern), key=lambda p: p.stat().st_mtime)
 
     done = _load_done_marker(source_path, marker_name)
-    done_set = {Path(e["source"]) for e in done.get("processed", []) if isinstance(e, dict)}
+    done_set = {
+        Path(str(e["source"])).resolve()
+        for e in done.get("processed", [])
+        if isinstance(e, dict) and e.get("source")
+    }
 
-    pending = [f for f in all_files if f not in done_set]
+    pending = [f for f in all_files if f.resolve() not in done_set]
 
     max_files = config["behavior"].get("max_files", 0)
     if max_files > 0:

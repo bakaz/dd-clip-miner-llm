@@ -3,6 +3,7 @@
 These tests MUST FAIL before migrate_config.py is implemented.
 """
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -16,7 +17,7 @@ CONFIG_EXAMPLE = PROJECT_ROOT / "tests" / "config.example.yaml"
 
 def _run_migrate(args: list[str], **kwargs) -> subprocess.CompletedProcess:
     """Run migrate_config.py with the given args."""
-    cmd = ["python", str(MIGRATE_SCRIPT), *args]
+    cmd = [sys.executable, str(MIGRATE_SCRIPT), *args]
     return subprocess.run(cmd, capture_output=True, text=True, cwd=str(PROJECT_ROOT), **kwargs)
 
 
@@ -191,6 +192,61 @@ def test_companion_files_copied():
     # The config is at tests/config.example.yaml; its parent dir also holds
     # streamer_dictionary.example.json (not streamer_dictionary.json), so no copy expected.
     pass
+
+
+def test_cut_copy_conf_config_path_patched(tmp_path):
+    """cut_copy.conf processing.config_path is rewritten to the migrated main.yaml."""
+    old_config = {
+        "audio": {"sample_rate": 16000, "channels": 1},
+        "cut_copy": {"enabled": False, "conf_path": "cut_copy.conf"},
+        "default_profile": "kv_optimized",
+    }
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(yaml.dump(old_config, allow_unicode=True), encoding="utf-8")
+
+    workflow = {
+        "enabled": True,
+        "source": {"path": "//nas/recordings"},
+        "destination": {"path": "//nas/results"},
+        "processing": {"config_path": "config.yaml"},
+    }
+    (tmp_path / "cut_copy.conf").write_text(
+        yaml.dump(workflow, allow_unicode=True), encoding="utf-8"
+    )
+
+    output = tmp_path / "config" / "local"
+    result = _run_migrate([str(config_file), "--output", str(output)])
+    assert result.returncode == 0, result.stderr
+
+    patched = yaml.safe_load((output / "cut_copy.conf").read_text(encoding="utf-8"))
+    assert patched["processing"]["config_path"] == "config/local/main.yaml"
+    assert "processing.config_path -> config/local/main.yaml" in result.stdout
+
+
+def test_cut_copy_workflow_from_yaml_companion(tmp_path):
+    """A standalone cut_copy.yaml companion is written as patched cut_copy.conf."""
+    old_config = {
+        "cut_copy": {"enabled": False, "conf_path": "cut_copy.conf"},
+    }
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(yaml.dump(old_config, allow_unicode=True), encoding="utf-8")
+
+    workflow = {
+        "source": {"path": "//nas/recordings"},
+        "destination": {"path": "//nas/results"},
+        "processing": {"config_path": "D:/old/config.yaml"},
+    }
+    (tmp_path / "cut_copy.yaml").write_text(
+        yaml.dump(workflow, allow_unicode=True), encoding="utf-8"
+    )
+
+    output = tmp_path / "config" / "local"
+    result = _run_migrate([str(config_file), "--output", str(output)])
+    assert result.returncode == 0, result.stderr
+
+    assert (output / "cut_copy.conf").is_file()
+    patched = yaml.safe_load((output / "cut_copy.conf").read_text(encoding="utf-8"))
+    assert patched["processing"]["config_path"] == "config/local/main.yaml"
 
 
 # ── Helpers ────────────────────────────────────────────────────────

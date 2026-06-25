@@ -1,9 +1,10 @@
 # =============================================================================
 # cut_copy 录播自动处理工作流配置模板 (standalone)
 # =============================================================================
-# 读取方: python -m dd_clip_miner_llm cut-copy --conf cut_copy.conf
-#         或 batch-run 加 --cut-copy-conf（可省略路径，从 config.yaml 的 cut_copy.conf_path 读取）
-#         或 batch-run 结束后由 config.yaml 的 cut_copy.enabled 自动触发
+# 读取方: python -m dd_clip_miner_llm cut-copy --conf config/local/cut_copy.yaml
+#         或 batch-run 加 --cut-copy-conf（省略路径时从 main.yaml 的 cut_copy.conf_path 读取）
+#         或 batch-run 结束后由 main.yaml 的 cut_copy.enabled 自动触发
+# 迁移用户: cut_copy.yaml 可能仅为域桩（enabled/conf_path），实际工作流在 cut_copy.conf
 #
 # 首次使用:
 #   copy config/example/cut_copy.yaml config/local/cut_copy.yaml
@@ -21,13 +22,13 @@
 # 典型拓扑: DDTV 机录播 → SMB → GPU 机 batch-run → NAS 归档 → GPU 关机
 # =============================================================================
 
-# 是否启用 cut-copy。config.yaml 的 cut_copy.enabled 仍控制 batch-run 是否自动触发本流程。
+# 是否启用 cut-copy。main.yaml 的 cut_copy.enabled 仍控制 batch-run 是否自动触发本流程。
 enabled: true                               # false=本文件存在但不执行 cut-copy 逻辑
 
 # ─── source：DDTV 录播源目录 ─────────────────────────────────
 source:
   path: "//ddtv-machine/Recordings"           # SMB 共享或映射盘符，如 "R:/Recordings"
-  pattern: "*_fix.mp4"                        # 文件名通配；DDTV 时间轴修复后为 _fix.mp4
+  pattern: "*_fix.mp4"                        # 递归匹配子目录（如 2026_06_25/*.mp4）；DDTV 修复后为 _fix.mp4
   done_marker: ".dd_clip_miner_cut_copy_done.json"  # 处理完成后写入此文件，下次跳过
 
 # ─── destination：处理结果归档目标 ───────────────────────────
@@ -39,7 +40,7 @@ destination:
 
 # ─── processing：调用主程序时的参数 ──────────────────────────
 processing:
-  config_path: "config.yaml"                  # 主配置路径（profile、content_types、ASR 等）
+  config_path: "config/local/main.yaml"       # 主配置路径（profile、content_types、ASR 等）
   skip_on_failure: true                       # true=单文件失败继续下一个 | false=中止整批
 
 # ─── behavior：批处理完成后的清理与关机 ──────────────────────

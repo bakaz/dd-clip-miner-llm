@@ -127,7 +127,16 @@ python -c "from pathlib import Path; import yaml; c = yaml.safe_load(Path('confi
 
 ### `cut_copy.conf` 呢？
 
-脚本会从旧配置所在目录寻找 `cut_copy.conf` 并复制到输出目录。新版统一使用 YAML 格式的 `cut_copy.yaml`，内容与旧 `.conf` 不同，建议参考 `config/example/cut_copy.yaml` 重新填写。
+迁移后会保留**双文件布局**（推荐从旧版迁移的用户使用）：
+
+| 文件 | 内容 |
+|------|------|
+| `config/local/cut_copy.yaml` | 域配置桩：`enabled` + `conf_path`（来自旧 `config.yaml` 的 `cut_copy:` 段） |
+| `config/local/cut_copy.conf` | 完整工作流：`source` / `destination` / `processing` / `behavior` |
+
+脚本会从旧配置所在目录寻找 `cut_copy.conf`（或含完整工作流段的 `cut_copy.yaml`），写入 `config/local/cut_copy.conf`，并自动把 `processing.config_path` 改为 `config/local/main.yaml`。
+
+`load_cut_copy_config()` 会识别域桩并跟随 `conf_path` 读取 `cut_copy.conf`。若你希望单文件布局，也可参考 `config/example/cut_copy.yaml` 把完整工作流直接写入 `cut_copy.yaml`。
 
 ### `streamer_dictionary.json` 呢？
 
