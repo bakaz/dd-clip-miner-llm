@@ -282,7 +282,7 @@ profiles:
             load_config(config_file, profile="missing")
 
     def test_shipped_accuracy_profile_keeps_legacy_layout_with_review(self):
-        config = load_config("config.example.yaml", profile="accuracy")
+        config = load_config("config/example/main.yaml", profile="accuracy")
 
         assert config["llm"]["cache_friendly_prompt_layout"] is False
         assert config["llm"]["compact_segment_ranges"] is False
@@ -314,7 +314,7 @@ profiles:
         assert list_profile_names(loaded) == ["kv_optimized", "accuracy"]
 
     def test_accuracy_profile_declares_local_review_scope(self):
-        config = load_config("config.example.yaml", profile="accuracy")
+        config = load_config("config/example/main.yaml", profile="accuracy")
 
         assert config["song"]["review"]["transcript_scope"] == "local"
 
@@ -943,7 +943,7 @@ class TestSongMissedRecheck:
         assert DEFAULT_CONFIG["song"]["padding"]["max_song_seconds"] == 360.0
 
     def test_shipped_kv_profile_uses_fixed_risk_routed_pipeline(self):
-        config = load_config("config.example.yaml", profile="kv_optimized")
+        config = load_config("config/example/main.yaml", profile="kv_optimized")
 
         assert config["song"]["pipeline"]["strategy"] == "risk_routed_kv"
         assert config["song"]["pipeline"]["runtime_adaptive"] == "fixed_three_stage"
@@ -961,7 +961,7 @@ class TestSongMissedRecheck:
         assert config["song"]["padding"]["merge_gap_seconds"] == 40.0
 
     def test_accuracy_profile_keeps_legacy_song_pipeline(self):
-        config = load_config("config.example.yaml", profile="accuracy")
+        config = load_config("config/example/main.yaml", profile="accuracy")
 
         assert config["song"]["pipeline"]["strategy"] == "legacy"
         assert config["song"]["review"]["transcript_scope"] == "local"
@@ -3230,11 +3230,10 @@ class TestCLI:
         assert batch_args.profile == "accuracy"
 
     def test_generated_config_enables_fixed_risk_strategy_for_kv_profile(self):
-        import yaml
+        from dd_clip_miner_llm.cli import _config_example_path
+        from dd_clip_miner_llm.config import _load_yaml_with_includes
 
-        from dd_clip_miner_llm.cli import _generate_config_yaml
-
-        config = yaml.safe_load(_generate_config_yaml())
+        config = _load_yaml_with_includes(_config_example_path())
 
         missed = config["profiles"]["kv_optimized"]["song"]["missed_recheck"]
         review = config["profiles"]["kv_optimized"]["song"]["review"]
@@ -3256,14 +3255,16 @@ class TestCLI:
         assert config["song"]["missed_recheck"]["max_completion_tokens"] == 32768
         assert config["song"]["padding"]["merge_gap_seconds"] == 40.0
 
-    def test_daily_summary_example_disables_other_content_types(self):
+    def test_daily_summary_example_loads_domain_settings(self):
         from dd_clip_miner_llm.pipeline.utils import _get_content_types
 
-        config = load_config("config.daily-summary.example.yaml")
-        assert config["content_types"]["song"] is False
+        config = load_config("config/example/daily_summary.yaml")
+        # daily_summary.yaml is a domain file — content_types come from
+        # DEFAULT_CONFIG (song=True, daily_summary=True).
         assert config["content_types"]["daily_summary"] is True
-        assert config["song"]["enabled"] is False
-        assert _get_content_types(config) == ["daily_summary"]
+        assert config["daily_summary"]["enabled"] is True
+        assert config["daily_summary"]["summary_only"] is True
+        assert _get_content_types(config) == ["song", "daily_summary"]
 
     def test_init_config_matches_config_example_yaml(self):
         from dd_clip_miner_llm.cli import _config_example_path, _generate_config_yaml
@@ -3272,12 +3273,12 @@ class TestCLI:
 
     @pytest.mark.parametrize(
         "path",
-        ["config.example.yaml"],
+        ["config/example/main.yaml"],
     )
     def test_shipped_profile_configs_keep_only_shared_values_common(self, path):
-        import yaml
+        from dd_clip_miner_llm.config import _load_yaml_with_includes
 
-        raw = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+        raw = _load_yaml_with_includes(Path(path))
         common_llm = raw["llm"]
         common_song = raw["song"]
 

@@ -519,26 +519,34 @@ def test_compute_lyrics_similarity_no_overlap() -> None:
 
 
 def test_kv_v3_config_isolation() -> None:
-    """kv_v2 config should not affect other profiles."""
+    """kv_v2 defaults are present via DEFAULT_CONFIG, but accuracy
+    profile does not override them."""
     config_v2 = deepcopy(DEFAULT_CONFIG)
     config_v2["_profile_name"] = "kv_v2"
 
     config_acc = deepcopy(DEFAULT_CONFIG)
     config_acc["_profile_name"] = "accuracy"
 
-    # accuracy should not have kv_v2 settings
-    assert "kv_v2" not in config_acc.get("song", {})
+    # kv_v2 defaults are now present in DEFAULT_CONFIG.song for all profiles
+    assert "kv_v2" in config_acc.get("song", {})
+    assert config_acc["song"]["kv_v2"]["min_cluster_size_for_review"] == 2
+    assert config_acc["song"]["kv_v2"]["deletion_confidence_threshold"] == 0.75
+
+    # profile-specific values still override correctly
+    assert config_acc["_profile_name"] == "accuracy"
 
 
 def test_kv_v3_profile_in_cli_config() -> None:
     """kv_v2 profile should be in generated config."""
-    from dd_clip_miner_llm.cli import _generate_config_yaml
+    from pathlib import Path
 
-    yaml_content = _generate_config_yaml()
+    from dd_clip_miner_llm.config import _load_yaml_with_includes
 
-    assert "kv_v2:" in yaml_content
-    assert "min_cluster_size_for_review: 2" in yaml_content
-    assert "deletion_confidence_threshold: 0.75" in yaml_content
+    config = _load_yaml_with_includes(Path("config/example/main.yaml"))
+
+    kv_v2_profile = config["profiles"]["kv_v2"]
+    assert kv_v2_profile["song"]["kv_v2"]["min_cluster_size_for_review"] == 2
+    assert kv_v2_profile["song"]["kv_v2"]["deletion_confidence_threshold"] == 0.75
 
 
 def test_kv_v3_import_isolation() -> None:
