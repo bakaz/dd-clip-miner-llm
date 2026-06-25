@@ -48,10 +48,10 @@
 cd path\to\dd-clip-miner-llm
 python install.py --gpu cuda13 --funasr   # GPU 生产管线；无 GPU 可用 python install.py
 
-copy config.example.yaml config.yaml
+xcopy config\example config\local /E /I   # 复制配置模板；Linux/macOS: cp -r config/example config/local
 $env:OPENCODE_API_KEY = "<your-api-key>"      # 或设置 DEEPSEEK_API_KEY / MIMO_API_KEY
 
-python -m dd_clip_miner_llm run "D:\videos\live.mp4" --config config.yaml
+python -m dd_clip_miner_llm run "D:\videos\live.mp4" --config config/local/main.yaml
 ```
 
 也可使用入口脚本：`dd-clip-miner-llm run ...`（`pip install -e .` 后可用）。
@@ -104,26 +104,31 @@ pip install -r requirements-cu12.txt       # Ampere / Ada (CUDA 12)
 
 ## 配置
 
-复制模板并按需修改：
+> **已有用户**：从旧单文件格式迁移，参见 [docs/MIGRATION.md](docs/MIGRATION.md)（旧格式示例见 `tests/config.example.yaml`）。
+
+示例配置位于 `config/example/`，复制到 `config/local/` 后按需修改：
 
 ```powershell
-copy config.example.yaml config.yaml
-python -m dd_clip_miner_llm init-config --out config.yaml
+xcopy config\example config\local /E /I   # 仅首次；Linux/macOS: cp -r config/example config/local
+python -m dd_clip_miner_llm init-config --out config/local/main.yaml
 ```
 
 | 文件 | 说明 |
 |------|------|
-| `config.example.yaml` | 主配置模板（含注释） |
-| `config.daily-summary.example.yaml` | 仅当天总结 |
-| `cut_copy.example.conf` | 录播自动处理工作流（复制为 `cut_copy.conf`；模板默认不删源文件、不删工作目录、不关机） |
-| `streamer_dictionary.example.json` | 主播词典 |
+| `config/example/main.yaml` | 主配置（包含所有域配置） |
+| `config/example/daily_summary.yaml` | 仅当天总结 |
+| `config/example/cut_copy.yaml` | 录播自动处理工作流（复制到 `config/local/`；模板默认不删源文件、不删工作目录、不关机） |
+| `config/example/streamer_dictionary.json` | 主播词典 |
+| `config/example/song.yaml` | 歌曲识别 |
+| `config/example/llm.yaml` | LLM provider 配置 |
+| `config/example/asr.yaml` | ASR 后端配置 |
 
-**勿提交**（已在 `.gitignore`）：`config.yaml`、`cut_copy.conf`、`streamer_dictionary.json`、`runs/`。真实 API key、SMB 密码、WebHook 目标、主播词典和运行产物都应只留在这些本地文件或环境变量里；仓库模板保持 `api_key: null` + `api_key_env`。
+**勿提交**（已在 `.gitignore`）：`config/local/`、`runs/`。真实 API key、SMB 密码、WebHook 目标、主播词典和运行产物都应只留在本地文件或环境变量里；仓库模板保持 `api_key: null` + `api_key_env`。
 
-`cut_copy.conf` 建议先用 `python -m dd_clip_miner_llm cut-copy --conf cut_copy.conf --dry-run` 验证扫描范围。确认归档路径和复制验证稳定后，再按需开启 `behavior.delete_source_after_copy`、`behavior.delete_work_dir` 和 `behavior.shutdown_after`。
+`config/local/cut_copy.yaml` 建议先用 `python -m dd_clip_miner_llm cut-copy --conf config/local/cut_copy.yaml --dry-run` 验证扫描范围。确认归档路径和复制验证稳定后，再按需开启 `behavior.delete_source_after_copy`、`behavior.delete_work_dir` 和 `behavior.shutdown_after`。
 通过 `batch-run` 自动触发时，cut-copy 只后处理本轮实际新处理成功的 run；如果本轮全部来自 marker 跳过，不会复制、删除或关机。
 
-ASR 使用 `asr.mode: local | remote` 新结构（见 `config.example.yaml`）：
+ASR 使用 `asr.mode: local | remote` 新结构（见 `config/example/asr.yaml`）：
 
 - **硬件自动分流**（`device: auto` + `local.gpu` / `local.cpu`）：
   - **GPU（默认 backend: qwen3_asr）**：Qwen3-1.7B + chunk180 + funasr fallback；FW **turbo** 供对比/fallback
@@ -132,7 +137,7 @@ ASR 使用 `asr.mode: local | remote` 新结构（见 `config.example.yaml`）�
 - 二轮 fallback 结果会写回 `02_asr/transcript.json`，并保留 `transcript_primary.json`、`fallback_ranges.json`、`fallback_segments.json` 供审计。
 - Qwen3/FunASR GPU 模板默认 `hub: hf`，`load_config` 会自动设置 `HF_ENDPOINT`（默认 `https://hf-mirror.com`，见 `asr.hf_endpoint`）。FW（turbo/small）与 forced_aligner 同样走 HuggingFace Hub，一并受益。Qwen3 二轮 fallback 会继承 `local.gpu.funasr` 的 `model`、`hub`、`device`、`dtype`、`forced_aligner` 等设置，只覆盖 fallback 自己的 `timestamp_chunk_seconds`。
 
-**硬件分流**：`funasr`/`faster_whisper` 设 `device: auto`，并在 `local.gpu` / `local.cpu` 下分别写硬件专用配置（见 `config.example.yaml`）。无 `gpu:`/`cpu:` 节时，FW 在无 CUDA 时自动将 `compute_type` 降为 `int8`。
+**硬件分流**：`funasr`/`faster_whisper` 设 `device: auto`，并在 `local.gpu` / `local.cpu` 下分别写硬件专用配置（见 `config/example/asr.yaml`）。无 `gpu:`/`cpu:` 节时，FW 在无 CUDA 时自动将 `compute_type` 降为 `int8`。
 
 LLM Key 优先环境变量：默认模板使用 `OPENCODE_API_KEY`、`DEEPSEEK_API_KEY`、`MIMO_API_KEY`，也可在 provider 的 `api_key_env` 中改成自己的变量名。
 
@@ -194,7 +199,7 @@ python -m dd_clip_miner_llm run "D:\videos\live.mp4" --config config.yaml --prof
 python -m dd_clip_miner_llm run "D:\videos\live.mp4" --config config.yaml --profile kv_optimized
 ```
 
-`config.example.yaml` 默认使用 `kv_optimized` profile，并默认启用 `song` 与 `daily_summary`。其他内容类型可通过配置或 `--content-types song,dialogue` 临时开启。
+`config/example/main.yaml` 默认使用 `kv_optimized` profile，并默认启用 `song` 与 `daily_summary`。其他内容类型可通过配置或 `--content-types song,dialogue` 临时开启。
 
 ### 批量
 
@@ -279,7 +284,7 @@ python -m dd_clip_miner_llm post-merge --context "...\merge_recut_context.json" 
 
 ## 切片命名
 
-在 `output.clip_naming` 启用后，歌曲导出文件名形如 `【主播】晴天-周杰伦-260603.mp4`（日期 **仅** 从路径解析，如 `2026_06_03`）。需配置 `streamer_dictionary.json`；未命中则用 `default_streamer`。详情见 `config.example.yaml` 与 `clip_naming.py`。
+在 `output.clip_naming` 启用后，歌曲导出文件名形如 `【主播】晴天-周杰伦-260603.mp4`（日期 **仅** 从路径解析，如 `2026_06_03`）。需配置 `streamer_dictionary.json`；未命中则用 `default_streamer`。详情见 `config/example/main.yaml` 与 `clip_naming.py`。
 
 后处理可拖拽 `rename_drag_drop.bat`（逻辑在 `scripts/rename_drag_drop.py`）。
 
@@ -292,8 +297,9 @@ dd-clip-miner-llm/
 ├── install.py / install.yaml   # 推荐安装（install.yaml 为安装配置模板）
 ├── setup_env.py                # 旧版交互安装
 ├── requirements*.txt           # 与 pyproject 同步的 pip 清单
-├── config*.yaml                # 配置模板
-├── streamer_dictionary.example.json
+├── config/
+│   ├── example/                # 示例配置（按域拆分）
+│   └── local/                  # 本地配置（不提交）
 ├── rename_drag_drop.bat
 ├── scripts/
 │   ├── rename_drag_drop.py
@@ -415,7 +421,7 @@ GitHub Actions（`.github/workflows/tests.yml`）在 Ubuntu + Python 3.10–3.12
 | `clip_naming` 未生效 | 确认 `enabled`、词典路径、路径含日期、`apply_to` |
 | concat 输出时长异常 | 查 `concat_attempts/*.log`；确认输入文件无损坏 |
 | MiMo ASR 连接失败 | 检查 `base_url` 和 `api_key`；确认网络可达 |
-| Qwen3 fallback 仍访问 Hugging Face | 确认 `local.gpu.funasr.hub: ms`；fallback 会继承 GPU FunASR 设置，旧配置可从 `config.example.yaml` 重新同步 |
+| Qwen3 fallback 仍访问 Hugging Face | 确认 `local.gpu.funasr.hub: ms`；fallback 会继承 GPU FunASR 设置，旧配置可从 `config/example/main.yaml` 重新同步 |
 
 ## 与 dd-song-miner-llm 的兼容性
 
