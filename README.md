@@ -117,7 +117,9 @@ python -m dd_clip_miner_llm init-config --out config/local/main.yaml
 |------|------|
 | `config/example/main.yaml` | 主配置（包含所有域配置） |
 | `config/example/daily_summary.yaml` | 仅当天总结 |
-| `config/example/cut_copy.yaml` | 录播自动处理工作流（复制到 `config/local/`；模板默认不删源文件、不删工作目录、不关机） |
+| `config/example/cut_copy.yaml` | 录播工作流（**单文件**布局，含完整 `source`/`destination`/`processing`） |
+| `config/example/cut_copy.conf` | 录播工作流（**双文件**布局的工作流部分；与 `cut_copy_stub.yaml` 配对） |
+| `config/example/cut_copy_stub.yaml` | 录播域桩（**双文件**布局：`enabled` + `conf_path`） |
 | `config/example/streamer_dictionary.json` | 主播词典 |
 | `config/example/song.yaml` | 歌曲识别 |
 | `config/example/llm.yaml` | LLM provider 配置 |
@@ -129,22 +131,14 @@ python -m dd_clip_miner_llm init-config --out config/local/main.yaml
 
 | 布局 | 文件 | 适用场景 |
 |------|------|----------|
-| 单文件 | `config/local/cut_copy.yaml` 含完整 `source`/`destination`/`processing` | 新部署，从 `config/example/cut_copy.yaml` 复制 |
-| 迁移双文件 | `config/local/cut_copy.yaml` 仅 `enabled` + `conf_path`，工作流在 `config/local/cut_copy.conf` | 从旧版 `migrate_config.py` 迁移 |
+| 单文件 | `config/local/cut_copy.yaml` 含完整 `source`/`destination`/`processing` | 新部署：`copy config\example\cut_copy.yaml config\local\` |
+| 迁移双文件 | `config/local/cut_copy.yaml` 仅 `enabled` + `conf_path`，工作流在 `config/local/cut_copy.conf` | `copy config\example\cut_copy_stub.yaml` + `cut_copy.conf` 到 `config/local/` |
 
 `load_cut_copy_config()` 会自动识别域桩并跟随 `conf_path` 读取 `cut_copy.conf`。
 
-验证扫描范围：
+**`concat` 在哪？** 不在 `cut_copy.conf`，而在主配置的 `output.concat_videos`（模块化布局下为 `config/local/output.yaml`，由 `main.yaml` 引用）。计划任务的 `batch-run` 会读取该设置；也可用 CLI `--concat` 临时开启。
 
-```powershell
-python -m dd_clip_miner_llm cut-copy --conf config/local/cut_copy.conf --dry-run
-# 或（域桩会自动跳转到 cut_copy.conf）
-python -m dd_clip_miner_llm cut-copy --dry-run
-```
-
-确认归档路径和复制验证稳定后，再按需开启 `behavior.delete_source_after_copy`、`behavior.delete_work_dir` 和 `behavior.shutdown_after`。
-通过 `batch-run` 自动触发时，cut-copy 只后处理本轮实际新处理成功的 run；如果本轮全部来自 marker 跳过，不会复制、删除或关机。
-`processing.config_path` 应指向 `config/local/main.yaml`。
+`processing.config_path` 应指向 `config/local/main.yaml`。确认归档路径和复制验证稳定后，再按需开启 `behavior.delete_source_after_copy`、`behavior.delete_work_dir` 和 `behavior.shutdown_after`。
 
 ASR 使用 `asr.mode: local | remote` 新结构（见 `config/example/asr.yaml`）：
 
@@ -270,21 +264,60 @@ python scripts/evaluate_song_pipeline_v2.py "results\<date>\<run>" --output ".tm
 python -m dd_clip_miner_llm manual-cut "D:\runs\某次运行" --config config/local/main.yaml
 ```
 
-### 录播自动处理（cut-copy + 计划任务）
+### 录播自动处理（batch-run + 计划任务）
 
-典型拓扑：DDTV 录播 → SMB 共享 → GPU 机 `batch-run` → NAS 归档 → 可选关机。
+典型拓扑：DDTV 录播 → SMB 共享 → GPU 机 `batch-run`（含 concat）→ NAS 归档 → 可选关机。
+
+#### 三条入口，不要混用
+
+| 入口 | 命令 | 适用场景 |
+|------|------|----------|
+| **计划任务（推荐生产）** | `run_cut_copy_task.ps1` → `cut-copy-task` | 与注册任务完全一致：等 SMB → `batch-run` → 批后归档 |
+| **手动 batch（与计划任务等价）** | `cut-copy-task` 或 `batch-run ... --cut-copy-conf` | 本地调试、首次验证 |
+| **独立 cut-copy CLI** | `cut-copy --conf ...` | 不用 batch：逐文件 `run`、不走 concat；**不是**计划任务路径 |
+
+手动跑一轮（与计划任务相同，首次建议 `shutdown_after: false`）：
 
 ```powershell
-# 手动跑一次（先 dry-run）
-python -m dd_clip_miner_llm cut-copy --conf config/local/cut_copy.conf --dry-run
-python -m dd_clip_miner_llm cut-copy --conf config/local/cut_copy.conf
+# 推荐：与计划任务同款
+python -m dd_clip_miner_llm cut-copy-task --conf config/local/cut_copy.conf --project-root .
+
+# 或拆开写
+python -m dd_clip_miner_llm batch-run "\\nas\recordings" `
+  --config config/local/main.yaml --work-root runs/batch --result-root runs/batch `
+  --cut-copy-conf config/local/cut_copy.conf
 ```
 
-**Windows 计划任务**（需管理员 PowerShell）：
+探测 SMB 是否就绪（源目录可读、目标可写）：
+
+```powershell
+python -m dd_clip_miner_llm cut-copy-task --conf config/local/cut_copy.conf --probe-json
+```
+
+独立 `cut-copy` 仅用于「不用 batch」的逐文件工作流；查看待扫描文件：
+
+```powershell
+python -m dd_clip_miner_llm cut-copy --conf config/local/cut_copy.conf --dry-run
+```
+
+#### 两套跳过标记
+
+| 机制 | 标记文件 | 谁维护 |
+|------|----------|--------|
+| **batch-run**（计划任务） | 各日期目录下 `.dd_clip_miner_done.json` | `batch.py` |
+| **cut-copy CLI** | 源目录根 `.dd_clip_miner_cut_copy_done.json` | `cut_copy.py` |
+
+因此 `cut-copy --dry-run` 显示的 pending 数量**不能**代表 batch 进度；判断 batch 是否已处理请看各日期文件夹内的 `.dd_clip_miner_done.json`，或 batch 输出的 `[skip] Already processed`。
+
+通过 `batch-run` 自动触发时，批后归档只处理本轮 `processed_this_run: true` 且成功的 run；若本轮全部来自 marker 跳过，不会复制、删除或关机。
+
+#### Windows 计划任务
 
 ```powershell
 .\scripts\setup_cut_copy_task.ps1 -ConfPath "D:\path\to\dd-clip-miner-llm\config\local\cut_copy.conf"
 ```
+
+已注册且路径未变时**不必**重跑 setup；脚本更新后任务仍调用同一 `run_cut_copy_task.ps1`。
 
 计划任务以 **`cut_copy.conf` 为入口**（非 `main.yaml`，也非独立 `cut-copy` CLI）：
 
@@ -294,7 +327,7 @@ python -m dd_clip_miner_llm cut-copy --conf config/local/cut_copy.conf
 | `processing.config_path` | `batch-run --config`（通常 `config/local/main.yaml`） |
 | 同一文件路径 | `batch-run --cut-copy-conf`（批完成后归档/关机） |
 
-默认触发策略 `logon`：**仅在用户登录时**触发一次；启动器 `scripts/run_cut_copy_task.ps1` 会轮询等待 SMB/UNC 路径就绪（默认最多 45 分钟）后再执行 `batch-run`。
+默认触发策略 `logon`：**仅在用户登录时**触发一次。`run_cut_copy_task.ps1` 委托 Python `cut-copy-task`：在进程内等待 SMB/UNC 就绪（`scandir` 可读 + 目标目录可写探测，默认最多 45 分钟），再执行 `batch-run`。
 
 | 参数 | 说明 |
 |------|------|
@@ -304,7 +337,9 @@ python -m dd_clip_miner_llm cut-copy --conf config/local/cut_copy.conf
 | `-NetworkWaitMinutes 45` | 单次运行等待 UNC 可达的最长时间 |
 | `-RepeatMinutes 15` | 定时重复间隔（仅 `wol` / `repeat` profile 生效） |
 
-日志：`cut_copy_task.log`（启动器）、`cut_copy.log`（cut-copy 工作流）。
+手动触发已注册任务：`schtasks /Run /TN "DDClipMiner-CutCopy"`
+
+日志：`cut_copy_task.log`（启动器）、`cut_copy.log`（批后归档）。
 
 ### 拖拽重切合并
 
@@ -333,8 +368,9 @@ python -m dd_clip_miner_llm post-merge --context "...\merge_recut_context.json" 
 | 命令 | 说明 |
 |------|------|
 | `run` | 单视频流水线 |
-| `batch-run` | 批量目录 |
-| `cut-copy` | 录播自动处理（扫描 SMB → run → 归档） |
+| `batch-run` | 批量目录（支持 `--cut-copy-conf` 批后归档） |
+| `cut-copy-task` | 计划任务启动器：等 SMB → `batch-run` + 批后处理 |
+| `cut-copy` | 独立录播工作流（逐文件 `run`，非计划任务路径） |
 | `manual-cut` | 从 CSV 重切 |
 | `post-merge` | 从两个已导出歌曲片段反查 ASR 并重新切为一个片段 |
 | `init-config` | 从 `config/example/main.yaml` 生成主配置（需配合 `xcopy config\example config\local`） |
@@ -361,7 +397,7 @@ dd-clip-miner-llm/
 ├── rename_drag_drop.bat
 ├── scripts/
 │   ├── setup_cut_copy_task.ps1   # 创建 Windows 计划任务
-│   ├── run_cut_copy_task.ps1     # 计划任务启动器（等待 UNC 后 batch-run）
+│   ├── run_cut_copy_task.ps1     # 计划任务薄封装（委托 cut-copy-task）
 │   ├── migrate_config.py         # 旧单文件配置迁移工具
 │   ├── resolve_batch_config.py   # 解析 main.yaml → cut_copy.conf 链路
 │   ├── rename_drag_drop.py
@@ -376,7 +412,7 @@ dd-clip-miner-llm/
 └── dd_clip_miner_llm/
     ├── cli.py / __main__.py    # python -m dd_clip_miner_llm
     ├── pipeline/               # 主流水线
-    ├── batch.py / manual.py
+    ├── batch.py / cut_copy.py / cut_copy_task.py / manual.py
     ├── config.py               # 配置加载、profile 管理、歌曲 pipeline 选择
     ├── models.py / report.py / merger.py / post_merge.py
     ├── llm/                    # Provider、transport、prompt、parse、tools
@@ -485,9 +521,13 @@ GitHub Actions（`.github/workflows/tests.yml`）在 Ubuntu + Python 3.10–3.12
 | concat 输出时长异常 | 查 `concat_attempts/*.log`；确认输入文件无损坏 |
 | MiMo ASR 连接失败 | 检查 `base_url` 和 `api_key`；确认网络可达 |
 | Qwen3 fallback 仍访问 Hugging Face | 确认 `local.gpu.funasr.hub: ms`；fallback 会继承 GPU FunASR 设置，旧配置可从 `config/example/main.yaml` 重新同步 |
-| 计划任务开机后 UNC 不可用 | 使用默认 `logon` 触发 + `run_cut_copy_task.ps1` 网络等待；或重新注册任务：`.\scripts\setup_cut_copy_task.ps1` |
+| 计划任务开机后 UNC 不可用 | 使用默认 `logon` 触发 + `cut-copy-task` SMB 等待；`--probe-json` 检查 readable/writable |
 | `cut-copy` 报缺少 source/destination | 迁移后检查 `config/local/cut_copy.conf` 是否存在；或把完整工作流写入 `cut_copy.yaml` |
 | 计划任务仍指向旧 `config.yaml` | 管理员运行 `setup_cut_copy_task.ps1 -ConfPath ...\config\local\cut_copy.conf` 更新任务 |
+| `cut-copy --dry-run` 与 batch 跳过数量不一致 | 两套 marker 不同；batch 看 `.dd_clip_miner_done.json`，不要用 cut-copy dry-run 判断 batch 进度 |
+| ffmpeg `moov atom not found`（本地 staged 文件） | 删除 `runs/batch` 下对应日期目录后重跑；源文件在 SMB 上正常时多为本地缓存副本损坏 |
+| batch 后意外关机 | `cut_copy.conf` 的 `shutdown_after: true`；首次验证改为 `false` |
+| `main.yaml` 的 `cut_copy.enabled: false` 导致无批后归档 | 计划任务显式传 `--cut-copy-conf` 不受影响；手动 `batch-run` 不带该参数时需把 stub 改为 `enabled: true` |
 
 ## 与 dd-song-miner-llm 的兼容性
 
