@@ -1,0 +1,40 @@
+# kv_optimized：生产推荐。三阶段 KV 管线，平衡精度、召回与成本
+llm:
+  cache_friendly_prompt_layout: true
+  compact_segment_ranges: true
+song:
+  normalization:
+    force_merge_same_title: true          # true=同标题候选强制合并为一个演唱
+    chorus_aware_split: true              # true=同歌多次演唱按副歌间隔切开
+    chorus_gap_seconds: 130.0             # 两次演唱间隔 >N 秒视为不同次
+    chorus_similarity_threshold: 0.3      # 副歌文本相似度阈值 (0-1)
+    chorus_context_segments: 3            # 判断副歌时取的上下文段数
+  pipeline:
+    strategy: risk_routed_kv              # 三阶段: 发现→召回审计→时序裁决
+    runtime_adaptive: fixed_three_stage   # 固定跑满三阶段，不动态跳过
+    temporal_adjudication:
+      enabled: true                       # true=第三阶段对冲突候选做时序裁决
+      preserve_source_names: true         # true=裁决输出保留各阶段原始歌名
+      max_completion_tokens: 8192         # 裁决阶段 token 上限
+    stages:
+      discovery: precision                # 发现: precision=高精度少误报
+      recall_audit: uncovered_evidence    # 召回: 扫描未覆盖区间找漏歌
+      adjudication: full_transcript       # 裁决: 基于全文消歧
+    continuation_overlap_segments: 50     # 长上下文续写时前后重叠段数
+    allow_final_discovery: true           # true=裁决后允许最后一轮补发现
+    anchor_boundary_expansion: false      # false=不自动扩展锚点边界
+  naming:
+    search_query_source: lyric_anchors    # 搜索歌名时用 lyric_anchors 而非 title
+    preserve_unknown_on_weak_evidence: true  # 证据弱时保留「未知歌曲」不强行命名
+  search:
+    enabled: true                         # true=对 unknown 歌名联网搜索验证
+    search_unknown_only: true             # 若启用，仅搜 unknown 歌名
+    max_searches: 25                      # 单次 run 最大搜索次数
+  missed_recheck:
+    enabled: true
+    output_mode: anchors                  # anchors=输出锚点供后续扩展（非直接 matches）
+    min_uncovered_seconds: 10.0           # 未覆盖区间短于此秒数则忽略
+    check_all_uncovered: true             # true=检查所有未覆盖区间
+    max_tool_rounds: 0                    # 复查阶段禁用工具调用
+  review:
+    enabled: false                        # 三阶段已含裁决，无需额外 review

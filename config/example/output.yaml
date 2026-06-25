@@ -1,0 +1,23 @@
+# ─── output：导出与命名 ──────────────────────────────────────
+# 【作用】控制是否切出 mp3/mp4、编码参数、并行度、合并策略与文件命名。
+# 【流程】ContentResult 时间边界 → ffmpeg cut → 可选 concat 同歌多段 → clip_naming 重命名。
+video_clips: true                           # true=导出 mp4 视频切片
+audio_segments: true                        # true=导出 mp3 音频切片
+audio_extension: mp3                        # 音频容器: mp3 | wav | m4a 等
+audio_bitrate_kbps: 320                     # mp3 码率 (kbps)，320=近无损
+video_extension: mp4
+video_codec: copy                           # copy=流复制不重编码（快）| libx264 等
+match_context_segments: 10                  # 导出元数据附带的上下文段数（便于人工核对）
+max_export_workers: 4                       # ffmpeg 并行导出线程数
+concat_videos: true                         # true=同歌多段合并为一个 mp4（若可行）
+single_file_policy: copy                    # 单文件处理: copy=直接复制流
+concat_force_normalize: false               # true=合并前强制重编码归一化（慢，一般不需要）
+clip_naming:
+  enabled: true                             # true=按【主播】序号-歌名-歌手-YYMMDD 命名
+  dictionary_path: streamer_dictionary.json # 主播匹配词典（见 streamer_dictionary.example.json）
+  default_streamer: StreamerName            # 路径匹配失败时的默认主播名
+  min_score: 0.65                           # 路径与别名最低相似度 (0-1)
+  apply_to:                                 # 启用此命名规则的内容类型
+  - song
+# 歌曲导出目录会写入 merge_mp4.bat + merge_recut_context.json：
+# 拖两个 mp4/mp3 到 bat 可从原始录播重新切出合并文件，不覆盖原导出。

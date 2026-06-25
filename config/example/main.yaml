@@ -1,0 +1,42 @@
+# =============================================================================
+# dd-clip-miner-llm 主配置模板 (modular)
+# =============================================================================
+# 用法:
+#   python -m dd_clip_miner_llm run live.mp4 --config config/example/main.yaml
+#   python -m dd_clip_miner_llm run live.mp4 --config config.yaml --profile accuracy
+#
+# 首次部署: 复制 config/example/ 为 config/ 并填入 API Key。
+#
+# 整体处理流程（单次 run）:
+#   1. audio     — 从视频提取 16kHz 单声道 WAV
+#   2. asr       — 语音转文字，产出带时间戳的 transcript.json
+#   3. llm       — 按 content_types 启用各识别器（歌曲/对话/总结等）
+#   4. song 后处理 — normalization → risk 评分 → review/recheck → padding 算边界
+#   5. output    — ffmpeg 切出 mp3/mp4，按 clip_naming 规则命名
+#   6. cut_copy  —（可选）batch-run 完成后自动归档到 NAS 并关机
+# =============================================================================
+
+audio: !include audio.yaml
+asr: !include asr.yaml
+llm: !include llm.yaml
+content_types: !include content_types.yaml
+song: !include song.yaml
+padding: !include padding.yaml
+output: !include output.yaml
+dialogue: !include dialogue.yaml
+highlight: !include highlight.yaml
+funny: !include funny.yaml
+cringe: !include cringe.yaml
+daily_summary: !include daily_summary.yaml
+cut_copy: !include cut_copy.yaml
+
+# ─── profiles：歌曲挖掘方案 ──────────────────────────────────
+# 【作用】同一配置文件内预设多套 song/llm 策略，CLI --profile 或 default_profile 选用。
+# 【流程】load_config 时: DEFAULT_CONFIG ← 公共段 ← profiles[选中项] 深度合并。
+#         仅 profiles 段内的键会随 profile 切换；公共段（asr/llm/output 等）始终生效。
+default_profile: kv_optimized                 # 未指定 --profile 时使用的方案名
+
+profiles:
+  accuracy: !include profiles/accuracy.yaml
+  kv_v2: !include profiles/kv_v2.yaml
+  kv_optimized: !include profiles/kv_optimized.yaml

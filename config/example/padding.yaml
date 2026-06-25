@@ -1,0 +1,15 @@
+# ─── padding：全局切片边界填充（兼容旧版）────────────────────
+# 【作用】在 LLM 识别的 segment 索引基础上，向前后扩展秒数得到切歌起止时间。
+# 【流程】segment 起止时间 → ±before/after_seconds → 自适应静音延伸 → 合并相邻 → ffmpeg 切割。
+#         song.padding 存在时优先于本节；顶层 padding 会同步合并到 song.padding。
+before_seconds: 15.0                        # 每首歌起点向前扩展 (秒)，含前奏/说话尾音
+after_seconds: 15.0                         # 终点向后扩展 (秒)，含尾奏/ applause
+after_next_asr_end_guard_seconds: 2.0       # 终点不得侵入下一段 ASR 开始后 N 秒
+adaptive_silence_padding: true              # true=若邻段有大段静音则自动多扩边界
+adaptive_silence_gap_threshold_seconds: 25.0  # 静音间隙 ≥N 秒才触发自适应扩展
+adaptive_silence_gap_ratio: 0.95            # 扩展量 = 间隙时长 × 此比例（上限见下方 max）
+adaptive_max_before_seconds: 45.0           # 自适应前扩展硬上限 (秒)
+adaptive_max_after_seconds: 45.0            # 自适应后扩展硬上限 (秒)
+min_song_seconds: 75.0                      # 短于此秒数的候选丢弃（防误识别短哼唱）
+max_song_seconds: 360.0                     # 长于此秒数强制切分（防一整场算一首歌）
+merge_gap_seconds: 40.0                     # 相邻两首歌间隔 <N 秒则合并为一个

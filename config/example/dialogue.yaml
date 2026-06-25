@@ -1,0 +1,15 @@
+# ─── dialogue：对话片段识别 ──────────────────────────────────
+# 【作用】从直播中切出有趣对话/互动片段（需 content_types.dialogue=true）。
+# 【流程】LLM 按 tags 分类候选 → 过滤时长/置信度 → merge_gap 合并 → padding → 导出。
+enabled: true                               # 类型级开关（还需 content_types.dialogue=true）
+min_duration: 10.0                          # 最短切片时长 (秒)
+max_duration: 300.0                         # 最长切片时长 (秒)
+min_confidence: 0.6                         # LLM 置信度低于此丢弃
+merge_gap_seconds: 10.0                     # 相邻片段间隔 <N 秒则合并
+tags:                                       # LLM 分类标签白名单
+- 搞笑
+- 吐槽
+- 名场面
+- 金句
+- 互动
+- 高能

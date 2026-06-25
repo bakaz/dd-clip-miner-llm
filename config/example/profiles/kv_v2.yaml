@@ -1,0 +1,23 @@
+# kv_v2：KV 缓存友好 + 全文 review，适合长直播降 token 成本
+llm:
+  cache_friendly_prompt_layout: true      # true=固定前缀布局，利于 KV cache 命中
+  compact_segment_ranges: true            # true=压缩连续段为范围写法，省 token
+song:
+  pipeline:
+    strategy: legacy
+    runtime_adaptive: disabled
+    temporal_adjudication:
+      enabled: false
+  review:
+    enabled: true
+    transcript_scope: full                # 全文复核，消歧同名歌/相邻演唱
+    merge_policy: llm_guided              # llm_guided=按 LLM 决策合并同歌名簇
+  missed_recheck:
+    enabled: true
+    strategy: full_transcript             # 全文扫描漏检
+    output_mode: matches
+    fallback_strategy: windowed_on_structural_failure  # 全文失败时回退窗口模式
+  kv_v2:
+    min_cluster_size_for_review: 2        # 簇内候选 ≥N 才送 review
+    deletion_confidence_threshold: 0.75   # 置信度 ≥此值才允许删除候选
+    unknown_deletion_confidence_threshold: 0.6  # 「未知歌名」删除阈值（更宽松）

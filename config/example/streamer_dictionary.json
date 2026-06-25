@@ -1,0 +1,22 @@
+{
+  "_doc": "主播词典 — 供 output.clip_naming 从输入视频路径匹配主播名，生成【主播】序号-歌名-歌手-YYMMDD 文件名",
+  "_flow": "1) 从视频路径提取 YYMMDD 与路径文本 2) 与各 entry.aliases 做模糊匹配 3) score≥min_score 则采用 entry.streamer 4) 否则用 default_streamer",
+  "default_streamer": "StreamerName",
+  "min_score": 0.65,
+  "entries": [
+    {
+      "streamer": "示例主播",
+      "aliases": [
+        "example_streamer",
+        "streamer_folder_keyword"
+      ]
+    }
+  ],
+  "_fields": {
+    "default_streamer": "路径无法匹配任何别名时的兜底主播名；与 config output.clip_naming.default_streamer 互为备用",
+    "min_score": "别名与路径文本的 SequenceMatcher 相似度下限 (0.0-1.0)；低于此值视为未匹配",
+    "entries": "主播条目数组；可配置多个主播",
+    "entries[].streamer": "规范主播显示名，直接写入导出文件名【】内",
+    "entries[].aliases": "用于匹配的路径关键词列表：文件夹名、UID_主播名、简称、拼音等，越多越稳"
+  }
+}

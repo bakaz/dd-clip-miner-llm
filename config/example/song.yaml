@@ -1,0 +1,71 @@
+# ─── song：歌曲识别全局默认 ──────────────────────────────────
+# 【作用】profile 未覆盖时的歌曲管线默认参数；与 profiles.*.song 深度合并。
+# 【流程】
+#   LLM 识别候选 → normalization 合并/切分 → risk 评分 → review（可选）
+#   → missed_recheck 补漏 → padding 算时间 → output 导出
+enabled: true                               # false=跳过整个歌曲管线（content_types.song 也需 false）
+
+normalization:
+  force_merge_same_title: false             # false=同歌名不强制合并（profile 可覆盖为 true）
+  chorus_aware_split: false                 # false=不按副歌切分多次演唱
+  chorus_gap_seconds: 130.0                 # 副歌感知切分的演唱间隔阈值 (秒)
+  chorus_similarity_threshold: 0.3          # 判定同一副歌的文本相似度 (0-1)
+  chorus_context_segments: 3                # 提取副歌特征时的上下文段数
+
+search:
+  enabled: false                            # true=管线内主动 DuckDuckGo 搜歌名
+  search_unknown_only: true                 # true=只搜「未知歌曲」候选
+  max_searches: 25                          # 单次 run 搜索上限（防 API 限流）
+
+risk:
+  duration_weight: 1.0                      # 风险评分: 时长异常权重
+  boundary_expansion_weight: 2.0            # 边界过度扩展权重
+  overlap_weight: 2.0                       # 与其他候选重叠权重
+  evidence_weight: 2.0                      # 歌词证据不足权重
+  review_threshold: 0.55                    # 总分 ≥此值送 review（不直接拒绝）
+  reject_threshold: 0.9                     # 总分 ≥此值直接拒绝候选
+  soft_min_seconds: 150                     # 软最短：低于此加分但不立刻拒
+  soft_max_seconds: 360                     # 软最长：高于此加分但不立刻拒
+  boundary_gap_seconds: 20                  # ASR 间隙 ≥N 秒则在风险路由中切开候选
+  low_confidence: 0.65                      # LLM 置信度低于此视为低置信特征
+
+padding:
+  before_seconds: 15.0                      # 歌曲专用前填充 (秒)，覆盖顶层 padding
+  after_seconds: 15.0
+  after_next_asr_end_guard_seconds: 2.0
+  adaptive_silence_padding: true
+  adaptive_silence_gap_threshold_seconds: 25.0
+  adaptive_silence_gap_ratio: 0.95
+  adaptive_max_before_seconds: 45.0
+  adaptive_max_after_seconds: 45.0
+  min_song_seconds: 75.0
+  merge_gap_seconds: 40.0                   # 歌曲合并间隙 (秒)
+  max_song_seconds: 360.0
+
+missed_recheck:
+  enabled: true                             # true=对 transcript 未覆盖区间做 LLM 补扫
+  fallback_strategy: windowed_on_structural_failure  # 结构失败时回退 windowed 策略
+  batch_size: 500                           # 每批送入 LLM 的 segment 数上限
+  min_gap_segments: 1                       # 未覆盖区间至少隔 N 段才算有效空隙
+  context_segments: 10                      # 补扫时附带的前后上下文段数
+  max_completion_tokens: 32768              # 补扫单次 LLM token 上限
+  max_tool_rounds: 1                        # 补扫允许的工具调用轮数
+  max_anchor_segments: 12                   # anchors 模式下单锚点最多段数
+  anchor_max_expansion_seconds: 420         # 锚点边界最大扩展 (秒)
+  output_mode: matches                      # matches=直接输出歌曲 | anchors=仅锚点
+  min_uncovered_seconds: 10.0               # 未覆盖区间短于此则跳过
+
+review:
+  enabled: true                             # true=对可疑簇做 LLM 二次审核
+  transcript_scope: local                   # local=局部窗口 | full=全文
+  context_segments: 10                      # local 模式下上下文半宽（段数）
+  max_window_segments: 500                  # review 单次最大段数窗口
+  nearby_title_conflict_gap_segments: 2     # 近邻同歌名冲突判定间隔 (段)
+  max_completion_tokens: 32768
+  max_tool_rounds: 1
+  fallback: local_best                      # 复核失败时: local_best=保留局部最优
+  merge_policy: conservative                # conservative | llm_guided | aggressive
+
+naming:
+  search_query_source: title                # 构造搜索词来源: title | lyric_anchors
+  preserve_unknown_on_weak_evidence: true   # 证据不足时保留未知歌名不瞎填

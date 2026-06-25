@@ -1,0 +1,6 @@
+# ─── cringe：下头对话 ────────────────────────────────────────
+enabled: true
+min_duration: 5.0
+max_duration: 120.0
+min_confidence: 0.6
+merge_gap_seconds: 15.0

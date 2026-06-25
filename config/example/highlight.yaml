@@ -1,0 +1,7 @@
+# ─── highlight：高能时刻 ─────────────────────────────────────
+# 【作用】识别欢呼、礼物爆点、情绪高潮等短片段。
+enabled: false                              # 需 content_types.highlight=true 才运行
+min_duration: 5.0
+max_duration: 120.0
+min_confidence: 0.6
+merge_gap_seconds: 15.0

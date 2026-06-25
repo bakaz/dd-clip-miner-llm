@@ -1,0 +1,120 @@
+# ─── asr：语音识别 ───────────────────────────────────────────
+# 【作用】将音频转为带时间戳的文字稿（transcript），是全管线的数据基础。
+# 【流程】
+#   mode=local:
+#     ① 检测 GPU → 有则合并 gpu 节，无则合并 cpu 节
+#     ② backend=qwen3_asr: Qwen3-1.7B 分块识别 → 稀疏段 funasr.fallback 重跑
+#     ③ backend=faster_whisper: batch 模式优先 → fallback 回退 standard
+#     ④ 产出 TranscriptSegment 列表（start/end/text）
+#   mode=remote: 音频分块上传云端 API（Mimo 等）
+#
+# GPU 安装: python install.py --config install.yaml --gpu cuda13
+mode: local          # local=本机推理（推荐）| remote=云端 API（需网络和 Key）
+hf_endpoint: https://hf-mirror.com  # load_config 时自动设置 HF_ENDPOINT；null=禁用镜像直连 HF
+
+local:
+  backend: qwen3_asr # 主后端: qwen3_asr | faster_whisper | funasr(SenseVoice)
+
+  # --- funasr：FunASR / Qwen3-ASR 参数 ---
+  # 【作用】Qwen3 主路径及稀疏段回退；gpu.funasr 会覆盖 model/hub 等。
+  funasr:
+    device: auto                    # auto=自动选 cuda/cpu | cuda:0 | cpu
+    trust_remote_code: true         # true=允许 HF 模型执行仓库内自定义代码
+    batch_size: null                # null=框架自动 | 整数=推理批大小
+    language: null                  # null=自动检测 | zh | en | ja 等 ISO 代码
+    vad_model: null                 # 可选 VAD 模型 ID，null=不使用额外 VAD
+    punc_model: null                # 可选标点恢复模型，null=不后处理标点
+    spk_model: null                 # 可选说话人分离模型，null=不区分说话人
+    generate_kwargs:
+      return_time_stamps: true      # true=要求模型返回字/词级时间戳
+    keep_chunk_audio: false         # true=保留分块 wav 到磁盘（调试 ASR 用）
+    lyrics:
+      enabled: false                # true=按歌词格式重排文本（歌切专用，直播一般关）
+      max_line_chars: 24            # 歌词单行最大字符，超出强制换行
+      sentence_punctuation: "。！？.!?\n"  # 用于分句的标点字符集
+      max_sentence_duration_ms: 5000  # 单句最长毫秒，过长则强制切分
+    fallback:
+      enabled: true                 # true=主 ASR 输出稀疏/重复时，对问题区间分块重跑
+      chunk_seconds: 5              # 回退时每块音频长度 (秒)
+      max_segment_seconds: 15       # 回退结果单段最长 (秒)，超出再切
+      sparse_chars_per_sec: 1.0     # 字符密度低于此值 (字/秒) 视为稀疏需回退
+      repeat_threshold: 3           # 同文本连续重复 ≥N 次视为 ASR 幻觉，触发回退
+      padding_seconds: 2.0          # 回退切片在问题区间两侧各扩展 (秒)
+      max_workers: 1                # 回退并行线程数；1 更稳，显存/CPU 紧时可保持 1
+      min_gap_seconds: 10.0         # transcript 间隙 ≥N 秒触发 fill；默认 10s 平衡覆盖与回退次数
+      merge_policy: fill_fix_asr    # fill_fix_asr=补间隙+修坏段 | replace_ranges | fill_gaps
+      zero_duration_policy: merge_adjacent  # 零时长段: merge_adjacent=并入邻段
+
+  # --- faster_whisper：Whisper 本地推理 ---
+  # 【作用】CPU 主路径；GPU 上作为 Qwen3 的补充/对比；batch↔standard 可互备。
+  faster_whisper:
+    device: auto                    # auto | cuda | cpu
+    compute_type: default           # default=自动 | int8(CPU推荐) | float16 | bf16
+    cpu_threads: 8                  # CPU 推理线程，建议 ≈ 物理核心数
+    num_workers: 1                  # 并行加载/推理 worker，多 worker 占更多显存
+    language: null                  # null=自动检测语言
+    beam_size: 5                    # beam search 宽度，越大越准越慢
+    initial_prompt: null            # 文本提示引导专有名词，如 "綾音Aya 直播"
+    word_timestamps: true           # true=输出词级时间戳（切歌边界更准）
+    split_on_word_gaps: true        # true=词间长静音处切开 segment
+    word_gap_seconds: 2.0           # 词间静音 ≥N 秒则切分新段
+    max_segment_seconds: 15.0       # 单 segment 最长 (秒)，防 Whisper 输出过长段
+    batch:
+      model: small                  # 批处理模型: tiny/base/small/medium/large-v3/turbo
+      inference_mode: batched       # batched=CTranslate2 批量推理（快）
+      batch_size: 8                 # 批大小，>0 才启用 batched；显存不足可改 4
+      vad_filter: true              # true=VAD 预过滤静音（减噪、提速）
+    standard:
+      model: small                  # 标准模式模型（可与 batch 不同）
+      inference_mode: standard      # standard=逐段推理（稳，适合回退）
+      batch_size: 0                 # 0=禁用批处理
+      vad_filter: false             # 标准模式一般关 VAD，避免过度切分
+    fallback:
+      enabled: true                 # true=batch 质量差时自动用 standard 重跑问题区间
+      primary_mode: batch           # 首选推理模式名，对应上面 batch/standard 节
+      fallback_mode: standard       # 回退目标模式
+      min_gap_seconds: 10.0         # transcript 间隙 ≥N 秒触发 fill；可调低(4)或调高(30)
+      padding_seconds: 2.0          # 回退音频区间两侧扩展 (秒)
+      max_workers: 1                # 回退并行度
+      max_segment_seconds: 15.0     # 回退段最长 (秒)
+      sparse_chars_per_sec: 1.0     # 稀疏判定阈值 (字/秒)
+      repeat_threshold: 3           # 重复幻觉判定次数
+      merge_policy: fill_fix_asr    # fill_fix_asr=补间隙+修坏段 | replace_ranges | fill_gaps
+
+  # --- gpu：有 CUDA 时自动合并到此节 ---
+  # 【流程】device=auto 且检测到 GPU → funasr/faster_whisper 参数被本节覆盖。
+  gpu:
+    funasr:
+      model: Qwen/Qwen3-ASR-1.7B              # Qwen3 ASR 模型 ID
+      hub: hf                                 # hf=HuggingFace Hub（配合 asr.hf_endpoint 镜像）| ms=ModelScope
+      device: cuda:0                          # 使用的 GPU 设备号
+      dtype: bf16                             # 推理精度: bf16(推荐) | fp16 | fp32
+      timestamp_chunk_seconds: 180            # 长直播按 N 秒切块识别再拼接时间轴
+      max_workers: 1                          # 分块并行数；1 更省显存，足时可改 2
+      forced_aligner: Qwen/Qwen3-ForcedAligner-0.6B  # 强制对齐模型，细化时间戳
+      forced_aligner_kwargs: {}               # 传给对齐模型的额外 kwargs
+    faster_whisper:
+      batch:
+        model: turbo                          # GPU 回退/对比用 turbo（快且准）
+      standard:
+        model: turbo
+
+  # --- cpu：无 CUDA 时自动合并到此节 ---
+  cpu:
+    backend: faster_whisper                   # CPU 强制走 faster_whisper（不用 Qwen3）
+    faster_whisper:
+      compute_type: int8                      # CPU 必用 int8，default 会很慢
+      batch:
+        model: small                          # CPU 用 small 平衡速度/精度
+      standard:
+        model: small
+
+# --- remote：云端 ASR（asr.mode=remote 时整条本地节被跳过）---
+remote:
+  provider: mimo                              # 提供商标识，决定请求格式
+  base_url: https://token-plan-cn.xiaomimimo.com/v1  # OpenAI 兼容 API 根地址
+  api_key: null                               # 直接写 Key；null 则从 api_key_env 读
+  api_key_env: MIMO_API_KEY                   # 环境变量名，优先级低于 api_key
+  model: mimo-v2.5-asr                        # 云端 ASR 模型名
+  timestamp_chunk_seconds: 5                  # 上传前音频分块时长 (秒)
+  language: null                              # null=自动 | zh 等

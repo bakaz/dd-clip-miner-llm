@@ -1,0 +1,17 @@
+# accuracy：最高召回，适合歌单完整性优先、可接受更多 LLM 成本
+llm:
+  cache_friendly_prompt_layout: false     # false=完整 prompt 布局，精度优先于 token 节省
+  compact_segment_ranges: false           # false=段范围不压缩，LLM 看到完整索引
+song:
+  pipeline:
+    strategy: legacy                      # legacy=旧版单阶段识别+后处理
+    runtime_adaptive: disabled            # disabled=不动态切换策略
+    temporal_adjudication:
+      enabled: false                      # false=不做时序裁决（多候选消歧）
+  review:
+    enabled: true                         # true=LLM 二次复核可疑切片
+    transcript_scope: local               # local=仅看候选附近段落 | full=全文
+  missed_recheck:
+    enabled: true                         # true=对未覆盖区间做漏检复查
+    strategy: windowed                    # windowed=滑动窗口 | full_transcript=全文扫描
+    output_mode: matches                  # matches=直接补歌曲 | anchors=仅补锚点

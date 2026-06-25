@@ -1,0 +1,76 @@
+# ─── llm：大语言模型 ─────────────────────────────────────────
+# 【作用】驱动歌曲识别、对话分类、直播总结等所有「理解」步骤。
+# 【流程】
+#   ① provider_route 按序尝试各 provider，首个 api_key 可用者生效
+#   ② 识别器将 ASR 段分批送入 LLM，要求返回结构化 JSON
+#   ③ 空输出/截断 → reasoning_followup 或 continuation 续写
+#   ④ JSON 解析失败 → json_fix_rounds 轮修复
+#   ⑤ use_tools=true 时 LLM 可调用搜索验证歌名
+provider_route:                             # 提供商优先级列表，从上到下尝试
+- opencode
+- deepseek
+- mimo
+providers:
+  opencode:
+    api_key: null                           # API Key；null 则从 api_key_env 环境变量读取
+    api_key_env: OPENCODE_API_KEY           # 环境变量名
+    base_url: https://opencode.ai/zen/go/v1 # OpenAI 兼容 API 地址
+    model: deepseek-v4-flash                # 模型 ID，影响识别质量与费用
+    temperature: 0.1                        # 0.0-1.0，越低输出越稳定可复现
+    max_tokens: 8192                        # 单次 completion 最大生成 token
+    timeout_schedule:                       # 第 1/2/3 次请求超时 (秒)，逐次放宽
+    - 60
+    - 120
+    - 180
+    retry_backoff_seconds:                  # 失败后等待 (秒) 再重试
+    - 2
+    - 5
+    retry_jitter_ratio: 0.25                # 退避时间随机抖动比例，防并发雪崩
+    result_retries: 2                       # 空结果或 JSON 无效时的重试次数
+  deepseek:
+    api_key: null
+    api_key_env: DEEPSEEK_API_KEY
+    base_url: https://api.deepseek.com
+    model: deepseek-v4-flash
+    thinking: disabled                      # disabled=普通模式 | enabled=深度推理（更慢更贵）
+    temperature: 0.1
+    max_tokens: 8192
+    timeout_schedule:
+    - 60
+    - 120
+    - 180
+    retry_backoff_seconds:
+    - 2
+    - 5
+    retry_jitter_ratio: 0.25
+    result_retries: 2
+  mimo:
+    api_key: null
+    api_key_env: MIMO_API_KEY
+    base_url: https://token-plan-cn.xiaomimimo.com/v1
+    model: mimo-v2.5-pro
+    temperature: 0.1
+    max_tokens: 8192
+    timeout_schedule:
+    - 60
+    - 120
+    - 180
+    retry_backoff_seconds:
+    - 2
+    - 5
+    retry_jitter_ratio: 0.25
+    result_retries: 2
+retry_empty_with_reasoning: true            # true=首次返回空 JSON 时追加 reasoning 追问
+reasoning_followup_rounds: 5                # reasoning 追问最多轮数
+reasoning_followup_max_tokens: 32768        # 每轮 reasoning 最大 token
+max_completion_tokens: 32768                # 全局 completion 上限（防账单爆炸）
+batch_size: null                            # LLM 每批送入的 segment 数；null=自动按上下文算
+max_tool_rounds: 2                          # 工具调用（搜索）最大往返轮数
+final_tool_max_tokens: 32768                # 工具调用后最终回复 token 上限
+continuation_on_length: true                # true=输出因 length 截断时自动续写拼接
+max_continuation_rounds: 8                  # 续写最多轮数
+debug_store_requests: false                 # true=每轮 LLM 请求/响应写入 llm_debug/（调试用）
+reuse_valid_batches: true                   # true=中断重跑时复用已验证的批结果
+use_tools: true                             # true=允许 LLM 调用 search 等工具
+verify_with_search: true                    # true=歌名识别后联网搜索交叉验证
+json_fix_rounds: 3                          # JSON 解析失败时让 LLM 自我修复的轮数

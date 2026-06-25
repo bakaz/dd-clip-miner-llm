@@ -1,0 +1,14 @@
+# ─── daily_summary：当日直播总结 ─────────────────────────────
+# 【作用】用 LLM 将整场 ASR 归纳为三层金字塔 Markdown/JSON 总结。
+# 【流程】ASR 全文 → LLM 分批/续写 → 合并为 level1/2/3 结构 → 写 summary.md（summary_only 时不切片）。
+#         专用配置见 config.daily-summary.example.yaml。
+enabled: true
+summary_only: true                          # true=只写总结文件，不为总结单独切音视频
+language: zh-CN                             # 总结输出语言
+title: 当天直播内容总结                       # 总结文档标题
+max_level1_items: 6                         # 一级主题（「今天讲了什么」）数量上限
+max_level2_per_level1: 5                    # 每个一级下二级主题上限
+max_level3_per_level2: 4                    # 每个二级下三级事实/例子上限
+include_timeline: true                      # true=输出关键时间节点时间线
+include_quotes: true                        # true=每条包含 ASR 原话摘录
+include_open_questions: true                # true=列出未解答/待跟进问题

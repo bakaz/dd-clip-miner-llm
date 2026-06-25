@@ -1,0 +1,9 @@
+# ─── content_types：内容识别总开关 ───────────────────────────
+# 【作用】控制 run 时启动哪些 LLM 识别器；false 的类型的 song.enabled 等仍可能被合并，但识别器不跑。
+# 【流程】orchestrator 遍历 true 的类型 → 各 recognizer 读 ASR → 写 matches → 进入后处理/导出。
+song: true                                  # 歌曲识别与切片（主功能）
+dialogue: false                             # 对话/聊天精彩片段
+highlight: false                            # 高能时刻（欢呼、爆点等）
+funny: false                                # 搞笑片段
+cringe: false                               # 下头/尴尬对话
+daily_summary: true                         # 当日直播文字总结（可与 song 并行）
