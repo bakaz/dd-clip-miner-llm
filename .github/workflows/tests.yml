@@ -55,8 +55,8 @@ jobs:
 
       - name: Validate config profiles
         run: |
-          python -c "from dd_clip_miner_llm.config import load_config; load_config('config.example.yaml', profile='accuracy')"
-          python -c "from dd_clip_miner_llm.config import load_config; load_config('config.example.yaml', profile='kv_optimized')"
+          python -c "from dd_clip_miner_llm.config import load_config; load_config('config/example/main.yaml', profile='accuracy')"
+          python -c "from dd_clip_miner_llm.config import load_config; load_config('config/example/main.yaml', profile='kv_optimized')"
 
       - name: Compile package
         run: python -m compileall -q dd_clip_miner_llm tests

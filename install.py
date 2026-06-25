@@ -689,13 +689,13 @@ def main():
         print("\n✓ 所有组件安装成功！")
         print("\n下一步：")
         if platform.system() == "Windows":
-            print("  1. 复制配置文件: copy config.example.yaml config.yaml")
+            print("  1. 复制配置文件: xcopy config\\example config\\local /E /I")
             print("  2. 设置 API key: $env:OPENCODE_API_KEY='your-key'  # 或 DEEPSEEK_API_KEY / MIMO_API_KEY")
         else:
-            print("  1. 复制配置文件: cp config.example.yaml config.yaml")
+            print("  1. 复制配置文件: cp -r config/example config/local")
             print("  2. 设置 API key: export OPENCODE_API_KEY='your-key'  # 或 DEEPSEEK_API_KEY / MIMO_API_KEY")
         print("  3. GPU 生产管线 (可选): python install.py --gpu cuda13 --funasr  (仅 GPU 用户；如已安装 GPU 依赖可跳过)")
-        print("  4. 运行: python -m dd_clip_miner_llm run video.mp4 --config config.yaml")
+        print("  4. 运行: python -m dd_clip_miner_llm run video.mp4 --config config/local/main.yaml")
     else:
         print("\n✗ 安装过程中出现错误，请检查日志。")
         sys.exit(1)
