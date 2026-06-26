@@ -11,8 +11,6 @@
 
 默认配置偏向歌曲切片和当天总结：`content_types.song: true`、`daily_summary: true`，对话/高能/搞笑/下头片段默认关闭，需要时可在配置或 `--content-types` 中开启。
 
-**完全兼容** [dd-song-miner-llm](https://github.com/bakaz/dd-song-miner-llm) 的配置和工作流程。
-
 ## 特性
 
 - **可插拔识别器**：每种内容类型独立实现（`recognizers/`）
