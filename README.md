@@ -111,9 +111,22 @@ xcopy config\example config\local /E /I   # 仅首次；Linux/macOS: cp -r confi
 python -m dd_clip_miner_llm init-config --out config/local/main.yaml
 ```
 
+### 模块化配置（生产推荐）
+
+将 `config/example/` 复制为 `config/local/` 后编辑本地文件：
+
+```powershell
+xcopy config\example config\local /E /I
+python -m dd_clip_miner_llm run "D:\videos\live.mp4" --config config/local/main.yaml
+```
+
+入口文件为 [`config/example/main.yaml`](config/example/main.yaml)。从旧单文件迁移见 [`docs/MIGRATION.md`](docs/MIGRATION.md)（`python scripts/migrate_config.py config.yaml --output config/local/`）。
+
 | 文件 | 说明 |
 |------|------|
-| `config/example/main.yaml` | 主配置（包含所有域配置） |
+| `config.example.yaml` | 旧格式单文件模板（含注释，仍支持） |
+| `config/example/main.yaml` | 主配置（`!include` 各域配置） |
+| `config/local/` | 本地配置目录（gitignore，首次从 example 复制） |
 | `config/example/daily_summary.yaml` | 仅当天总结 |
 | `config/example/cut_copy.yaml` | 录播工作流（**单文件**布局，含完整 `source`/`destination`/`processing`） |
 | `config/example/cut_copy.conf` | 录播工作流（**双文件**布局的工作流部分；与 `cut_copy_stub.yaml` 配对） |
@@ -122,6 +135,9 @@ python -m dd_clip_miner_llm init-config --out config/local/main.yaml
 | `config/example/song.yaml` | 歌曲识别 |
 | `config/example/llm.yaml` | LLM provider 配置 |
 | `config/example/asr.yaml` | ASR 后端配置 |
+| `config.daily-summary.example.yaml` | 仅当天总结（根目录单文件） |
+| `cut_copy.example.conf` | 录播工作流根目录模板（复制为 `cut_copy.conf`） |
+| `streamer_dictionary.example.json` | 主播词典根目录模板 |
 
 **勿提交**（已在 `.gitignore`）：`config/local/`、`runs/`。真实 API key、SMB 密码、WebHook 目标、主播词典和运行产物都应只留在本地文件或环境变量里；仓库模板保持 `api_key: null` + `api_key_env`。
 
@@ -361,6 +377,23 @@ python -m dd_clip_miner_llm post-merge --context "...\merge_recut_context.json" 
 | `--video-codec` | `copy` / `auto` / `nv` / `intel` / `amd` / `cpu` |
 | `--no-video-clips` | 只导出音频 |
 
+### 录播自动处理（batch-run + 计划任务）
+
+典型拓扑：录播目录 → SMB 共享 → GPU 机 `batch-run`（含 concat）→ NAS 归档 → 可选关机。
+
+```powershell
+# 与 Windows 计划任务同款
+python -m dd_clip_miner_llm cut-copy-task --conf cut_copy.conf --project-root .
+
+# 探测 SMB 是否就绪
+python -m dd_clip_miner_llm cut-copy-task --conf cut_copy.conf --probe-json
+
+# 注册计划任务
+.\scripts\setup_cut_copy_task.ps1 -ConfPath "D:\path\to\cut_copy.conf"
+```
+
+`batch-run` 支持 `--cut-copy-conf`（省略路径时从主配置的 `cut_copy.conf_path` 读取）。批后归档只处理本轮 `processed_this_run: true` 的成功 run。
+
 ### CLI 命令
 
 | 命令 | 说明 |
@@ -370,7 +403,10 @@ python -m dd_clip_miner_llm post-merge --context "...\merge_recut_context.json" 
 | `cut-copy-task` | 计划任务启动器：等 SMB → `batch-run` + 批后处理 |
 | `cut-copy` | 独立录播工作流（逐文件 `run`，非计划任务路径） |
 | `manual-cut` | 从 CSV 重切 |
-| `post-merge` | 从两个已导出歌曲片段反查 ASR 并重新切为一个片段 |
+| `manual-cut-context` | 从 context JSON 手动切片 |
+| `post-merge` | 从两个及以上已导出歌曲片段反查 ASR 并重新切为一个片段 |
+| `refresh-portable` | 刷新 NAS run 目录的便携 miner 包与 bat |
+| `cleanup-source` | 清理 run 内源视频与 `sus/` 目录 |
 | `init-config` | 从 `config/example/main.yaml` 生成主配置（需配合 `xcopy config\example config\local`） |
 | `ffmpeg-info` | GPU / 硬件编码器探测 |
 

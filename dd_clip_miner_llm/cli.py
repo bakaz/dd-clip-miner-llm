@@ -3,7 +3,13 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from .config import DEFAULT_CONFIG, PROFILE_ALL, _load_yaml_with_includes, list_profile_names, load_config
+from .config import (
+    DEFAULT_CONFIG,
+    PROFILE_ALL,
+    _load_yaml_with_includes,
+    list_profile_names,
+    load_config,
+)
 from .ffmpeg import detect_ffmpeg_environment
 
 _CUT_COPY_CONF_FROM_CONFIG = object()
@@ -22,13 +28,7 @@ def resolve_batch_cut_copy_conf(
     config_path: str | Path | None,
     cut_copy_conf_arg: object,
 ) -> str | None:
-    """Resolve cut_copy.conf for batch-run post-processing.
-
-    - ``None``: flag omitted → use config only when ``cut_copy.enabled`` is true
-    - ``_CUT_COPY_CONF_FROM_CONFIG``: ``--cut-copy-conf`` without path → always
-      read ``cut_copy.conf_path`` from *config_path*
-    - otherwise: explicit path from CLI
-    """
+    """Resolve cut_copy.conf for batch-run post-processing."""
     if cut_copy_conf_arg is _CUT_COPY_CONF_FROM_CONFIG:
         return _cut_copy_conf_path_from_config(config_path)
 
@@ -98,7 +98,7 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="?",
         const=_CUT_COPY_CONF_FROM_CONFIG,
         default=None,
-        help="batch-run 完成后执行 cut_copy；省略路径时从 config.yaml 的 cut_copy.conf_path 读取",
+        help="batch-run 完成后执行 cut_copy；省略路径时从 config 的 cut_copy.conf_path 读取",
     )
 
     # manual-cut 命令（兼容旧项目）
@@ -112,11 +112,16 @@ def build_parser() -> argparse.ArgumentParser:
     manual_parser.add_argument("--video-codec", default=None, help="视频编码器")
     manual_parser.add_argument("--audio-bitrate-kbps", type=int, default=None, help="音频码率")
 
-    # post-merge 命令：拖拽两个已导出片段后，从原始输入重新切为一个片段
-    post_merge_parser = subparsers.add_parser("post-merge", help="从两个已导出歌曲片段反查 ASR 并重新切为一个片段")
-    post_merge_parser.add_argument("file1", help="第一个已导出 MP4/MP3")
-    post_merge_parser.add_argument("file2", help="第二个已导出 MP4/MP3")
+    # post-merge 命令：拖拽两个及以上已导出片段后，从原始输入重新切为一个片段
+    post_merge_parser = subparsers.add_parser("post-merge", help="从两个及以上已导出歌曲片段反查 ASR 并重新切为一个片段")
+    post_merge_parser.add_argument("files", nargs="+", help="两个及以上已导出 MP4/MP3")
     post_merge_parser.add_argument("--context", required=True, help="merge_recut_context.json 路径")
+
+    refresh_portable_parser = subparsers.add_parser(
+        "refresh-portable",
+        help="重装并校验 NAS run 的 _tools/miner 便携包，并同步 song 导出目录中的 bat",
+    )
+    refresh_portable_parser.add_argument("run_dir", help="运行输出目录（run root）")
 
     # manual-cut-context 命令：从 context JSON 读取视频路径，手动切片到同目录
     mcc_parser = subparsers.add_parser("manual-cut-context", help="从 context JSON 手动切片到同目录")
@@ -124,6 +129,14 @@ def build_parser() -> argparse.ArgumentParser:
     mcc_parser.add_argument("--start", required=True, help="开始时间 (如 10:30 或 630)")
     mcc_parser.add_argument("--end", required=True, help="结束时间 (如 15:45 或 945)")
     mcc_parser.add_argument("--filename", default=None, help="输出文件名（不含扩展名，留空自动生成）")
+
+    cleanup_parser = subparsers.add_parser(
+        "cleanup-source",
+        help="清理 run 内源视频、concat/concat.mp4 与同级 sus/ 文件夹",
+    )
+    cleanup_parser.add_argument("--context", required=True, help="merge_recut_context.json 路径")
+    cleanup_parser.add_argument("--dry-run", action="store_true", help="只列出将删除的路径，不执行")
+    cleanup_parser.add_argument("--yes", action="store_true", help="跳过交互确认")
 
     # init-config 命令
     init_parser = subparsers.add_parser("init-config", help="生成默认配置文件")
@@ -151,7 +164,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="本次运行不关机（覆盖配置文件设置）",
     )
 
-    # cut-copy-task 命令（计划任务启动器，Python 内完成 SMB 就绪检测）
     task_parser = subparsers.add_parser(
         "cut-copy-task",
         help="等待 SMB 路径就绪后执行 batch-run（Windows 计划任务用）",
@@ -276,12 +288,19 @@ def _has_api_key(config: dict) -> bool:
 
 
 def _load_raw_yaml_config(path: str | Path) -> dict:
-    """Load a YAML config file as a raw dict using the !include-aware loader.
-
-    Unlike load_config(), this does NOT merge DEFAULT_CONFIG or resolve
-    profiles — it returns the raw loaded dict for profile enumeration.
-    """
-    return _load_yaml_with_includes(Path(path))
+    config_path = Path(path)
+    raw_text = config_path.read_text(encoding="utf-8")
+    if "!include" in raw_text:
+        return _load_yaml_with_includes(config_path)
+    try:
+        import yaml
+    except ImportError as exc:
+        raise RuntimeError("PyYAML is required. Install with: pip install PyYAML") from exc
+    with config_path.open("r", encoding="utf-8") as handle:
+        loaded = yaml.safe_load(handle) or {}
+    if not isinstance(loaded, dict):
+        raise ValueError(f"Config file must contain a mapping: {config_path}")
+    return loaded
 
 
 def _resolve_profile_names(
@@ -292,7 +311,8 @@ def _resolve_profile_names(
         return [profile]
     if config_path is None:
         raise ValueError("--profile all requires a YAML config with profiles.")
-    names = list_profile_names(_load_raw_yaml_config(config_path))
+    loaded = _load_raw_yaml_config(config_path)
+    names = list_profile_names(loaded, config_dir=Path(config_path).parent)
     if not names:
         raise ValueError("Config does not define profiles; cannot use --profile all.")
     return names
@@ -452,7 +472,6 @@ def main(argv: list[str] | None = None) -> int:
 
         print("\nDone! Batch run completed.")
 
-        # Cut-copy post-processing
         try:
             cut_copy_conf = resolve_batch_cut_copy_conf(args.config, args.cut_copy_conf)
         except Exception as exc:
@@ -495,13 +514,27 @@ def main(argv: list[str] | None = None) -> int:
         from .post_merge import PostMergeError, post_merge_from_context
 
         try:
-            result = post_merge_from_context(args.context, args.file1, args.file2)
+            result = post_merge_from_context(args.context, *args.files)
         except PostMergeError as exc:
             print(f"Error: {exc}")
             return 1
         print("Post-merge recut complete:")
         print(f"  Output: {result['output_path']}")
         print(f"  Range: {result['start']:.3f}s - {result['end']:.3f}s")
+        print(f"  Files merged: {len(args.files)}")
+        return 0
+
+    if args.command == "refresh-portable":
+        from .portable_bundle import PortableBundleError, refresh_portable_bundle
+
+        try:
+            bundle_root = refresh_portable_bundle(args.run_dir)
+        except (PortableBundleError, FileNotFoundError, OSError) as exc:
+            print(f"Error: {exc}")
+            return 1
+        print("Portable bundle refreshed:")
+        print(f"  Bundle: {bundle_root}")
+        print(f"  Run dir: {args.run_dir}")
         return 0
 
     if args.command == "manual-cut-context":
@@ -515,6 +548,30 @@ def main(argv: list[str] | None = None) -> int:
         print("Manual cut complete:")
         print(f"  Output: {result['output_path']}")
         print(f"  Range: {result['start']} - {result['end']}")
+        return 0
+
+    if args.command == "cleanup-source":
+        from .cleanup_context import CleanupContextError, cleanup_from_context
+
+        try:
+            result = cleanup_from_context(
+                args.context,
+                dry_run=args.dry_run,
+                yes=args.yes,
+            )
+        except CleanupContextError as exc:
+            print(f"Error: {exc}")
+            return 1
+        print("Cleanup complete:" if not result.get("dry_run") else "Dry-run cleanup plan:")
+        print(f"  Run root: {result.get('run_dir')}")
+        for path in result.get("deleted_files", []):
+            print(f"  Deleted file: {path}")
+        for path in result.get("deleted_dirs", []):
+            print(f"  Deleted dir: {path}")
+        for item in result.get("skipped", []):
+            print(f"  Skipped: {item}")
+        for warning in result.get("warnings", []):
+            print(f"  Warning: {warning}")
         return 0
 
     parser.error(f"Unknown command: {args.command}")

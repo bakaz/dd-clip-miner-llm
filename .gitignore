@@ -52,7 +52,9 @@ config/local/*
 config.yaml
 config.yaml.bak.*
 /cut_copy.conf
+!config/example/cut_copy.conf
 /streamer_dictionary.json
+!config/example/streamer_dictionary.json
 # Root-level user script (not in config/local/)
 wol_webhook.py
 
@@ -71,6 +73,9 @@ Thumbs.db
 agent-tools/
 terminals/
 cli.txt
+
+# Local DDTV checkout (third-party; not part of this project)
+DDTV/
 
 # Local ASR benchmark outputs (may contain real transcript text)
 asr_benchmark*.json

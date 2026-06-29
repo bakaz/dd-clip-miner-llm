@@ -11,10 +11,11 @@ logger = logging.getLogger(__name__)
 from ..models import ContentMatch, ContentResult, TranscriptSegment
 from ..ffmpeg import cut_audio, cut_video
 from ..clip_naming import ClipNamingProfile, resolve_export_stem
+from ..portable_bundle import PORTABLE_BAT_FILES
 from ..run_paths import as_run_relative
 from .utils import _safe_filename
 
-_PORTABLE_BAT_FILES = ("merge_mp4.bat", "manual_cut.bat", "_resolve_env.bat")
+_PORTABLE_BAT_FILES = PORTABLE_BAT_FILES
 
 
 def _write_portable_bat_tools(target_dir: Path) -> None:

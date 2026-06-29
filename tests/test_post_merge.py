@@ -163,6 +163,73 @@ def test_post_merge_recuts_two_mp3_files(tmp_path, monkeypatch):
     assert Path(result["audio_path"]).parent == fixture["audio_files"][0].parent
 
 
+def test_post_merge_recuts_three_mp4_files(tmp_path, monkeypatch):
+    from dd_clip_miner_llm import post_merge
+
+    fixture = _write_fixture_run(tmp_path)
+    reports_path = fixture["context"].parent.parent.parent.parent / "04_reports" / "song" / "songs.json"
+    data = json.loads(reports_path.read_text(encoding="utf-8"))
+    third_video = fixture["video_files"][0].parent / "clip3.mp4"
+    third_video.write_bytes(b"video")
+    data.append(
+        {
+            **data[0],
+            "index": 3,
+            "title": "Song C",
+            "start": 80.0,
+            "end": 90.0,
+            "duration": 10.0,
+            "video_path": str(third_video),
+            "audio_path": str(fixture["audio_files"][0].parent / "clip3.mp3"),
+        }
+    )
+    reports_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    matches_path = fixture["context"].parent.parent.parent.parent / "02_asr" / "llm" / "song" / "matches.json"
+    matches = json.loads(matches_path.read_text(encoding="utf-8"))
+    matches.append(
+        {
+            "content_type": "song",
+            "title": "Song C",
+            "artist": "Singer",
+            "segment_indices": [4],
+            "confidence": 0.7,
+            "tags": [],
+            "lyrics_snippet": "",
+        }
+    )
+    matches_path.write_text(json.dumps(matches, indent=2), encoding="utf-8")
+
+    calls = []
+
+    def fake_cut_video(source, target, start, end, **kwargs):
+        calls.append((Path(source), Path(target), start, end, kwargs))
+        Path(target).write_bytes(b"merged video")
+
+    monkeypatch.setattr(post_merge, "cut_video", fake_cut_video)
+
+    result = post_merge.post_merge_from_context(
+        fixture["context"],
+        fixture["video_files"][0],
+        fixture["video_files"][1],
+        third_video,
+    )
+
+    assert Path(result["video_path"]).exists()
+    assert result["start"] == 9.0
+    assert result["end"] == 90.0
+    assert len(calls) == 1
+
+
+def test_post_merge_requires_at_least_two_files(tmp_path):
+    from dd_clip_miner_llm.post_merge import PostMergeError, post_merge_from_context
+
+    fixture = _write_fixture_run(tmp_path)
+
+    with pytest.raises(PostMergeError, match="at least two"):
+        post_merge_from_context(fixture["context"], fixture["video_files"][0])
+
+
 def test_post_merge_rejects_mixed_extensions(tmp_path):
     from dd_clip_miner_llm.post_merge import PostMergeError, post_merge_from_context
 

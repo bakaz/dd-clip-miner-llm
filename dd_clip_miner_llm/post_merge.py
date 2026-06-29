@@ -24,9 +24,11 @@ class PostMergeError(RuntimeError):
 
 def post_merge_from_context(
     context_path: str | Path,
-    file1: str | Path,
-    file2: str | Path,
+    *files: str | Path,
 ) -> dict[str, Any]:
+    if len(files) < 2:
+        raise PostMergeError("post-merge requires at least two dragged files")
+
     context_file = Path(context_path)
     context = _load_json_object(context_file)
     recorded_run_dir = recorded_run_dir_from_context(context)
@@ -35,15 +37,15 @@ def post_merge_from_context(
     if content_type != "song":
         raise PostMergeError(f"post-merge currently supports song clips only, got: {content_type}")
 
-    first_file = _validate_dragged_file(file1)
-    second_file = _validate_dragged_file(file2)
-    if first_file.suffix.lower() not in {".mp4", ".mp3"}:
-        raise PostMergeError(f"Unsupported file type: {first_file}")
-    if second_file.suffix.lower() not in {".mp4", ".mp3"}:
-        raise PostMergeError(f"Unsupported file type: {second_file}")
-    output_suffix = first_file.suffix.lower()
-    if second_file.suffix.lower() != output_suffix:
-        raise PostMergeError("Dragged files must have the same extension (.mp4 with .mp4, or .mp3 with .mp3)")
+    dragged_files = [_validate_dragged_file(path) for path in files]
+    output_suffix = dragged_files[0].suffix.lower()
+    if output_suffix not in {".mp4", ".mp3"}:
+        raise PostMergeError(f"Unsupported file type: {dragged_files[0]}")
+    for dragged_file in dragged_files[1:]:
+        if dragged_file.suffix.lower() not in {".mp4", ".mp3"}:
+            raise PostMergeError(f"Unsupported file type: {dragged_file}")
+        if dragged_file.suffix.lower() != output_suffix:
+            raise PostMergeError("Dragged files must have the same extension (.mp4 with .mp4, or .mp3 with .mp3)")
 
     config = _load_config_snapshot(context)
     transcript_path = _context_path(context, "transcript_path", run_dir=run_dir, recorded_run_dir=recorded_run_dir)
@@ -56,9 +58,8 @@ def post_merge_from_context(
     if not report_results:
         raise PostMergeError(f"No report results found in: {reports_path}")
 
-    first_result, second_result = _find_report_results(
-        first_file,
-        second_file,
+    merge_results = _find_report_results_for_paths(
+        dragged_files,
         report_results,
         run_dir,
     )
@@ -67,22 +68,27 @@ def post_merge_from_context(
         context, run_dir, recorded_run_dir=recorded_run_dir,
     )
     source_by_index = _source_indices_by_result_index(segments, matches, total_duration, config, content_type)
-    first_indices = source_by_index.get(first_result.index)
-    second_indices = source_by_index.get(second_result.index)
-    if not first_indices:
-        raise PostMergeError(f"Could not map report index {first_result.index} back to ASR segments")
-    if not second_indices:
-        raise PostMergeError(f"Could not map report index {second_result.index} back to ASR segments")
+    index_groups: list[list[int]] = []
+    for merge_result in merge_results:
+        indices = source_by_index.get(merge_result.index)
+        if not indices:
+            raise PostMergeError(f"Could not map report index {merge_result.index} back to ASR segments")
+        index_groups.append(indices)
 
-    merged_indices = list(range(min(first_indices[0], second_indices[0]), max(first_indices[-1], second_indices[-1]) + 1))
-    title, artist = _merged_title_artist(first_result, second_result)
+    merged_indices = list(
+        range(
+            min(group[0] for group in index_groups),
+            max(group[-1] for group in index_groups) + 1,
+        )
+    )
+    title, artist = _merged_title_artist_many(merge_results)
     merged_match = ContentMatch(
         content_type="song",
         title=title,
         artist=artist,
         segment_indices=merged_indices,
-        confidence=max(first_result.confidence, second_result.confidence),
-        tags=sorted({*first_result.tags, *second_result.tags}),
+        confidence=max(result.confidence for result in merge_results),
+        tags=sorted({tag for result in merge_results for tag in result.tags}),
         lyrics_snippet="",
     )
     merged_results = build_content_results(
@@ -96,8 +102,8 @@ def post_merge_from_context(
         raise PostMergeError("Merged ASR range was filtered out by current song duration settings")
     merged_result = merged_results[0]
 
-    output_dir = first_file.parent
-    base_stem = safe_path_part(f"{first_file.stem}__merge__{second_file.stem}", fallback="merged_song", max_length=180)
+    output_dir = dragged_files[0].parent
+    base_stem = _merge_output_stem(dragged_files)
 
     output_config = config.get("output", {})
     video_codec = str(output_config.get("video_codec") or "copy")
@@ -274,6 +280,44 @@ def _find_report_result(path: Path, results: list[ContentResult], run_dir: Path)
             if result.index == suffix_index and _result_has_extension(result, path.suffix):
                 return result
     raise PostMergeError(f"Dragged file is not listed in the song report: {path}")
+
+
+def _find_report_results_for_paths(
+    paths: list[Path],
+    results: list[ContentResult],
+    run_dir: Path,
+) -> list[ContentResult]:
+    resolved: list[ContentResult | None] = [None] * len(paths)
+    errors: list[PostMergeError | None] = [None] * len(paths)
+
+    for index, path in enumerate(paths):
+        try:
+            resolved[index] = _find_report_result(path, results, run_dir)
+        except PostMergeError as exc:
+            errors[index] = exc
+
+    changed = True
+    while changed:
+        changed = False
+        known = [item for item in resolved if item is not None]
+        used_indexes = {item.index for item in known}
+        for index, path in enumerate(paths):
+            if resolved[index] is not None:
+                continue
+            for companion in known:
+                candidate = _infer_unsuffixed_companion(path, companion, results)
+                if candidate is not None and candidate.index not in used_indexes:
+                    resolved[index] = candidate
+                    used_indexes.add(candidate.index)
+                    changed = True
+                    break
+
+    if any(item is None for item in resolved):
+        first_missing = next(index for index, item in enumerate(resolved) if item is None)
+        raise errors[first_missing] or PostMergeError(
+            f"Dragged file is not listed in the song report: {paths[first_missing]}"
+        )
+    return [resolved[index] for index in range(len(paths))]
 
 
 def _find_report_results(
@@ -468,16 +512,31 @@ def _source_indices_by_result_index(
     }
 
 
-def _merged_title_artist(first: ContentResult, second: ContentResult) -> tuple[str, str]:
-    if first.title == second.title:
-        title = first.title
+def _merge_output_stem(paths: list[Path]) -> str:
+    return safe_path_part(
+        "__merge__".join(path.stem for path in paths),
+        fallback="merged_song",
+        max_length=180,
+    )
+
+
+def _merged_title_artist_many(results: list[ContentResult]) -> tuple[str, str]:
+    titles: list[str] = []
+    for result in results:
+        if result.title and result.title not in titles:
+            titles.append(result.title)
+    title = titles[0] if len(titles) == 1 else "+".join(titles)
+
+    artists = [result.artist for result in results if result.artist]
+    if artists and all(artist == artists[0] for artist in artists):
+        artist = artists[0]
     else:
-        title = f"{first.title}+{second.title}"
-    if first.artist and first.artist == second.artist:
-        artist = first.artist
-    else:
-        artist = first.artist or second.artist
+        artist = artists[0] if artists else ""
     return title, artist
+
+
+def _merged_title_artist(first: ContentResult, second: ContentResult) -> tuple[str, str]:
+    return _merged_title_artist_many([first, second])
 
 
 def _force_single_song_config(config: dict[str, Any], total_duration: float) -> dict[str, Any]:

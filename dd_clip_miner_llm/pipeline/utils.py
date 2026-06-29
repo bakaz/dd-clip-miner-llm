@@ -139,6 +139,28 @@ def _is_summary_only(recognizer: Any, config: dict[str, Any]) -> bool:
     return bool(type_config.get("summary_only", default_config.get("summary_only", False)))
 
 
+def resolve_total_duration(
+    input_path: Path,
+    source_wav: Path,
+    segments: list,
+) -> float:
+    """Resolve media duration when container metadata under-reports (e.g. B站 LiveHime FLV)."""
+    from ..ffmpeg import get_duration
+
+    total_duration = get_duration(input_path)
+    reported = total_duration
+    if segments:
+        total_duration = max(total_duration, float(segments[-1].end))
+    if source_wav.exists():
+        total_duration = max(total_duration, get_duration(source_wav))
+    if total_duration > reported + 1.0:
+        print(
+            f"[info] total_duration corrected: {reported:.1f}s -> {total_duration:.1f}s",
+            flush=True,
+        )
+    return total_duration
+
+
 def _get_content_types(config: dict[str, Any]) -> list[str]:
     """获取要处理的内容类型列表"""
     from ..recognizers import list_recognizers

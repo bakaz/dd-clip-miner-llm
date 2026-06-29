@@ -29,7 +29,7 @@ from .steps import (
     _run_recognition_loop,
     _setup_pipeline_dirs,
 )
-from .utils import _check_previous_run, _get_content_types
+from .utils import _check_previous_run, _get_content_types, resolve_total_duration
 
 
 def run_pipeline(
@@ -101,8 +101,8 @@ def run_pipeline(
         print("[info] 检测到已有的音频/ASR 产物，将尝试复用（详细匹配由 _run_asr_step 负责）...")
 
     source_wav = _extract_audio_step(input_path, audio_dir, config, out, reuse_audio=reuse_audio)
-    total_duration = get_duration(input_path)
     segments = _run_asr_step(source_wav, asr_dir, config, out, input_path, reuse_asr=reuse_asr)
+    total_duration = resolve_total_duration(input_path, source_wav, segments)
 
     asr_inference_mode = get_asr_inference_mode(config.get("asr", {}))
     config_fingerprint = _config_fingerprint(config)

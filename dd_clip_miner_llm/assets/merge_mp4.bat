@@ -21,55 +21,55 @@ if not exist "%CONTEXT%" (
     exit /b 1
 )
 
-if "%~2"=="" (
+if "%~1"=="" (
     echo.
-    echo Usage: Drag two exported MP4 or MP3 song clips onto this script.
-    echo.
-    pause
-    exit /b 1
-)
-
-if not "%~3"=="" (
-    echo.
-    echo ERROR: Please drag exactly two files.
+    echo Usage: Drag two or more exported MP4 or MP3 song clips onto this script.
     echo.
     pause
     exit /b 1
 )
 
-set "EXT1=%~x1"
-set "EXT2=%~x2"
+set "FILE_COUNT=0"
+set "EXPECTED_EXT="
+set "MERGE_ARGS="
 
-if /i not "%EXT1%"==".mp4" if /i not "%EXT1%"==".mp3" (
+:collect_files
+if "%~1"=="" goto files_collected
+set /a FILE_COUNT+=1
+set "CURRENT_EXT=%~x1"
+if /i not "%CURRENT_EXT%"==".mp4" if /i not "%CURRENT_EXT%"==".mp3" (
     echo.
-    echo ERROR: Unsupported first file type: %EXT1%
+    echo ERROR: Unsupported file type: %CURRENT_EXT%
     echo Only .mp4 and .mp3 are supported.
     echo.
     pause
     exit /b 1
 )
-
-if /i not "%EXT2%"==".mp4" if /i not "%EXT2%"==".mp3" (
+if not defined EXPECTED_EXT (
+    set "EXPECTED_EXT=%CURRENT_EXT%"
+) else if /i not "%CURRENT_EXT%"=="%EXPECTED_EXT%" (
     echo.
-    echo ERROR: Unsupported second file type: %EXT2%
-    echo Only .mp4 and .mp3 are supported.
-    echo.
-    pause
-    exit /b 1
-)
-
-if /i not "%EXT1%"=="%EXT2%" (
-    echo.
-    echo ERROR: Please drag two files with the same extension.
+    echo ERROR: Please drag files with the same extension.
     echo Use MP4+MP4 to output MP4, or MP3+MP3 to output MP3.
+    echo.
+    pause
+    exit /b 1
+)
+set "MERGE_ARGS=!MERGE_ARGS! "%~1""
+echo Input !FILE_COUNT!: %~1
+shift
+goto collect_files
+
+:files_collected
+if !FILE_COUNT! LSS 2 (
+    echo.
+    echo ERROR: Please drag at least two files.
     echo.
     pause
     exit /b 1
 )
 
 echo.
-echo Input 1: %~1
-echo Input 2: %~2
 echo Context: %CONTEXT%
 echo RunRoot: %RUN_ROOT%
 echo Python: %PYTHON_CMD%
@@ -78,7 +78,7 @@ echo WorkDir: %WORK_DIR%
 echo.
 
 pushd "%WORK_DIR%"
-%PYTHON_CMD% -m dd_clip_miner_llm post-merge --context "%CONTEXT%" "%~1" "%~2"
+%PYTHON_CMD% -m dd_clip_miner_llm post-merge --context "%CONTEXT%" !MERGE_ARGS!
 set "RESULT=!ERRORLEVEL!"
 popd
 
