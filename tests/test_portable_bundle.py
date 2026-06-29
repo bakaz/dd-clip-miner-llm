@@ -34,9 +34,11 @@ _BAT_CLI_COMMANDS = (
 
 def _import_bundle_modules(bundle_root: Path) -> str | None:
     result = subprocess.run(
-        [sys.executable, "-c", _bundle_validation_script(bundle_root)],
+        [sys.executable, "-c", _bundle_validation_script()],
+        cwd=bundle_root,
         env={
             "PYTHONNOUSERSITE": "1",
+            "PYTHONPATH": str(bundle_root),
             "SystemRoot": __import__("os").environ.get("SystemRoot", r"C:\Windows"),
             "PATH": __import__("os").environ.get("PATH", ""),
         },

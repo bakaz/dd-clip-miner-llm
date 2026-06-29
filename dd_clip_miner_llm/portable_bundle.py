@@ -88,26 +88,11 @@ def refresh_portable_bundle(run_root: str | Path) -> Path:
     return install_portable_bundle(run_root)
 
 
-def _bundle_validation_script(bundle_root: Path) -> str:
-    root_text = str(bundle_root.resolve()).replace("\\", "\\\\")
+def _bundle_validation_script() -> str:
     imports = "\n".join(
         f'importlib.import_module("{name}")' for name in _BAT_COMMAND_MODULES
     )
-    return (
-        "import importlib, os, sys, sysconfig\n"
-        f"root = {root_text!r}\n"
-        "sys.path = [root]\n"
-        "for key in ('stdlib', 'platstdlib'):\n"
-        "    p = sysconfig.get_path(key)\n"
-        "    if p and os.path.isdir(p) and p not in sys.path:\n"
-        "        sys.path.append(p)\n"
-        "if os.name == 'nt':\n"
-        "    for sub in ('Lib', 'DLLs'):\n"
-        "        p = os.path.join(sys.prefix, sub)\n"
-        "        if os.path.isdir(p) and p not in sys.path:\n"
-        "            sys.path.append(p)\n"
-        f"{imports}\n"
-    )
+    return f"import importlib\n{imports}\n"
 
 
 def validate_portable_bundle(bundle_root: str | Path) -> None:
@@ -125,10 +110,11 @@ def validate_portable_bundle(bundle_root: str | Path) -> None:
             + ", ".join(missing)
         )
     result = subprocess.run(
-        [sys.executable, "-I", "-c", _bundle_validation_script(root)],
+        [sys.executable, "-c", _bundle_validation_script()],
+        cwd=root,
         env={
             "PYTHONNOUSERSITE": "1",
-            "PYTHONPATH": "",
+            "PYTHONPATH": str(root),
             "SystemRoot": __import__("os").environ.get("SystemRoot", r"C:\Windows"),
             "PATH": __import__("os").environ.get("PATH", ""),
         },
