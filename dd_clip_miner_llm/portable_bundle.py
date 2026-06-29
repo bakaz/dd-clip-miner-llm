@@ -94,15 +94,18 @@ def _bundle_validation_script(bundle_root: Path) -> str:
         f'importlib.import_module("{name}")' for name in _BAT_COMMAND_MODULES
     )
     return (
-        "import importlib, os, sys\n"
+        "import importlib, os, sys, sysconfig\n"
         f"root = {root_text!r}\n"
-        "stdlib = os.path.join(sys.prefix, 'Lib')\n"
-        "dlls = os.path.join(sys.prefix, 'DLLs')\n"
         "sys.path = [root]\n"
-        "if os.path.isdir(stdlib):\n"
-        "    sys.path.append(stdlib)\n"
-        "if os.path.isdir(dlls):\n"
-        "    sys.path.append(dlls)\n"
+        "for key in ('stdlib', 'platstdlib'):\n"
+        "    p = sysconfig.get_path(key)\n"
+        "    if p and os.path.isdir(p) and p not in sys.path:\n"
+        "        sys.path.append(p)\n"
+        "if os.name == 'nt':\n"
+        "    for sub in ('Lib', 'DLLs'):\n"
+        "        p = os.path.join(sys.prefix, sub)\n"
+        "        if os.path.isdir(p) and p not in sys.path:\n"
+        "            sys.path.append(p)\n"
         f"{imports}\n"
     )
 
