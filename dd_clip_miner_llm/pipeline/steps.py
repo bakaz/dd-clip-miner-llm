@@ -8,8 +8,8 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 from ..asr import Transcriber
-from ..config import get_asr_fingerprint
-from ..ffmpeg import extract_audio, get_duration
+from ..config import deep_merge, get_asr_fingerprint
+from ..ffmpeg import extract_audio
 from ..models import ContentMatch, ContentResult, TranscriptSegment
 from ..paths import safe_path_part
 from ..report import write_match_context_reports, write_reports
@@ -17,6 +17,7 @@ from ..merger import build_content_results
 from ..recognizers import get_recognizer
 from ..profile_state import _write_valid_debug_manifest
 from .export import _export_results, _export_sus_clips, _write_structured_summary
+from .utils import _llm_batch_debug_complete, _llm_progress_complete
 from .utils import (
     _check_previous_run,
     _get_content_types,
@@ -203,6 +204,8 @@ def _run_recognition_loop(
     prev_progress: dict[str, Any] | None,
     profile_enabled: bool,
     profile_reusable: bool,
+    *,
+    total_duration_hard_bounds: bool = True,
 ) -> dict[str, list[ContentResult]]:
     """Step 3: Run LLM recognition for each content type."""
     all_results: dict[str, list[ContentResult]] = {}
@@ -213,27 +216,32 @@ def _run_recognition_loop(
             print(f"  [warn] 未找到识别器: {content_type}")
             continue
 
-        type_config = config.get(content_type, {})
+        type_config = _recognizer_type_config(recognizer, config)
         if not type_config.get("enabled", True):
             print(f"  {content_type}: 已禁用，跳过")
             continue
 
+        run_config = _config_for_recognizer_run(config, type_config)
         print(f"\n  === {content_type} 识别 ({ct_idx}/{len(content_types)}) ===")
         llm_dir = llm_base_dir / content_type
         llm_dir.mkdir(parents=True, exist_ok=True)
 
-        if _is_summary_only(recognizer, config):
+        if _is_summary_only(recognizer, run_config):
             reuse_summary = False
             summary = None
             if prev_progress and (not profile_enabled or profile_reusable):
-                summary = _load_previous_summary(llm_dir)
-                reuse_summary = summary is not None
+                summary = _load_previous_summary(llm_dir, content_type)
+                reuse_summary = (
+                    summary is not None
+                    and _llm_progress_complete(prev_progress, content_type)
+                    and _llm_batch_debug_complete(llm_dir)
+                )
             if reuse_summary:
                 print("  LLM 总结: 复用已有结果")
             else:
                 from ..llm import identify_structured_content
-                summary = identify_structured_content(segments, config, recognizer, debug_dir=llm_dir)
-            _write_structured_summary(summary or {}, recognizer, llm_dir, reports_dir, content_type, config, naming_profile)
+                summary = identify_structured_content(segments, run_config, recognizer, debug_dir=llm_dir)
+            _write_structured_summary(summary or {}, recognizer, llm_dir, reports_dir, content_type, run_config, naming_profile)
             _write_valid_debug_manifest(llm_dir)
             print(f"  Wrote {content_type} summary")
             all_results[content_type] = []
@@ -241,7 +249,12 @@ def _run_recognition_loop(
 
         reuse_llm = False
         if prev_progress and (not profile_enabled or profile_reusable):
-            reuse_llm = llm_dir.exists() and (llm_dir / "matches.json").exists()
+            reuse_llm = (
+                llm_dir.exists()
+                and (llm_dir / "matches.json").exists()
+                and _llm_progress_complete(prev_progress, content_type)
+                and _llm_batch_debug_complete(llm_dir)
+            )
         if reuse_llm:
             print(f"  LLM 识别: 复用已有结果")
             matches = _load_previous_matches(llm_dir, content_type)
@@ -250,37 +263,37 @@ def _run_recognition_loop(
 
         if not reuse_llm:
             from ..config import is_risk_routed_kv
-            if content_type == "song" and is_risk_routed_kv(config):
+            if content_type == "song" and is_risk_routed_kv(run_config):
                 from ..song_postprocess.song_kv import run_risk_routed_kv_pipeline
                 matches = run_risk_routed_kv_pipeline(
-                    segments, config, recognizer, llm_dir,
+                    segments, run_config, recognizer, llm_dir,
                 )
             else:
                 from ..llm import identify_content
                 matches = identify_content(
-                    segments, config, recognizer,
+                    segments, run_config, recognizer,
                     debug_dir=llm_dir, debug_phase="main",
                 )
-                matches = recognizer.post_process(segments, config, matches, llm_dir)
+                matches = recognizer.post_process(segments, run_config, matches, llm_dir)
             (llm_dir / "matches.json").write_text(
                 json.dumps([m.to_dict() for m in matches], ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
             write_match_context_reports(
                 matches, segments, llm_dir,
-                context_segments=int(config["output"].get("match_context_segments", 10)),
+                context_segments=int(run_config["output"].get("match_context_segments", 10)),
                 content_type=content_type,
             )
 
         _write_valid_debug_manifest(llm_dir)
         print(f"  Found {len(matches)} {content_type} matches")
 
-        results = build_content_results(segments, matches, total_duration, config, content_type)
+        results = build_content_results(segments, matches, total_duration, run_config, content_type)
         _export_results(
             results,
             input_path,
             clips_dir,
-            config,
+            run_config,
             content_type,
             naming_profile,
             run_dir=run_dir,
@@ -289,6 +302,7 @@ def _run_recognition_loop(
             transcript_path=asr_dir / "transcript.json",
             manifest_path=manifest_path,
             total_duration=total_duration,
+            total_duration_hard_bounds=total_duration_hard_bounds,
         )
 
         # 导出 sus 文件夹（被合并的未知歌曲原始片段）
@@ -310,3 +324,21 @@ def _run_recognition_loop(
         all_results[content_type] = results
 
     return all_results
+
+
+def _recognizer_type_config(recognizer: Any, config: dict[str, Any]) -> dict[str, Any]:
+    """Resolve the type-specific configuration for a recognizer."""
+    get_type_config = getattr(recognizer, "get_type_config", None)
+    if callable(get_type_config):
+        type_config = get_type_config(config)
+    else:
+        type_config = config.get(recognizer.name, {})
+    return type_config if isinstance(type_config, dict) else {}
+
+
+def _config_for_recognizer_run(config: dict[str, Any], type_config: dict[str, Any]) -> dict[str, Any]:
+    """Produce a per-recognizer run config by merging LLM overrides."""
+    llm_override = type_config.get("llm")
+    if isinstance(llm_override, dict) and llm_override:
+        return deep_merge(config, {"llm": llm_override})
+    return config

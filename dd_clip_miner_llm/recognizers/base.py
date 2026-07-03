@@ -58,6 +58,11 @@ class BaseRecognizer(ABC):
             "min_confidence": 0.6,
             "merge_gap_seconds": 10.0,
         }
+
+    def get_type_config(self, config: dict[str, Any]) -> dict[str, Any]:
+        """Return this recognizer's effective configuration."""
+        type_config = config.get(self.name, {})
+        return type_config if isinstance(type_config, dict) else {}
     
     @abstractmethod
     def build_prompt(
@@ -192,12 +197,12 @@ class BaseRecognizer(ABC):
 
     def get_merge_gap(self, config: dict[str, Any]) -> float:
         """获取合并间隔"""
-        type_config = config.get(self.name, {})
+        type_config = self.get_type_config(config)
         return float(type_config.get("merge_gap_seconds", self.default_config.get("merge_gap_seconds", 10.0)))
     
     def get_min_duration(self, config: dict[str, Any]) -> float:
         """获取最小持续时间"""
-        type_config = config.get(self.name, {})
+        type_config = self.get_type_config(config)
         return float(type_config.get("min_duration", self.default_config.get("min_duration", 10.0)))
     
     def _format_transcript(
@@ -242,7 +247,7 @@ class BaseRecognizer(ABC):
         Returns:
             配置值
         """
-        type_config = config.get(self.name, {})
+        type_config = self.get_type_config(config)
         if key in type_config:
             return type_config[key]
         if default is None:

@@ -108,8 +108,19 @@ def _export_results(
     transcript_path: Path | None = None,
     manifest_path: Path | None = None,
     total_duration: float | None = None,
+    total_duration_hard_bounds: bool = True,
 ) -> None:
-    """导出音视频片段（并行执行）"""
+    """导出音视频片段（并行执行）
+
+    Args:
+        total_duration: Best-estimate media duration, or None.
+        total_duration_hard_bounds: When True (default), results whose
+            ``start >= total_duration`` are skipped entirely and results
+            whose ``end > total_duration`` have their end clamped.  When
+            False, exceeding results produce a warning only and are still
+            exported with their original start/end values (ffmpeg will
+            attempt the cut and may produce a truncated or broken file).
+    """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     audio_ext = str(config["output"].get("audio_extension", "mp3")).lstrip(".")
@@ -183,14 +194,50 @@ def _export_results(
 
     def _export_one(result: ContentResult, stem: str, kind: str) -> None:
         try:
+            start = result.start
+            end = result.end
+
+            # Bounds check against total_duration (when known).
+            if total_duration is not None:
+                if start >= total_duration:
+                    msg = (
+                        f"{kind} clip start {start:.1f}s is at/beyond "
+                        f"total_duration {total_duration:.1f}s"
+                    )
+                    if total_duration_hard_bounds:
+                        msg += " — skipping"
+                        print(f"  [warn] {msg}")
+                        result.errors.append(msg)
+                        return
+                    else:
+                        msg += " — soft bounds, attempting cut anyway"
+                        print(f"  [warn] {msg}")
+                        result.errors.append(msg)
+                elif end > total_duration:
+                    msg = (
+                        f"{kind} clip end {end:.1f}s exceeds "
+                        f"total_duration {total_duration:.1f}s"
+                    )
+                    if total_duration_hard_bounds:
+                        min_clamp = total_duration - 0.001  # avoid ffmpeg rounding errors
+                        clamped_end = max(start, min_clamp)
+                        msg += f" — clamped to {clamped_end:.1f}s"
+                        print(f"  [warn] {msg}")
+                        result.errors.append(msg)
+                        end = clamped_end
+                    else:
+                        msg += " — soft bounds, keeping original end"
+                        print(f"  [warn] {msg}")
+                        result.errors.append(msg)
+
             if kind == "audio":
                 target = audio_dir_out / f"{stem}.{audio_ext}"
                 copy_audio = audio_ext.lower() in {"aac", "m4a"}
-                cut_audio(input_path, target, result.start, result.end, copy_codec=copy_audio, bitrate_kbps=audio_bitrate_kbps)
+                cut_audio(input_path, target, start, end, copy_codec=copy_audio, bitrate_kbps=audio_bitrate_kbps)
                 result.audio_path = target
             elif kind == "video":
                 target = video_dir_out / f"{stem}.{video_ext}"
-                cut_video(input_path, target, result.start, result.end, video_codec=video_codec)
+                cut_video(input_path, target, start, end, video_codec=video_codec)
                 result.video_path = target
         except Exception as exc:
             result.errors.append(f"{kind} export failed: {exc}")

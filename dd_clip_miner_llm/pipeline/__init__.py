@@ -14,7 +14,7 @@ from typing import Any
 
 from ..clip_naming import resolve_clip_naming_profile
 from ..config import get_asr_inference_mode
-from ..ffmpeg import cut_audio, cut_video, get_duration
+from ..ffmpeg import cut_audio, cut_video
 from ..paths import stage_input_for_ffmpeg
 from ..profile_state import (
     _config_fingerprint,
@@ -29,7 +29,11 @@ from .steps import (
     _run_recognition_loop,
     _setup_pipeline_dirs,
 )
-from .utils import _check_previous_run, _get_content_types, resolve_total_duration
+from .utils import (
+    _check_previous_run,
+    _get_content_types,
+    resolve_total_duration_info,
+)
 
 
 def run_pipeline(
@@ -102,7 +106,8 @@ def run_pipeline(
 
     source_wav = _extract_audio_step(input_path, audio_dir, config, out, reuse_audio=reuse_audio)
     segments = _run_asr_step(source_wav, asr_dir, config, out, input_path, reuse_asr=reuse_asr)
-    total_duration = resolve_total_duration(input_path, source_wav, segments)
+    dur_info = resolve_total_duration_info(input_path, source_wav, segments)
+    total_duration = dur_info.resolved_duration
 
     asr_inference_mode = get_asr_inference_mode(config.get("asr", {}))
     config_fingerprint = _config_fingerprint(config)
@@ -133,6 +138,7 @@ def run_pipeline(
         segments, config, content_types, llm_base_dir, clips_dir, reports_dir,
         out, asr_dir, manifest_path, input_path, total_duration, naming_profile, prev_progress,
         profile_enabled, profile_reusable,
+        total_duration_hard_bounds=dur_info.hard_bounds,
     )
 
     _write_manifest_and_summary(

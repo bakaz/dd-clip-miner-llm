@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,96 @@ from ..paths import safe_path_part
 
 def _safe_filename(value: str, fallback: str = "untitled") -> str:
     return safe_path_part(value, fallback=fallback)
+
+
+@dataclass
+class DurationInfo:
+    """Resolved duration with provenance metadata for export bounds decisions.
+
+    Attributes:
+        container_duration: Duration reported by container (ffprobe), or None.
+        audio_duration: Duration of the extracted source.wav, or None.
+        asr_last_end: End time of the last ASR segment, or None.
+        resolved_duration: Best-estimate duration (max of all available).
+        trust_level: ``"high"`` when audio or ASR corroboration exists,
+            ``"low"`` when only container metadata is available.
+        hard_bounds: ``True`` when export should skip/clamp out-of-bounds
+            results (trustworthy duration), ``False`` to warn-only.
+    """
+    container_duration: float | None
+    audio_duration: float | None
+    asr_last_end: float | None
+    resolved_duration: float
+    trust_level: str  # "high" | "low"
+    hard_bounds: bool
+
+
+def _llm_batch_debug_complete(llm_dir: Path) -> bool:
+    """Check that no LLM batch debug file carries an incomplete marker.
+
+    Scans *llm_dir* for ``llm_batch_*.json`` files.  If any contains:
+    - ``scan_incomplete`` true
+    - ``finish_reason`` equal to ``"length"``
+    - a non-empty ``error``
+
+    returns ``False`` (incomplete results exist — should not reuse).
+
+    Returns ``True`` when the directory does not exist, no batch debug
+    files are found, or all files pass the check.
+    """
+    if not llm_dir.is_dir():
+        return True
+    try:
+        for entry in llm_dir.iterdir():
+            if not (entry.name.startswith("llm_batch_") and entry.suffix == ".json"):
+                continue
+            try:
+                payload = json.loads(entry.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            if payload.get("scan_incomplete"):
+                return False
+            if payload.get("finish_reason") == "length":
+                return False
+            if payload.get("error"):
+                return False
+    except OSError:
+        pass
+    return True
+
+
+def _llm_progress_complete(progress: dict[str, Any] | None, content_type: str | None = None) -> bool:
+    """Return False when progress.json carries an incomplete LLM marker.
+
+    This is a pipeline-level guard for resume/skip decisions.  Debug-batch
+    reuse is already protected by ``_llm_batch_debug_complete``; this prevents a
+    looser ``last_completed_step in ('llm', 'done')`` style check from treating
+    a previous incomplete LLM scan as fully reusable.
+    """
+    if not isinstance(progress, dict):
+        return True
+
+    def _payload_complete(payload: Any) -> bool:
+        if not isinstance(payload, dict):
+            return True
+        if payload.get("scan_incomplete"):
+            return False
+        if payload.get("finish_reason") == "length":
+            return False
+        if payload.get("error"):
+            return False
+        return True
+
+    candidates: list[Any] = [progress, progress.get("llm")]
+    if content_type:
+        candidates.append(progress.get(content_type))
+        llm_data = progress.get("llm")
+        if isinstance(llm_data, dict):
+            candidates.append(llm_data.get(content_type))
+
+    return all(_payload_complete(candidate) for candidate in candidates)
 
 
 def _check_previous_run(out: Path, input_path: Path) -> dict[str, Any] | None:
@@ -116,15 +207,22 @@ def _load_previous_matches(llm_dir: Path, content_type: str) -> list | None:
         return None
 
 
-def _load_previous_summary(llm_dir: Path) -> dict[str, Any] | None:
-    summary_path = llm_dir / "summary.json"
-    if not summary_path.exists():
+def _load_previous_summary(llm_dir: Path, content_type: str = "daily_summary") -> dict[str, Any] | None:
+    stem = "summary" if content_type == "daily_summary" else content_type
+    candidates = [llm_dir / f"{stem}.json"]
+    if stem != "summary":
+        candidates.append(llm_dir / "summary.json")
+    summary_path = next((path for path in candidates if path.exists()), None)
+    if summary_path is None:
         return None
     try:
         summary = json.loads(summary_path.read_text(encoding="utf-8"))
         if not isinstance(summary, dict) or not summary:
             return None
         if summary.get("error"):
+            return None
+        summary_content_type = summary.get("content_type")
+        if summary_content_type is not None and summary_content_type != content_type:
             return None
         if not isinstance(summary.get("level_1"), list) and not isinstance(summary.get("overall"), dict):
             return None
@@ -134,9 +232,112 @@ def _load_previous_summary(llm_dir: Path) -> dict[str, Any] | None:
 
 
 def _is_summary_only(recognizer: Any, config: dict[str, Any]) -> bool:
-    type_config = config.get(recognizer.name, {})
-    default_config = getattr(recognizer, "default_config", {})
+    get_type_config = getattr(recognizer, "get_type_config", None)
+    raw_cfg = get_type_config(config) if callable(get_type_config) else config.get(recognizer.name, {})
+    type_config = raw_cfg if isinstance(raw_cfg, dict) else {}
+    default_config: dict[str, Any] = getattr(recognizer, "default_config", {})
     return bool(type_config.get("summary_only", default_config.get("summary_only", False)))
+
+
+def resolve_total_duration_info(
+    input_path: Path,
+    source_wav: Path,
+    segments: list,
+) -> DurationInfo:
+    """Resolve media duration and return provenance metadata.
+
+    Returns a :class:`DurationInfo` with the resolved float (max of container,
+    audio, and ASR last-end) as well as trust indicators for export bounds.
+
+    Trust logic (``hard_bounds``):
+    * ``True`` (``trust_level="high"``) when:
+
+      - Container and audio both exist and agree within tolerance (|diff| ≤
+        max(2s, 0.5% of larger value)), OR
+      - Only audio exists (no container metadata available), OR
+      - Only ASR segments exist (no container, no audio).
+      In all these cases the resolved duration is considered reliable for
+      video/audio export bounds.
+
+    * ``False`` (``trust_level="low"``) when:
+
+      - Container and audio both exist but disagree beyond tolerance — one of
+        them is unreliable for video clipping bounds, so we warn only and let
+        ffmpeg attempt the cut rather than silently discarding results.
+      - Only bare container metadata is available (no audio, no ASR).
+    """
+    from ..ffmpeg import get_duration
+
+    container_duration: float | None = None
+    audio_duration: float | None = None
+    asr_last_end: float | None = None
+
+    try:
+        container_duration = get_duration(input_path)
+    except Exception:
+        pass
+
+    if source_wav.exists():
+        try:
+            audio_duration = get_duration(source_wav)
+        except Exception:
+            pass
+
+    asr_last_end = float(segments[-1].end) if segments else None
+
+    # Resolve: use the maximum of all available sources
+    candidates: list[float] = []
+    if container_duration is not None:
+        candidates.append(container_duration)
+    if audio_duration is not None:
+        candidates.append(audio_duration)
+    if asr_last_end is not None:
+        candidates.append(asr_last_end)
+    resolved_duration = max(candidates) if candidates else 0.0
+
+    # ── Trust determination ──────────────────────────────────────────
+    has_audio = audio_duration is not None
+    has_container = container_duration is not None
+    has_asr = asr_last_end is not None
+
+    # When both container and audio exist, check whether they agree.
+    container_audio_agree = True
+    if has_container and has_audio:
+        larger = max(container_duration, audio_duration)
+        tolerance = max(2.0, larger * 0.005)
+        container_audio_agree = (
+            abs(container_duration - audio_duration) <= tolerance
+        )
+
+    if has_container and has_audio and not container_audio_agree:
+        # Container and audio diverge significantly — can't trust the max
+        # for video clip bounds. Warn but keep resolved_duration.
+        hard_bounds = False
+        trust_level = "low"
+    elif has_audio or has_asr:
+        hard_bounds = True
+        trust_level = "high"
+    else:
+        # Only bare container metadata — no corroboration.
+        hard_bounds = False
+        trust_level = "low"
+
+    # Print correction info when container under-reports
+    if container_duration is not None and resolved_duration > container_duration + 1.0:
+        print(
+            f"[info] total_duration corrected: {container_duration:.1f}s -> "
+            f"{resolved_duration:.1f}s  (trust={trust_level})",
+            flush=True,
+        )
+
+    return DurationInfo(
+        container_duration=container_duration,
+        audio_duration=audio_duration,
+        asr_last_end=asr_last_end,
+        resolved_duration=resolved_duration,
+        trust_level=trust_level,
+        hard_bounds=hard_bounds,
+    )
 
 
 def resolve_total_duration(
@@ -144,21 +345,11 @@ def resolve_total_duration(
     source_wav: Path,
     segments: list,
 ) -> float:
-    """Resolve media duration when container metadata under-reports (e.g. B站 LiveHime FLV)."""
-    from ..ffmpeg import get_duration
+    """Resolve media duration (legacy interface, returns bare float).
 
-    total_duration = get_duration(input_path)
-    reported = total_duration
-    if segments:
-        total_duration = max(total_duration, float(segments[-1].end))
-    if source_wav.exists():
-        total_duration = max(total_duration, get_duration(source_wav))
-    if total_duration > reported + 1.0:
-        print(
-            f"[info] total_duration corrected: {reported:.1f}s -> {total_duration:.1f}s",
-            flush=True,
-        )
-    return total_duration
+    Delegates to :func:`resolve_total_duration_info` for implementation.
+    """
+    return resolve_total_duration_info(input_path, source_wav, segments).resolved_duration
 
 
 def _get_content_types(config: dict[str, Any]) -> list[str]:
